@@ -615,13 +615,14 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 
 // availableAuthsForSelector reports the candidates handed to priority-scoped consumers such as
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
-// unless session affinity or an across-priorities scheduler is active, in which case the selector
-// or scheduler additionally receives lower priority tiers.
+// unless session affinity, a manual preference, or an across-priorities scheduler is active,
+// in which case the selector or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
+	manualPreference := supportsPreferredAccounts(selector) && len(m.preferredAccounts()) > 0
 
-	if !sessionAffinity && !schedulerAcross {
+	if !sessionAffinity && !schedulerAcross && !manualPreference {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 		if err != nil {
 			return nil, nil, err
@@ -644,7 +645,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 		priorityAuths = highestPriorityAuths(allAuths)
 	}
 
-	if sessionAffinity {
+	if sessionAffinity || manualPreference {
 		selectorAuths = allAuths
 	} else {
 		selectorAuths = highestPriorityAuths(allAuths)
@@ -1637,7 +1638,7 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 }
 
 func (m *Manager) useSchedulerFastPath() bool {
-	if m == nil || m.scheduler == nil {
+	if m == nil || m.scheduler == nil || len(m.preferredAccounts()) > 0 {
 		return false
 	}
 	return isBuiltInSelector(m.Selector())
@@ -1789,7 +1790,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, errPick
 	}
 	if !handled {
-		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx := selectorContextForAvailableAuths(m.withPreferredAccounts(ctx), selector, model)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -2123,7 +2124,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", errPick
 	}
 	if !handled {
-		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx := selectorContextForAvailableAuths(m.withPreferredAccounts(ctx), selector, model)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {

@@ -521,7 +521,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
-		publishSelectedAuthMetadata(opts.Metadata, auth)
+		m.publishSelectedAuthMetadata(opts.Metadata, auth)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -733,7 +733,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
-		publishSelectedAuthMetadata(opts.Metadata, auth)
+		m.publishSelectedAuthMetadata(opts.Metadata, auth)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1040,7 +1040,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errRuntimeAuth
 			}
 		}
-		publishSelectedAuthMetadata(opts.Metadata, auth)
+		m.publishSelectedAuthMetadata(opts.Metadata, auth)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx

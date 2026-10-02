@@ -354,6 +354,10 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "earliest-reset".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	// PreferredAccounts maps codex/claude to a credential auth_index for new bindings.
+	// Existing session bindings take precedence; unavailable preferences fall back to Strategy.
+	PreferredAccounts map[string]string `yaml:"preferred-accounts,omitempty" json:"preferred-accounts,omitempty"`
+
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,

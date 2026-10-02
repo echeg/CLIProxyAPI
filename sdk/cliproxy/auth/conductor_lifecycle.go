@@ -309,6 +309,9 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
+	m.routingActivityMu.Lock()
+	delete(m.routingActivity, id)
+	m.routingActivityMu.Unlock()
 	if m.modelPoolOffsets != nil {
 		delete(m.modelPoolOffsets, id)
 	}

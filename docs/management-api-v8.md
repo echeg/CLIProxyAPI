@@ -88,10 +88,39 @@ influence this strategy. Existing quota cooldowns still govern availability.
 Established sessions keep their credential even when another account gains an
 earlier reset or higher manual priority. An unavailable, disabled, or removed
 credential triggers failover. The affinity TTL measures inactivity and refreshes
-on access; bindings are held in memory and are lost on restart or a routing
-configuration change. Stable client session IDs give the most reliable affinity;
+on access; bindings are held in memory and are lost on restart or changes to the
+strategy or affinity settings. Stable client session IDs give the most reliable affinity;
 content-based inference remains available for clients without them. Affinity
 preserves the account choice but cannot guarantee an upstream cache hit.
+
+To prefer a particular subscription for new threads, use its `auth_index` from
+`GET /v8/management/credentials`:
+
+```json
+{
+  "preferred-accounts": {
+    "codex": "codex-account-index",
+    "claude": "claude-account-index"
+  }
+}
+```
+
+Send this body to `PATCH /v8/management/config/routing`. A usable preferred
+account takes precedence over automatic ordering and numeric credential priority.
+Existing session bindings remain intact when preferences change or are cleared.
+Unavailable, disabled, removed, or model-ineligible preferred accounts fall back
+to the configured strategy. With affinity disabled, preferences apply to each
+request. To restore automatic selection for one provider, patch its value to
+`null`; to clear both, patch `preferred-accounts` to `null`. Other providers are
+not supported by this setting. Home and plugin schedulers remain authoritative.
+
+`GET /v8/management/routing/activity` returns
+`{"accounts":[{"auth_index":"...","provider":"codex","last_selected_at":"2026-10-02T12:00:00Z"}]}`.
+It records actual credential selections in memory, resets on restart, and excludes
+removed credentials. An empty `accounts` array means no selections have been
+recorded. These timestamps describe the most recent selections, not in-flight
+requests or a single globally active subscription: concurrent threads can use
+different accounts. Quota refresh probes do not update this activity.
 
 Quota observations come from normal upstream responses and successful Codex or
 Claude usage probes through `POST /v8/management/requests/api-call`. Refresh quotas
@@ -136,6 +165,7 @@ retain the corresponding business operation's fields.
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
+| `/routing/activity` | GET | Get each credential's latest actual selection time. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
 | `/observability/logs/errors` | GET | List error-log files. |
 | `/observability/logs/errors/<name>` | GET | Download an error-log file. |

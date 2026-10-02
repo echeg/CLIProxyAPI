@@ -1412,7 +1412,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			continue
 		}
 		c.auth = preparedAuth
-		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
+		m.publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -1474,7 +1474,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 			continue
 		}
 		c.auth = preparedAuth
-		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
+		m.publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue

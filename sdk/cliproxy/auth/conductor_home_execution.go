@@ -123,7 +123,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			selection.End("runtime_auth_bind_failed")
 			return cliproxyexecutor.Response{}, errRuntimeAuth
 		}
-		publishSelectedAuthMetadata(opts.Metadata, auth)
+		m.publishSelectedAuthMetadata(opts.Metadata, auth)
 		execCtx, releaseAttempt, errBind := homeExecutionAttemptContext(ctx, selection)
 		if errBind != nil {
 			selection.End("attempt_bind_failed")

@@ -255,7 +255,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, errStream, alreadyTried)
 				if okRefresh {
 					auth = refreshed
-					publishSelectedAuthMetadata(execOpts.Metadata, auth)
+					m.publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					ctx = newUpstreamAttemptContext(ctx)
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
@@ -332,7 +332,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if okRefresh {
 					discardStreamChunks(streamResult.Chunks)
 					auth = refreshed
-					publishSelectedAuthMetadata(execOpts.Metadata, auth)
+					m.publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					ctx = newUpstreamAttemptContext(ctx)
 					startRetry := time.Now()

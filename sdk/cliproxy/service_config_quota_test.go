@@ -70,3 +70,32 @@ func TestEarliestResetRoutingConfigWithAffinity(t *testing.T) {
 		t.Fatal("earliest-reset without affinity did not construct the quota selector")
 	}
 }
+
+func TestPreferredAccountsConfigUpdatesPreserveSelector(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{coreManager: manager}
+	apply := func(preferences map[string]string) {
+		t.Helper()
+		commit := service.commitConfigUpdate(&internalconfig.Config{Routing: internalconfig.RoutingConfig{
+			Strategy: "earliest-reset", SessionAffinity: true, SessionAffinityTTL: "24h", PreferredAccounts: preferences,
+		}})
+		if !service.applyManagerConfig(context.Background(), commit) {
+			t.Fatal("configuration application failed")
+		}
+	}
+	apply(nil)
+	selector := manager.Selector()
+	defer selector.(coreauth.StoppableSelector).Stop()
+	apply(map[string]string{"codex": "first-index"})
+	if manager.Selector() != selector {
+		t.Fatal("setting a preferred account replaced the affinity selector")
+	}
+	apply(map[string]string{"codex": "second-index"})
+	if manager.Selector() != selector {
+		t.Fatal("changing a preferred account replaced the affinity selector")
+	}
+	apply(nil)
+	if manager.Selector() != selector {
+		t.Fatal("clearing a preferred account replaced the affinity selector")
+	}
+}

@@ -493,7 +493,14 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 type prevalidatedAuthCandidatesKey struct{}
 
 func getSelectorAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false)
+	if ctx == nil || ctx.Value(preferredAccountsContextKey{}) == nil {
+		return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false)
+	}
+	available, errAvailable := getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true)
+	if errAvailable != nil {
+		return nil, errAvailable
+	}
+	return preferredOrHighestPriorityAuths(ctx, available), nil
 }
 
 func getSelectorAvailableAuthsAcrossPriorities(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
@@ -964,8 +971,9 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 //
 // An established binding outranks credential priority: a bound credential that is still
 // available is reused even when a higher-priority credential recovers. Credential priority
-// applies to cold bindings, requests without a session, and genuine bound-credential
-// failover, so the fallback selector only ever receives the highest available priority tier.
+// and manual account preference apply to cold bindings, requests without a session, and
+// genuine bound-credential failover. The fallback receives the available preferred account
+// or, when no preference can be used, the highest available priority tier.
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -1033,7 +1041,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := preferredOrHighestPriorityAuths(ctx, available)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1186,7 +1194,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 	}
 
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := preferredOrHighestPriorityAuths(ctx, available)
 	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if errPick != nil {
 		return nil, true, errPick

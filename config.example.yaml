@@ -136,6 +136,11 @@ routing:
   # the panel to initialize idle accounts. Unknown/past reset times use round-robin when
   # no candidate has a usable future reset; model-specific and paid overage limits are ignored.
   # Combine earliest-reset with session-affinity to keep active threads on their account.
+  # Prefer a specific subscription for new threads (credential auth_index from the panel).
+  # Existing affinity bindings are preserved. Unavailable/unsupported accounts fall back
+  # to the configured strategy. Empty map means automatic selection for both providers.
+  # Native standalone routing only; Home and scheduler plugins own their own selection.
+  preferred-accounts: {} # Example: {codex: "auth-index", claude: "auth-index"}
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
@@ -143,7 +148,8 @@ routing:
   # Automatic failover is always enabled when bound auth becomes unavailable.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
-  # still decides cold bindings, requests without a session, and post-failover rebinding.
+  # applies to cold bindings, requests without a session, and post-failover rebinding
+  # when no available preferred account is configured.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
