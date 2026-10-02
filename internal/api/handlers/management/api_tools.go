@@ -101,6 +101,10 @@ type apiCallResponse struct {
 //	  -H "Content-Type: application/json" \
 //	  -d '{"auth_index":"<AUTH_INDEX>","method":"POST","url":"https://api.example.com/v1/fetchAvailableModels","header":{"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","User-Agent":"cliproxyapi"},"data":"{}"}'
 func (h *Handler) APICall(c *gin.Context) {
+	h.apiCall(c, false)
+}
+
+func (h *Handler) apiCall(c *gin.Context, observeQuota bool) {
 	var body apiCallRequest
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -200,6 +204,7 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	for key, value := range reqHeaders {
 		if strings.EqualFold(key, "host") {
+			observeQuota = false
 			hostOverride = strings.TrimSpace(value)
 			continue
 		}
@@ -214,6 +219,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
+	startedAt := time.Now()
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
@@ -230,6 +236,9 @@ func (h *Handler) APICall(c *gin.Context) {
 	if errReadAll != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
+	}
+	if observeQuota {
+		h.observeAPICallQuota(auth, req, resp, respBody, startedAt)
 	}
 
 	c.JSON(http.StatusOK, apiCallResponse{

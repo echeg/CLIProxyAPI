@@ -62,6 +62,53 @@ The Home-owned revision fields
 `credentials.concurrency.observation-barrier-revision`, and `plugins.auth-revision`
 cannot be changed through these endpoints.
 
+### Subscription priority and session affinity
+
+To prefer Codex and Claude accounts whose subscription quotas reset soonest,
+send `PATCH /v8/management/config/routing` with:
+
+```json
+{
+  "strategy": "earliest-reset",
+  "session-affinity": true,
+  "session-affinity-ttl": "24h"
+}
+```
+
+The selector first applies availability, model eligibility, and manual credential
+priority. Within the highest available priority tier it chooses the earliest
+future reset of a shared subscription window with remaining quota: Codex primary
+and secondary windows, or Claude five-hour and seven-day windows. Equal reset
+times use stable credential ordering. Unknown, malformed, exhausted, and expired
+observations do not provide a ranking; when no candidate has a usable reset, the
+selector uses round-robin. Other providers use the same round-robin fallback.
+Model-specific additional limits, code-review limits, and paid overage do not
+influence this strategy. Existing quota cooldowns still govern availability.
+
+Established sessions keep their credential even when another account gains an
+earlier reset or higher manual priority. An unavailable, disabled, or removed
+credential triggers failover. The affinity TTL measures inactivity and refreshes
+on access; bindings are held in memory and are lost on restart or a routing
+configuration change. Stable client session IDs give the most reliable affinity;
+content-based inference remains available for clients without them. Affinity
+preserves the account choice but cannot guarantee an upstream cache hit.
+
+Quota observations come from normal upstream responses and successful Codex or
+Claude usage probes through `POST /v8/management/requests/api-call`. Refresh quotas
+in CPAMC after adding accounts or restarting to initialize accounts that have
+not yet served requests. Probes update observations without clearing cooldowns or
+counting as model requests. No background token consumption is generated: the
+strategy routes incoming work. It does not initiate traffic to spend a balance.
+
+For a local CPAMC build, copy its generated `dist/index.html` to the server's
+`static/management.html` and set `management.disable-auto-update-panel: true`
+to retain the custom panel. The source checkout can remain alongside CLIProxyAPI;
+it has its own build and version control. This strategy is implemented for
+standalone CLIProxyAPI. Home mode uses a separate control-plane selector and
+disables these local management endpoints. CLIProxyAPIHome needs corresponding
+selector, quota observation, and configuration support before using this strategy
+in a cluster.
+
 ### Codex multi-agent configuration migration
 
 `client.codex.optimize-multi-agent-v2` is the sole runtime setting. Loading older
