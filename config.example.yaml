@@ -947,6 +947,11 @@ oauth:
       # than cooling down the entire credential across all sibling models.
       # Default: false
       model-level-cooling: false
+      # When true, request the priority service tier (Codex Fast) for subscription requests that
+      # do not choose a tier, on models whose Codex client catalog advertises it. Fast consumes
+      # subscription limits faster. Client tiers and payload rules keep precedence.
+      # Default: false
+      fast-mode: false
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
       live-media-relay:

@@ -38,6 +38,7 @@ the corresponding group value. Legacy field names are rejected by v8 writes.
 | `/config/api-keys` | All upstream provider groups. |
 | `/config/api-keys/codex` | Codex upstream groups. |
 | `/config/client/codex/optimize-multi-agent-v2` | Boolean, default `false`; applies to Codex clients across OAuth and API-key routes. |
+| `/config/oauth/providers/codex/fast-mode` | Boolean, default `false`; requests the priority service tier (Codex Fast) for subscription requests without a tier on models whose Codex catalog advertises it. API-key routes and payload rules are unaffected. |
 | `/config/observability/logs/debug` | A boolean, for example `true`. |
 | `/config/routing/retry/request-retry` | A number, for example `0`. |
 | `/config/plugins/configs/<id>` | A plugin configuration object. |

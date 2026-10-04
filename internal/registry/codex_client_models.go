@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 //go:embed models/codex_client_models.json
@@ -52,6 +53,30 @@ func GetCodexClientModelsSnapshot() ([]byte, uint64) {
 	codexClientCatalogStore.mu.RLock()
 	defer codexClientCatalogStore.mu.RUnlock()
 	return append([]byte(nil), codexClientCatalogStore.data...), codexClientCatalogStore.revision
+}
+
+// CodexClientModelSupportsServiceTier reports whether the Codex client catalog
+// lists serviceTier in the service_tiers of the model with the given slug.
+func CodexClientModelSupportsServiceTier(slug, serviceTier string) bool {
+	slug = strings.TrimSpace(slug)
+	serviceTier = strings.TrimSpace(serviceTier)
+	if slug == "" || serviceTier == "" {
+		return false
+	}
+	codexClientCatalogStore.mu.RLock()
+	defer codexClientCatalogStore.mu.RUnlock()
+	for _, model := range gjson.GetBytes(codexClientCatalogStore.data, "models").Array() {
+		if model.Get("slug").String() != slug {
+			continue
+		}
+		for _, tier := range model.Get("service_tiers").Array() {
+			if tier.Get("id").String() == serviceTier {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {

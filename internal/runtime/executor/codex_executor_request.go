@@ -237,6 +237,24 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	applyCodexCloakingHeaders(r.Header, cfg, auth)
 }
 
+// applyCodexFastMode requests the priority service tier for subscription
+// requests when codex.fast-mode is enabled and the request carries no tier.
+// Only models whose Codex client catalog entry advertises priority are changed,
+// and payload rules applied afterwards keep precedence.
+func applyCodexFastMode(cfg *config.Config, auth *cliproxyauth.Auth, baseModel string, body []byte) []byte {
+	if cfg == nil || !cfg.Codex.FastMode || codexAuthUsesAPIKey(auth) {
+		return body
+	}
+	if gjson.GetBytes(body, "service_tier").Exists() {
+		return body
+	}
+	if !registry.CodexClientModelSupportsServiceTier(baseModel, "priority") {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "service_tier", "priority")
+	return body
+}
+
 const codexRoutingHintHeader = "X-Codex-Routing-Hint"
 
 // applyCodexRoutingHint sends the routing hint native Codex attaches to every
