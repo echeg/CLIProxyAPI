@@ -572,6 +572,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		if reason == blockReasonCooldown {
 			cooldownCount++
 		}
+		if reserve && reason != blockReasonDisabled && next.After(now) {
+			next = laterHardQuotaReserveDeadline(candidate, next, now)
+		}
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
 		}
@@ -624,7 +627,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // With reserve unset (a pinned execution) the quota reserve is not applied. Under session
 // affinity, newSelectionErr is the error for a new binding when every available credential
 // is hard-reserved; bound sessions still reach the selector.
-func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, newSelectionErr error, err error) {
+func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, opts cliproxyexecutor.Options, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, newSelectionErr error, err error) {
 	affinitySelector, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
 	weighted := selector
@@ -650,9 +653,15 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 	// One availability pass and one clone pass serve both lists: the highest priority tier is a
 	// subset of the across-priority candidates, so it is narrowed from the same cloned auths.
 	// Session affinity validates existing bindings against every available credential, so the
-	// quota reserve is left to the selector, which applies it only to new bindings.
+	// quota reserve is left to the selector, which applies it only to new bindings. When every
+	// credential is blocked, the recovery waits for the hard reserve of every credential except
+	// the session's bound one, which may serve it again as soon as its cooldown ends.
 	allAuths, errAcross := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, reserve && !sessionAffinity)
 	if errAcross != nil {
+		if sessionAffinity && reserve && anyQuotaReserveConfigured(auths) {
+			bound := affinitySelector.boundCandidate(provider, routeModel, opts, auths)
+			_, errAcross = m.availableAuthsForRouteModelWithPriorityMode(withoutQuotaReserveFor(auths, bound), provider, routeModel, now, true, true)
+		}
 		return nil, nil, nil, errAcross
 	}
 	allAuths = cloneAuthSlice(allAuths)
@@ -1267,13 +1276,12 @@ func (m *Manager) closestCooldownWaitWithAttempted(providers []string, model str
 		if len(attempted) > 0 {
 			_, wasAttempted = attempted[auth.ID]
 		}
-		if pinnedAuthID == "" && next.IsZero() && !wasAttempted {
-			// A hard reserve writes no cooldown but keeps new selections away until it recovers.
+		if pinnedAuthID == "" && !wasAttempted {
+			// A hard reserve writes no cooldown but keeps new selections away until it recovers,
+			// so a cooling auth becomes selectable at the later of both deadlines.
 			// An auth served in the failed round despite the reserve is bound to the request
 			// (session affinity), so the retry reaches it again.
-			if until, held := hardQuotaReserveUntil(auth, now); held {
-				next = until
-			}
+			next = laterHardQuotaReserveDeadline(auth, next, now)
 		}
 		coolingDisabled := m.cooldownDisabledForAuth(auth)
 		if !wasAttempted || coolingDisabled || status != http.StatusTooManyRequests {
@@ -1818,7 +1826,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, time.Now(), pinnedAuthID == "")
+	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, opts, time.Now(), pinnedAuthID == "")
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -2158,7 +2166,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now(), pinnedAuthID == "")
+	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, opts, time.Now(), pinnedAuthID == "")
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)

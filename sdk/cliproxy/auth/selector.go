@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"math"
 	"net/http"
 	"regexp"
@@ -466,7 +467,9 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+// collectAvailableByPriority groups unblocked candidates by priority. With reserve set, a blocked
+// candidate also held by a hard reserve recovers at the later of both deadlines.
+func collectAvailableByPriority(auths []*Auth, model string, now time.Time, reserve bool) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
@@ -478,6 +481,9 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 		}
 		if reason == blockReasonCooldown {
 			cooldownCount++
+		}
+		if reserve && reason != blockReasonDisabled && next.After(now) {
+			next = laterHardQuotaReserveDeadline(candidate, next, now)
 		}
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
@@ -560,7 +566,7 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now, reserve)
 	if reserve {
 		cooldownCount, earliest = applyQuotaReserveToBuckets(availableByPriority, now, cooldownCount, earliest)
 	}
@@ -1403,6 +1409,71 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	if s.matcher != nil {
 		s.matcher.InvalidateAuth(authID)
 	}
+}
+
+// boundCandidate returns the credential among auths that Pick would resolve the request to
+// through an existing binding once that credential becomes available, or nil. It mirrors
+// Pick's lookup order without selecting or creating a binding.
+func (s *SessionAffinitySelector) boundCandidate(provider, model string, opts cliproxyexecutor.Options, auths []*Auth) *Auth {
+	if s == nil {
+		return nil
+	}
+	candidate := func(authID string) *Auth {
+		for _, auth := range auths {
+			if auth != nil && auth.ID == authID {
+				return auth
+			}
+		}
+		return nil
+	}
+	// Session ID extraction annotates metadata, so it works on a copy.
+	metadata := maps.Clone(opts.Metadata)
+	explicitID, explicitFallbackID := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, metadata)
+	if explicitID == "" && s.matcher != nil {
+		if namespace := lcpAffinityNamespace(provider, model, metadata); namespace != "" {
+			if turns := cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest); len(turns) > 0 {
+				fingerprints, minPrefixLength, tailFingerprints, envDigest := s.matcher.PrepareExt(turns)
+				if len(fingerprints) > 0 && minPrefixLength > 0 && minPrefixLength <= len(fingerprints) {
+					match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength)
+					if !ok {
+						return nil
+					}
+					return candidate(match.AuthID)
+				}
+			}
+		}
+	}
+
+	primaryID, fallbackID := explicitID, explicitFallbackID
+	if primaryID == "" {
+		primaryID, fallbackID = extractSessionIDs(opts.Headers, opts.OriginalRequest, metadata)
+	}
+	if primaryID == "" || s.cache == nil {
+		return nil
+	}
+	primaryID = cliproxysession.BoundSessionIdentity(primaryID)
+	modelKey := canonicalModelKey(model)
+	// Pick reselects immediately when the primary binding points outside the candidates, so
+	// the fallback binding is consulted only on a primary cache miss.
+	if authID, ok := s.cache.Get(provider + "::" + primaryID + "::" + modelKey); ok {
+		return candidate(authID)
+	}
+	if fallbackID == "" {
+		return nil
+	}
+	fallbackID = cliproxysession.BoundSessionIdentity(fallbackID)
+	if fallbackID == primaryID {
+		return nil
+	}
+	isFork, _ := metadata[cliproxyexecutor.IsForkMetadataKey].(bool)
+	if !isFork && isSubagentSession(primaryID, fallbackID) && !s.subagentAffinity {
+		return nil
+	}
+	authID, ok := s.cache.Get(provider + "::" + fallbackID + "::" + modelKey)
+	if !ok {
+		return nil
+	}
+	return candidate(authID)
 }
 
 // LookupAffinity observes the current session affinity binding without side effects.

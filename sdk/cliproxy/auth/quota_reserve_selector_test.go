@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -493,6 +494,147 @@ func TestQuotaReserveSessionAffinityCooldownMixesWithRealCooldown(t *testing.T) 
 				assertReserveCooldown(t, selected, errPick, 10*time.Minute)
 			})
 		}
+	}
+}
+
+// coolReserveAuth adds a credential-wide quota cooldown to an auth, keeping its window signals.
+func coolReserveAuth(auth *Auth, recoverAt time.Time) {
+	auth.Quota.Exceeded = true
+	auth.Quota.Reason = "credential_quota"
+	auth.Quota.NextRecoverAt = recoverAt
+}
+
+func TestQuotaReserveCoolingCredentialRecoversAtLaterDeadline(t *testing.T) {
+	now := time.Now()
+	observed := now.Add(-time.Minute)
+	for _, tt := range []struct {
+		name      string
+		cooldown  time.Duration
+		other     bool
+		wantReset time.Duration
+	}{
+		{name: "reserve outlasts cooldown", cooldown: 10 * time.Minute, wantReset: time.Hour},
+		{name: "cooldown outlasts reserve", cooldown: 3 * time.Hour, wantReset: 3 * time.Hour},
+		{name: "other reserve recovers first", cooldown: 10 * time.Minute, other: true, wantReset: 30 * time.Minute},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cooling := reserveSpecAuth("a-cooling", reserveSpec{mode: QuotaReserveModeHard, used: 90, reset: time.Hour}, observed)
+			coolReserveAuth(cooling, now.Add(tt.cooldown))
+			auths := []*Auth{cooling}
+			if tt.other {
+				auths = append(auths, reserveSpecAuth("b-reserved", reserveSpec{mode: QuotaReserveModeHard, used: 90, reset: 30 * time.Minute}, observed))
+			}
+			selected, errPick := (&RoundRobinSelector{}).Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+			assertReserveCooldown(t, selected, errPick, tt.wantReset)
+		})
+	}
+}
+
+func TestQuotaReserveManagerCoolingCredentialRecoversAtLaterDeadline(t *testing.T) {
+	affinity := func() Selector { return NewSessionAffinitySelector(&RoundRobinSelector{}) }
+	for _, tt := range []struct {
+		name      string
+		selector  func() Selector
+		bound     bool
+		wantReset time.Duration
+	}{
+		{name: "round-robin", selector: func() Selector { return &RoundRobinSelector{} }, wantReset: time.Hour},
+		{name: "affinity/new session", selector: affinity, wantReset: time.Hour},
+		// A bound session may return to its credential once the cooldown ends, so it reports
+		// the reserve-free recovery.
+		{name: "affinity/bound session", selector: affinity, bound: true, wantReset: 10 * time.Minute},
+	} {
+		for _, mixed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/mixed=%t", tt.name, mixed), func(t *testing.T) {
+				selector := tt.selector()
+				if affinitySelector, ok := selector.(*SessionAffinitySelector); ok {
+					t.Cleanup(affinitySelector.Stop)
+				}
+				manager, accounts, model := reserveTestManager(t, selector, []reserveSpec{
+					{mode: QuotaReserveModeHard, used: 10, reset: time.Hour},
+				})
+				const session = "reserve-cooling-session"
+				if tt.bound {
+					if selected, errPick := reservePick(manager, model, session, mixed); errPick != nil || selected.ID != accounts[0].ID {
+						t.Fatalf("binding pick selected %v, %v", selected, errPick)
+					}
+				}
+				manager.mu.Lock()
+				held := manager.auths[accounts[0].ID]
+				held.Quota = reserveQuota(time.Now().Add(-time.Minute), 90, time.Hour)
+				coolReserveAuth(held, time.Now().Add(10*time.Minute))
+				manager.mu.Unlock()
+				selected, errPick := reservePick(manager, model, session, mixed)
+				assertReserveCooldown(t, selected, errPick, tt.wantReset)
+
+				wait, found := manager.closestCooldownWait([]string{"codex"}, model, 0, authSelectionEligibility{}, "", 3)
+				if !found || wait < 55*time.Minute || wait > time.Hour {
+					t.Fatalf("closestCooldownWait = %s, %t; want about 1h", wait, found)
+				}
+			})
+		}
+	}
+}
+
+func TestQuotaReserveBoundSessionExemptsOnlyBoundCredential(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mixed=%t", mixed), func(t *testing.T) {
+			selector := NewSessionAffinitySelector(&FillFirstSelector{})
+			t.Cleanup(selector.Stop)
+			manager, accounts, model := reserveTestManager(t, selector, []reserveSpec{
+				{mode: QuotaReserveModeHard, used: 10, reset: time.Hour},
+				{mode: QuotaReserveModeHard, used: 10, reset: time.Hour},
+			})
+			const session = "reserve-bound-session"
+			if selected, errPick := reservePick(manager, model, session, mixed); errPick != nil || selected.ID != accounts[0].ID {
+				t.Fatalf("binding pick selected %v, %v", selected, errPick)
+			}
+			manager.mu.Lock()
+			for i, cooldown := range []time.Duration{30 * time.Minute, 10 * time.Minute} {
+				held := manager.auths[accounts[i].ID]
+				held.Quota = reserveQuota(time.Now().Add(-time.Minute), 90, time.Hour)
+				coolReserveAuth(held, time.Now().Add(cooldown))
+			}
+			manager.mu.Unlock()
+			// The bound credential returns after its cooldown, while the other one stays
+			// hard-reserved for the session after its shorter cooldown.
+			selected, errPick := reservePick(manager, model, session, mixed)
+			assertReserveCooldown(t, selected, errPick, 30*time.Minute)
+			selected, errPick = reservePick(manager, model, "fresh", mixed)
+			assertReserveCooldown(t, selected, errPick, time.Hour)
+		})
+	}
+}
+
+func TestQuotaReserveBoundCandidateFollowsPickLookupOrder(t *testing.T) {
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	t.Cleanup(selector.Stop)
+	const model = "quota-reserve-model"
+	parent, child := &Auth{ID: "parent-auth"}, &Auth{ID: "child-auth"}
+	auths := []*Auth{parent, child}
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"sessionId":"claw-c-1","forkSource":{"sessionId":"claw-p-1"}}`),
+		Metadata:        map[string]any{},
+	}
+	key := func(sessionID string) string {
+		return "codex::" + cliproxysession.BoundSessionIdentity(sessionID) + "::" + canonicalModelKey(model)
+	}
+	if bound := selector.boundCandidate("codex", model, opts, auths); bound != nil {
+		t.Fatalf("unbound session resolved to %s", bound.ID)
+	}
+	selector.cache.Set(key("session:claw-p-1"), parent.ID)
+	if bound := selector.boundCandidate("codex", model, opts, auths); bound != parent {
+		t.Fatalf("fork without own binding resolved to %v, want parent binding", bound)
+	}
+	// Pick reselects when the fork's own binding is not a candidate, so the parent binding
+	// no longer applies.
+	selector.cache.Set(key("session:claw-c-1"), "excluded-auth")
+	if bound := selector.boundCandidate("codex", model, opts, auths); bound != nil {
+		t.Fatalf("fork bound outside candidates resolved to %s", bound.ID)
+	}
+	selector.cache.Set(key("session:claw-c-1"), child.ID)
+	if bound := selector.boundCandidate("codex", model, opts, auths); bound != child {
+		t.Fatalf("fork binding resolved to %v, want %s", bound, child.ID)
 	}
 }
 

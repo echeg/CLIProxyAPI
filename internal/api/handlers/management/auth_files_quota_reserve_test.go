@@ -332,3 +332,63 @@ func mustGetAuth(t *testing.T, manager *coreauth.Manager, id string) *coreauth.A
 	}
 	return auth
 }
+
+func TestListAuthFilesFromDiskExposesQuotaReserve(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	files := map[string]string{
+		"reserved.json":    `{"type":"codex","quota_reserve":{"percent":25,"mode":"hard"}}`,
+		"soft.json":        `{"type":"claude","quota_reserve":{"percent":40}}`,
+		"invalid.json":     `{"type":"codex","quota_reserve":{"percent":100}}`,
+		"unsupported.json": `{"type":"gemini","quota_reserve":{"percent":25}}`,
+		"plain.json":       `{"type":"codex"}`,
+	}
+	for name, content := range files {
+		if errWrite := os.WriteFile(filepath.Join(authDir, name), []byte(content), 0o600); errWrite != nil {
+			t.Fatalf("WriteFile(%s) error = %v", name, errWrite)
+		}
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/credentials", nil)
+	h.ListAuthFiles(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if len(payload.Files) != len(files) {
+		t.Fatalf("files = %d, want %d: %s", len(payload.Files), len(files), rec.Body.String())
+	}
+	want := map[string]map[string]any{
+		"reserved.json": {"percent": float64(25), "mode": "hard"},
+		"soft.json":     {"percent": float64(40), "mode": "soft"},
+	}
+	for _, file := range payload.Files {
+		name, _ := file["name"].(string)
+		if file["quota_reserve_active"] != false {
+			t.Fatalf("%s quota_reserve_active = %#v, want false", name, file["quota_reserve_active"])
+		}
+		if _, exists := file["quota_reserve_until"]; exists {
+			t.Fatalf("%s quota_reserve_until = %#v, want absent", name, file["quota_reserve_until"])
+		}
+		reserve, exists := file["quota_reserve"]
+		wantReserve, wantExists := want[name]
+		if exists != wantExists {
+			t.Fatalf("%s quota_reserve = %#v, want present=%t", name, reserve, wantExists)
+		}
+		if wantExists {
+			got, _ := reserve.(map[string]any)
+			if got["percent"] != wantReserve["percent"] || got["mode"] != wantReserve["mode"] {
+				t.Fatalf("%s quota_reserve = %#v, want %#v", name, got, wantReserve)
+			}
+		}
+	}
+}

@@ -471,7 +471,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 			if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
 				fileData["request_retry"] = requestRetry
 			}
+			if percent, mode, okReserve := authFileQuotaReserveFromJSON(data, typeValue); okReserve {
+				fileData["quota_reserve"] = gin.H{"percent": percent, "mode": mode}
+			}
 		}
+		// Without the auth manager there is no observed quota, so the reserve never holds.
+		fileData["quota_reserve_active"] = false
 
 		files = append(files, fileData)
 	}
@@ -801,6 +806,19 @@ func authFileRequestRetryFromJSON(data []byte) (int, bool) {
 		return 0, false
 	}
 	return (&coreauth.Auth{Metadata: metadata}).RequestRetryOverride()
+}
+
+// authFileQuotaReserveFromJSON reads a valid stored quota reserve for a provider that supports it.
+func authFileQuotaReserveFromJSON(data []byte, provider string) (int, string, bool) {
+	raw := gjson.GetBytes(data, "quota_reserve")
+	if !raw.Exists() || !coreauth.QuotaReserveSupportedProvider(provider) {
+		return 0, "", false
+	}
+	percent, mode, errParse := coreauth.ParseQuotaReserve(raw.Value())
+	if errParse != nil {
+		return 0, "", false
+	}
+	return percent, mode, true
 }
 
 // quotaObservationPayload exposes only passive provider observations. Cooldown

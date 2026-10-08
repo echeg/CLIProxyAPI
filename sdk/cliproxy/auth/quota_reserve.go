@@ -316,6 +316,35 @@ func hardQuotaReserveUntil(auth *Auth, now time.Time) (time.Time, bool) {
 	return until, active
 }
 
+// laterHardQuotaReserveDeadline returns when an auth blocked until next becomes selectable for
+// new selections: the later of next and an active hard reserve's recovery.
+func laterHardQuotaReserveDeadline(auth *Auth, next, now time.Time) time.Time {
+	if until, held := hardQuotaReserveUntil(auth, now); held && until.After(next) {
+		return until
+	}
+	return next
+}
+
+// withoutQuotaReserveFor returns auths with exempt replaced by a copy that has no quota reserve,
+// so recovery calculations ignore the reserve only for that credential.
+func withoutQuotaReserveFor(auths []*Auth, exempt *Auth) []*Auth {
+	if exempt == nil {
+		return auths
+	}
+	out := make([]*Auth, len(auths))
+	for i, auth := range auths {
+		if auth != exempt {
+			out[i] = auth
+			continue
+		}
+		unreserved := auth.Clone()
+		delete(unreserved.Attributes, AttributeQuotaReservePercent)
+		delete(unreserved.Attributes, AttributeQuotaReserveMode)
+		out[i] = unreserved
+	}
+	return out
+}
+
 // quotaReserveSkippedContextKey marks a selection that must ignore the quota reserve.
 type quotaReserveSkippedContextKey struct{}
 
