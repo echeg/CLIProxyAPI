@@ -101,15 +101,15 @@
 ## Implementation Steps
 
 ### Task 1: Parse and sync `quota_reserve` into credential attributes
-- [ ] write failing table tests in `sdk/cliproxy/auth/quota_reserve_test.go` for `ApplyAuthQuotaReserveMetadata(auth, metadata)`:
+- [x] write failing table tests in `sdk/cliproxy/auth/quota_reserve_test.go` for `ApplyAuthQuotaReserveMetadata(auth, metadata)`:
   - a valid `{percent: 25, mode: "hard"}` sets the attributes `quota_reserve_percent=25` and `quota_reserve_mode=hard`
   - a missing mode defaults to `soft`
   - invalid inputs remove the attributes: not an object, percent 0/100/negative/fractional/string, unknown mode, unsupported provider
   - a missing key removes stale attributes
-- [ ] implement `sdk/cliproxy/auth/quota_reserve.go` with `ApplyAuthQuotaReserveMetadata` and a parsed accessor `authQuotaReserve(auth) (percent int, hard bool, ok bool)`, mirroring `ApplyAuthPriorityMetadata`. Log invalid values with logrus at warn level without secrets.
-- [ ] call it wherever `ApplyAuthPriorityMetadata` is called (`internal/watcher/synthesizer/file.go`, `sdk/auth/filestore.go`), so load and hot-reload pick it up
-- [ ] write tests that a synthesized auth from JSON with `quota_reserve` carries the attributes, and that a hot-reload with a changed or removed reserve updates them (extend the existing synthesizer/filestore tests)
-- [ ] run `gofmt`, the compile check, and `go test ./sdk/cliproxy/auth/... ./internal/watcher/... ./sdk/auth/...` - must pass before task 2
+- [x] implement `sdk/cliproxy/auth/quota_reserve.go` with `ApplyAuthQuotaReserveMetadata` and a parsed accessor `authQuotaReserve(auth) (percent int, hard bool, ok bool)`, mirroring `ApplyAuthPriorityMetadata`. Log invalid values with logrus at warn level without secrets.
+- [x] call it wherever `ApplyAuthPriorityMetadata` is called (`internal/watcher/synthesizer/file.go`, `sdk/auth/filestore.go`), so load and hot-reload pick it up
+- [x] write tests that a synthesized auth from JSON with `quota_reserve` carries the attributes, and that a hot-reload with a changed or removed reserve updates them (extend the existing synthesizer/filestore tests)
+- [x] run `gofmt`, the compile check, and `go test ./sdk/cliproxy/auth/... ./internal/watcher/... ./sdk/auth/...` - must pass before task 2
 
 ### Task 2: Compute the reserve verdict from quota observations
 - [ ] write failing table tests for `quotaReserveVerdict(auth, now) (active bool, until time.Time)`:

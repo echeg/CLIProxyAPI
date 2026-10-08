@@ -449,3 +449,45 @@ func (f fileStoreMultiAuthParserFunc) ParseAuth(context.Context, pluginapi.AuthP
 func (f fileStoreMultiAuthParserFunc) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
 	return f(ctx, req)
 }
+
+func TestFileTokenStoreListSyncsQuotaReserve(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "codex.json")
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	for _, step := range []struct {
+		name        string
+		raw         string
+		wantPercent string
+		wantMode    string
+	}{
+		{name: "initial load", raw: `{"type":"codex","quota_reserve":{"percent":25,"mode":"hard"}}`, wantPercent: "25", wantMode: "hard"},
+		{name: "changed reserve", raw: `{"type":"codex","quota_reserve":{"percent":30,"mode":"soft"}}`, wantPercent: "30", wantMode: "soft"},
+		{name: "invalid reserve", raw: `{"type":"codex","quota_reserve":"25"}`},
+		{name: "removed reserve", raw: `{"type":"codex"}`},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			if errWrite := os.WriteFile(path, []byte(step.raw), 0o600); errWrite != nil {
+				t.Fatalf("write auth file: %v", errWrite)
+			}
+			auths, errList := store.List(context.Background())
+			if errList != nil {
+				t.Fatalf("List() error = %v", errList)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("List() len = %d, want 1", len(auths))
+			}
+			gotPercent, hasPercent := auths[0].Attributes[cliproxyauth.AttributeQuotaReservePercent]
+			gotMode, hasMode := auths[0].Attributes[cliproxyauth.AttributeQuotaReserveMode]
+			if step.wantPercent == "" {
+				if hasPercent || hasMode {
+					t.Fatalf("reserve attributes = %q/%q, want absent", gotPercent, gotMode)
+				}
+				return
+			}
+			if gotPercent != step.wantPercent || gotMode != step.wantMode {
+				t.Fatalf("reserve attributes = %q/%q, want %q/%q", gotPercent, gotMode, step.wantPercent, step.wantMode)
+			}
+		})
+	}
+}

@@ -1108,3 +1108,78 @@ func TestSynthesizeAuthFile_CodexPlanType(t *testing.T) {
 		})
 	}
 }
+
+func TestSynthesizeAuthFileSyncsQuotaReserveOnReload(t *testing.T) {
+	fullPath := filepath.Join(t.TempDir(), "claude.json")
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     filepath.Dir(fullPath),
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	for _, step := range []struct {
+		name        string
+		raw         string
+		wantPercent string
+		wantMode    string
+	}{
+		{name: "initial load", raw: `{"type":"claude","quota_reserve":{"percent":25,"mode":"hard"}}`, wantPercent: "25", wantMode: "hard"},
+		{name: "changed reserve", raw: `{"type":"claude","quota_reserve":{"percent":40}}`, wantPercent: "40", wantMode: "soft"},
+		{name: "invalid reserve", raw: `{"type":"claude","quota_reserve":{"percent":100}}`},
+		{name: "removed reserve", raw: `{"type":"claude"}`},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(step.raw))
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("SynthesizeAuthFile() len = %d, want 1", len(auths))
+			}
+			gotPercent, hasPercent := auths[0].Attributes[coreauth.AttributeQuotaReservePercent]
+			gotMode, hasMode := auths[0].Attributes[coreauth.AttributeQuotaReserveMode]
+			if step.wantPercent == "" {
+				if hasPercent || hasMode {
+					t.Fatalf("reserve attributes = %q/%q, want absent", gotPercent, gotMode)
+				}
+				return
+			}
+			if gotPercent != step.wantPercent || gotMode != step.wantMode {
+				t.Fatalf("reserve attributes = %q/%q, want %q/%q", gotPercent, gotMode, step.wantPercent, step.wantMode)
+			}
+		})
+	}
+}
+
+func TestSynthesizeAuthFileAppliesQuotaReserveToPluginAuths(t *testing.T) {
+	fullPath := filepath.Join(t.TempDir(), "plugin.json")
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: filepath.Dir(fullPath),
+		PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{
+				{ID: "codex", Provider: "codex", Attributes: map[string]string{coreauth.AttributeQuotaReservePercent: "70"}},
+				{ID: "other", Provider: "plugin"},
+			}, true, nil
+		}),
+	}
+	raw := []byte(`{"type":"plugin","quota_reserve":{"percent":25,"mode":"hard"}}`)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, raw)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want 2", len(auths))
+	}
+	for _, auth := range auths {
+		gotPercent := auth.Attributes[coreauth.AttributeQuotaReservePercent]
+		gotMode := auth.Attributes[coreauth.AttributeQuotaReserveMode]
+		wantPercent, wantMode := "", ""
+		if auth.Provider == "codex" {
+			wantPercent, wantMode = "25", "hard"
+		}
+		if gotPercent != wantPercent || gotMode != wantMode {
+			t.Errorf("auth %s reserve attributes = %q/%q, want %q/%q", auth.ID, gotPercent, gotMode, wantPercent, wantMode)
+		}
+	}
+}
