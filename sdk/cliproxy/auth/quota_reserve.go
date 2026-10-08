@@ -147,6 +147,7 @@ func authQuotaReserve(auth *Auth) (percent int, hard bool, ok bool) {
 // when the reserve stops holding.
 // Expired windows, windows without a usable reset, and malformed values are
 // ignored so a reserve can never pin a credential beyond its observed reset.
+// Usage above the limit counts as nothing remaining.
 func QuotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Time) {
 	percent, _, ok := authQuotaReserve(auth)
 	if !ok {
@@ -174,11 +175,13 @@ func QuotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Tim
 			continue
 		}
 		used, errParse := strconv.ParseFloat(usedRaw, 64)
-		if errParse != nil || math.IsNaN(used) || math.IsInf(used, 0) || used < 0 || used*scale > 100 {
+		if errParse != nil || math.IsNaN(used) || math.IsInf(used, 0) || used < 0 {
 			continue
 		}
-		// Round away float noise from fractional utilization (0.7*100 != 70).
-		remaining := math.Round((100-used*scale)*1e6) / 1e6
+		// Usage past the limit (Claude overage reports utilization above 1.0)
+		// leaves nothing remaining. Round away float noise from fractional
+		// utilization (0.7*100 != 70).
+		remaining := math.Max(0, math.Round((100-used*scale)*1e6)/1e6)
 		if remaining >= float64(percent) {
 			continue
 		}
