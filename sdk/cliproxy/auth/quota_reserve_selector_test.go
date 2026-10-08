@@ -286,24 +286,35 @@ func TestQuotaReserveSessionAffinityKeepsBoundSessions(t *testing.T) {
 			})
 		}
 	}
-	t.Run("all hard keeps bound session and rejects new ones", func(t *testing.T) {
-		selector := NewSessionAffinitySelector(&RoundRobinSelector{})
-		t.Cleanup(selector.Stop)
-		manager, accounts, model := reserveTestManager(t, selector, []reserveSpec{{mode: QuotaReserveModeHard, used: 10}})
-		if selected, errPick := reservePick(manager, model, "bound", false); errPick != nil || selected.ID != accounts[0].ID {
-			t.Fatalf("selected %v, %v", selected, errPick)
-		}
-		manager.mu.Lock()
-		manager.auths[accounts[0].ID].Quota = reserveQuota(time.Now().Add(-time.Second), 90, time.Hour)
-		manager.mu.Unlock()
-		if selected, errPick := reservePick(manager, model, "bound", false); errPick != nil || selected.ID != accounts[0].ID {
-			t.Fatalf("bound session selected %v, %v", selected, errPick)
-		}
-		selected, errPick := reservePick(manager, model, "fresh", false)
-		assertReserveCooldown(t, selected, errPick, time.Hour)
-		selected, errPick = reservePick(manager, model, "", false)
-		assertReserveCooldown(t, selected, errPick, time.Hour)
-	})
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("all hard keeps bound session and rejects new ones/mixed=%t", mixed), func(t *testing.T) {
+			selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+			t.Cleanup(selector.Stop)
+			manager, accounts, model := reserveTestManager(t, selector, []reserveSpec{{mode: QuotaReserveModeHard, used: 10}})
+			if selected, errPick := reservePick(manager, model, "bound", mixed); errPick != nil || selected.ID != accounts[0].ID {
+				t.Fatalf("selected %v, %v", selected, errPick)
+			}
+			manager.mu.Lock()
+			manager.auths[accounts[0].ID].Quota = reserveQuota(time.Now().Add(-time.Second), 90, time.Hour)
+			manager.mu.Unlock()
+			if selected, errPick := reservePick(manager, model, "bound", mixed); errPick != nil || selected.ID != accounts[0].ID {
+				t.Fatalf("bound session selected %v, %v", selected, errPick)
+			}
+			wantProvider := "codex"
+			if mixed {
+				// A mixed selection reports no single provider, matching the manager cooldown error.
+				wantProvider = ""
+			}
+			for _, session := range []string{"fresh", ""} {
+				selected, errPick := reservePick(manager, model, session, mixed)
+				assertReserveCooldown(t, selected, errPick, time.Hour)
+				var cooldownErr *modelCooldownError
+				if errors.As(errPick, &cooldownErr) && cooldownErr.provider != wantProvider {
+					t.Fatalf("session %q cooldown provider = %q, want %q", session, cooldownErr.provider, wantProvider)
+				}
+			}
+		})
+	}
 }
 
 func TestQuotaReserveSelectorDirectAvailability(t *testing.T) {

@@ -152,10 +152,11 @@
 - [x] run `gofmt`, the compile check, and `go test ./internal/api/...` - must pass before task 5
 
 ### Task 5: Verify acceptance criteria
-- [ ] verify every Overview requirement: storage, verdict, hard/soft, new-selection-only, preferred fallback, no cooldown writes, API read/write
-- [ ] verify the edge cases: expired windows ignored, missing observations available, unsupported providers ignored, invalid JSON values ignored with warn, all-hard 429 `Retry-After`
-- [ ] run `gofmt -l .` (must print nothing for changed files), `go build -o test-output ./cmd/server && rm test-output`, and `go test ./...` - all must pass
-- [ ] confirm that the new code in `quota_reserve.go` and the selector filter has tests that cover every branch
+- [x] verify every Overview requirement: storage, verdict, hard/soft, new-selection-only, preferred fallback, no cooldown writes, API read/write
+- [x] verify the edge cases: expired windows ignored, missing observations available, unsupported providers ignored, invalid JSON values ignored with warn, all-hard 429 `Retry-After`
+- [x] run `gofmt -l .` (must print nothing for changed files), `go build -o test-output ./cmd/server && rm test-output`, and `go test ./...` - all must pass
+- [x] confirm that the new code in `quota_reserve.go` and the selector filter has tests that cover every branch
+- [x] ➕ coverage gaps closed: the all-hard session-affinity test now also runs the mixed-provider path (cooldown error reports no provider), and `newestSubscriptionSnapshot` is tested with no window prefixes. Combined `sdk/cliproxy/auth` + management coverage of `quota_reserve.go`, `newSelectionAuths` and `getSelectorAvailableAuthsWithPriorityMode` is 100%.
 
 ### Task 6: [Final] Update documentation
 - [ ] add a "Quota reserve for shared subscriptions" section to `docs/management-api-v8.md` next to "Subscription priority and session affinity". Cover:

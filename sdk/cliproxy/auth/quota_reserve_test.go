@@ -230,6 +230,10 @@ func TestQuotaReserveVerdictUsesNewestSnapshot(t *testing.T) {
 	if active, _ := quotaReserveVerdict(auth, now); !active {
 		t.Fatal("snapshot without window signals must not supersede a window observation")
 	}
+
+	if snapshot := newestSubscriptionSnapshot(auth, nil); snapshot != nil {
+		t.Fatalf("snapshot without window prefixes = %+v, want nil", snapshot)
+	}
 }
 
 func TestQuotaReserveForAuth(t *testing.T) {
