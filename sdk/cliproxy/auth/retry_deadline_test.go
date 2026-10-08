@@ -15,7 +15,7 @@ func TestTemporaryUnavailabilityPreservesRecoveryDeadline(t *testing.T) {
 		for _, selectAuths := range []func() ([]*Auth, error){
 			func() ([]*Auth, error) { return getAvailableAuths(auths, "codex", "gpt-5.6-luna", now) },
 			func() ([]*Auth, error) {
-				return (&Manager{}).availableAuthsForRouteModelWithPriorityMode(auths, "codex", "gpt-5.6-luna", now, false)
+				return (&Manager{}).availableAuthsForRouteModelWithPriorityMode(auths, "codex", "gpt-5.6-luna", now, false, true)
 			},
 		} {
 			_, err := selectAuths()

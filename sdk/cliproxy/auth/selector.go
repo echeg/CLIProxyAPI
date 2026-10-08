@@ -487,52 +487,83 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, false)
+	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, false, false)
 }
 
 type prevalidatedAuthCandidatesKey struct{}
 
+// getSelectorAvailableAuths returns the candidates for a new selection: the quota
+// reserve applies across every tier before manual preference or tier narrowing.
 func getSelectorAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	if ctx == nil || ctx.Value(preferredAccountsContextKey{}) == nil {
-		return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false)
+		return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false, true)
 	}
-	available, errAvailable := getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true)
+	available, errAvailable := getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true, true)
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
 	return preferredOrHighestPriorityAuths(ctx, available), nil
 }
 
+// getSelectorAvailableAuthsAcrossPriorities validates existing session bindings, so it
+// ignores the quota reserve: a bound session keeps its credential.
 func getSelectorAvailableAuthsAcrossPriorities(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true)
+	return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true, false)
 }
 
-func getSelectorAvailableAuthsWithPriorityMode(ctx context.Context, auths []*Auth, provider, model string, now time.Time, allPriorities bool) ([]*Auth, error) {
+// newSelectionAuths narrows an across-priority availability set for a new session binding:
+// the quota reserve applies first, then manual preference or the highest available tier.
+func newSelectionAuths(ctx context.Context, available []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	selectable, _, recoverAt := quotaReserveFilter(available, now)
+	if len(selectable) == 0 && len(available) > 0 {
+		return nil, quotaReserveCooldownError(provider, model, recoverAt, now)
+	}
+	return preferredOrHighestPriorityAuths(ctx, selectable), nil
+}
+
+func getSelectorAvailableAuthsWithPriorityMode(ctx context.Context, auths []*Auth, provider, model string, now time.Time, allPriorities, reserve bool) ([]*Auth, error) {
 	if ctx != nil {
 		if validated, _ := ctx.Value(prevalidatedAuthCandidatesKey{}).(bool); validated && len(auths) > 0 {
 			// The manager already resolved each credential's upstream model and supplied
 			// ID-sorted candidates. Rechecking the alias or an empty model would apply
 			// unrelated cooldowns. Affinity bindings may span all priority tiers, but
 			// fallback selection must still use the highest available tier.
+			if reserve {
+				selectable, _, recoverAt := quotaReserveFilter(auths, now)
+				if len(selectable) == 0 {
+					return nil, quotaReserveCooldownError(provider, model, recoverAt, now)
+				}
+				auths = selectable
+			}
 			if !allPriorities {
 				return highestPriorityAuths(auths), nil
 			}
 			return auths, nil
 		}
 	}
-	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, allPriorities)
+	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, allPriorities, reserve)
 }
 
 func getAvailableAuthsAcrossPriorities(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, true)
+	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, true, false)
 }
 
-func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, now time.Time, allPriorities bool) ([]*Auth, error) {
+// getAvailableAuthsWithPriorityMode collects available candidates. With reserve set, the
+// quota reserve is applied for a new selection and hard-reserved candidates count as
+// cooling down until their reserve recovers.
+func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, now time.Time, allPriorities, reserve bool) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
 	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	if reserve {
+		hardCount, recoverAt := applyQuotaReserveToBuckets(availableByPriority, now)
+		cooldownCount += hardCount
+		if !recoverAt.IsZero() && (earliest.IsZero() || recoverAt.Before(earliest)) {
+			earliest = recoverAt
+		}
+	}
 	if len(availableByPriority) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
@@ -1036,12 +1067,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
-	// every priority tier, while the fallback selector keeps seeing only the highest tier.
+	// every priority tier without the quota reserve, so bound sessions live on, while new
+	// bindings see the reserve-filtered preferred account or highest tier.
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := preferredOrHighestPriorityAuths(ctx, available)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1073,6 +1104,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
+		fallbackAuths, errFallback := newSelectionAuths(ctx, available, provider, model, now)
+		if errFallback != nil {
+			return nil, errFallback
+		}
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err
@@ -1103,6 +1138,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
+	fallbackAuths, errFallback := newSelectionAuths(ctx, available, provider, model, now)
+	if errFallback != nil {
+		return nil, errFallback
+	}
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
@@ -1146,7 +1185,8 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
-	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, time.Now())
+	now := time.Now()
+	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if errAvailable != nil {
 		return nil, true, errAvailable
 	}
@@ -1194,7 +1234,10 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 	}
 
-	fallbackAuths := preferredOrHighestPriorityAuths(ctx, available)
+	fallbackAuths, errFallback := newSelectionAuths(ctx, available, provider, model, now)
+	if errFallback != nil {
+		return nil, true, errFallback
+	}
 	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if errPick != nil {
 		return nil, true, errPick

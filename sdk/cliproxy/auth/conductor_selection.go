@@ -543,15 +543,16 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 	m.mu.Unlock()
 }
 
+// availableAuthsForRouteModel returns the highest available tier for a new selection,
+// after applying the quota reserve across every tier.
 func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
-	return m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, false)
+	return m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, false, true)
 }
 
-func (m *Manager) availableAuthsForRouteModelAcrossPriorities(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
-	return m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true)
-}
-
-func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, provider, routeModel string, now time.Time, allPriorities bool) ([]*Auth, error) {
+// availableAuthsForRouteModelWithPriorityMode collects available candidates. With reserve
+// set, the quota reserve is applied for a new selection and hard-reserved candidates count
+// as cooling down until their reserve recovers.
+func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, provider, routeModel string, now time.Time, allPriorities, reserve bool) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -576,6 +577,13 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		}
 		if hasUnauthorizedAuthFailure(candidate) {
 			unauthorizedCount++
+		}
+	}
+	if reserve {
+		hardCount, recoverAt := applyQuotaReserveToBuckets(availableByPriority, now)
+		cooldownCount += hardCount
+		if !recoverAt.IsZero() && (earliest.IsZero() || recoverAt.Before(earliest)) {
+			earliest = recoverAt
 		}
 	}
 
@@ -633,16 +641,22 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 
 	// One availability pass and one clone pass serve both lists: the highest priority tier is a
 	// subset of the across-priority candidates, so it is narrowed from the same cloned auths.
-	allAuths, errAcross := m.availableAuthsForRouteModelAcrossPriorities(auths, provider, routeModel, now)
+	// Session affinity validates existing bindings against every available credential, so the
+	// quota reserve is left to the selector, which applies it only to new bindings.
+	allAuths, errAcross := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, !sessionAffinity)
 	if errAcross != nil {
 		return nil, nil, errAcross
 	}
 	allAuths = cloneAuthSlice(allAuths)
 
+	reservedAuths := allAuths
+	if sessionAffinity {
+		reservedAuths, _, _ = quotaReserveFilter(allAuths, now)
+	}
 	if schedulerAcross {
-		priorityAuths = allAuths
+		priorityAuths = reservedAuths
 	} else {
-		priorityAuths = highestPriorityAuths(allAuths)
+		priorityAuths = highestPriorityAuths(reservedAuths)
 	}
 
 	if sessionAffinity || manualPreference {
@@ -1993,26 +2007,25 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
-	if strings.TrimSpace(model) != "" {
-		m.mu.RLock()
-		targetKey := canonicalSchedulingProvider(provider)
-		for _, candidate := range m.auths {
-			if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
-				continue
-			}
-			if !eligibility.allows(candidate) {
-				continue
-			}
-			if _, used := tried[candidate.ID]; used {
-				continue
-			}
-			if m.routeAwareSelectionRequired(candidate, model) {
-				m.mu.RUnlock()
-				return m.pickNextLegacy(ctx, provider, model, opts, tried)
-			}
+	// The scheduler fast path does not know about route-aware models or quota reserves.
+	m.mu.RLock()
+	targetKey := canonicalSchedulingProvider(provider)
+	for _, candidate := range m.auths {
+		if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
+			continue
 		}
-		m.mu.RUnlock()
+		if !eligibility.allows(candidate) {
+			continue
+		}
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		if m.routeAwareSelectionRequired(candidate, model) || anyQuotaReserveConfigured([]*Auth{candidate}) {
+			m.mu.RUnlock()
+			return m.pickNextLegacy(ctx, provider, model, opts, tried)
+		}
 	}
+	m.mu.RUnlock()
 	executor, okExecutor := m.Executor(provider)
 	if !okExecutor {
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -2186,32 +2199,31 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
-	if strings.TrimSpace(model) != "" {
-		providerSet := make(map[string]struct{}, len(eligibleProviders))
-		for _, providerKey := range eligibleProviders {
-			providerSet[providerKey] = struct{}{}
-		}
-		m.mu.RLock()
-		for _, candidate := range m.auths {
-			if candidate == nil || candidate.Disabled {
-				continue
-			}
-			if _, ok := providerSet[canonicalSchedulingProvider(executorKeyFromAuth(candidate))]; !ok {
-				continue
-			}
-			if !eligibility.allows(candidate) {
-				continue
-			}
-			if _, used := tried[candidate.ID]; used {
-				continue
-			}
-			if m.routeAwareSelectionRequired(candidate, model) {
-				m.mu.RUnlock()
-				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
-			}
-		}
-		m.mu.RUnlock()
+	// The scheduler fast path does not know about route-aware models or quota reserves.
+	providerSet := make(map[string]struct{}, len(eligibleProviders))
+	for _, providerKey := range eligibleProviders {
+		providerSet[providerKey] = struct{}{}
 	}
+	m.mu.RLock()
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		if _, ok := providerSet[canonicalSchedulingProvider(executorKeyFromAuth(candidate))]; !ok {
+			continue
+		}
+		if !eligibility.allows(candidate) {
+			continue
+		}
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		if m.routeAwareSelectionRequired(candidate, model) || anyQuotaReserveConfigured([]*Auth{candidate}) {
+			m.mu.RUnlock()
+			return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+		}
+	}
+	m.mu.RUnlock()
 
 	beforeVer := m.syncedVersion.Load()
 	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)

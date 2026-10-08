@@ -124,7 +124,7 @@
 - [x] run `go test ./sdk/cliproxy/auth/...` - must pass before task 3
 
 ### Task 3: Apply the reserve in selection (new selections only)
-- [ ] write failing selector tests (`sdk/cliproxy/auth/quota_reserve_selector_test.go`) with `nowFunc`:
+- [x] write failing selector tests (`sdk/cliproxy/auth/quota_reserve_selector_test.go`) with `nowFunc`:
   - hard reserve excluded
   - all candidates hard-reserved → model-cooldown error with `Retry-After` until the earliest `until`
   - soft-reserved credential skipped while any non-reserved credential exists in ANY priority tier; picked from the last-resort pool when none exists; with several pool members, the configured strategy chooses
@@ -132,10 +132,12 @@
   - a preferred account below its reserve falls back (hard excluded / soft pool)
   - credentials without a reserve unchanged
   - no cooldown fields mutated
-- [ ] write a failing session-affinity test: a session already bound to a credential that then trips its reserve keeps that credential on the next request, while a NEW session is not bound to it
-- [ ] implement the filter at the availability stage used for new selections (`collectAvailableByPriority` / `getSelectorAvailableAuthsWithPriorityMode` in `selector.go`): split candidates into non-reserved and soft pools, and drop hard ones. Keep the bound-session validation path in `SessionAffinitySelector.Pick` (`selector.go:981+`) and the preferred-account path consistent with the decisions. Verify which availability helper each path uses and make sure the reserve is NOT applied when re-validating an existing binding.
-- [ ] make sure `earliest-reset` (`quota_selector.go`) and `preferredOrHighestPriorityAuths` operate on the filtered set, and that the 429 path reuses `newModelCooldownError`
-- [ ] run `gofmt`, the compile check, and `go test ./sdk/cliproxy/... ./internal/...` - must pass before task 4
+- [x] write a failing session-affinity test: a session already bound to a credential that then trips its reserve keeps that credential on the next request, while a NEW session is not bound to it
+- [x] implement the filter at the availability stage used for new selections (`collectAvailableByPriority` / `getSelectorAvailableAuthsWithPriorityMode` in `selector.go`): split candidates into non-reserved and soft pools, and drop hard ones. Keep the bound-session validation path in `SessionAffinitySelector.Pick` (`selector.go:981+`) and the preferred-account path consistent with the decisions. Verify which availability helper each path uses and make sure the reserve is NOT applied when re-validating an existing binding.
+- [x] make sure `earliest-reset` (`quota_selector.go`) and `preferredOrHighestPriorityAuths` operate on the filtered set, and that the 429 path reuses `newModelCooldownError`
+- [x] ➕ apply the same reserve filter in the manager's availability pass (`availableAuthsForRouteModelWithPriorityMode` in `conductor_selection.go`) before tier narrowing, except for session affinity, which applies it only to new bindings via `newSelectionAuths`
+- [x] ➕ make `pickNext`/`pickNextMixed` fall back from the built-in scheduler fast path to the legacy path when any candidate has a reserve configured (the scheduler does not know about reserves)
+- [x] run `gofmt`, the compile check, and `go test ./sdk/cliproxy/... ./internal/...` - must pass before task 4
 
 ### Task 4: Management API — PATCH and GET support
 - [ ] write failing handler tests in `internal/api/handlers/management` for `PATCH /v8/management/credentials/fields`:
