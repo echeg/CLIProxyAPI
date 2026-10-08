@@ -139,6 +139,75 @@ disables these local management endpoints. CLIProxyAPIHome needs corresponding
 selector, quota observation, and configuration support before using this strategy
 in a cluster.
 
+### Quota reserve for shared subscriptions
+
+A Codex or Claude subscription can also serve tools that do not go through this
+proxy. A quota reserve stops the proxy from spending the last part of such a
+subscription's quota. Store it in the credential JSON next to `priority`:
+
+```json
+{
+  "quota_reserve": {"percent": 25, "mode": "soft"}
+}
+```
+
+`percent` is an integer from 1 to 99. `mode` is `soft` (the default) or `hard`.
+One percent applies to every subscription window: Codex primary and secondary,
+or Claude five-hour and seven-day. The reserve is active when the remaining quota
+(`100 - used`) in any window is below `percent`. It is not active when the
+remaining quota equals `percent`. The reserve uses the latest quota observation,
+a single upstream response or usage probe. A window whose reset time has passed
+is ignored. A credential with no usable observation counts as available. Other
+providers do not support a reserve. An invalid value in a credential file is
+ignored with a warning, and the credential then has no reserve.
+
+The reserve affects only new selections:
+
+- `hard` excludes the credential.
+- `soft` makes the credential a last resort. It is used only when no credential
+  outside its reserve is available in any priority tier. The configured strategy
+  then chooses among the soft-reserved credentials.
+- When every candidate is excluded by a hard reserve or is cooling down, the
+  request gets the usual model-cooldown `429`. Its `Retry-After` points to the
+  earliest window reset that would make a candidate selectable again.
+
+A session already bound by session affinity keeps its credential after the
+reserve trips, so the session continues. New sessions are bound elsewhere. A
+preferred account below its reserve counts as unavailable: `hard` excludes it,
+and `soft` moves it to the last-resort pool. The reserve is only a selection
+filter. It never writes cooldown state.
+
+The proxy does not send background probes. Subscription limits are account-wide,
+so upstream rate-limit headers already include usage by other tools, and the next
+proxied request refreshes a stale observation. Requests already in flight when
+the reserve trips can still overshoot it. Refresh quotas in CPAMC to observe
+idle accounts.
+
+To set the reserve, send `PATCH /v8/management/credentials/fields`:
+
+```json
+{
+  "auth_index": "claude-account-index",
+  "fields": {"quota_reserve": {"percent": 25, "mode": "hard"}}
+}
+```
+
+The stored value is normalized to `{"percent": N, "mode": "soft"|"hard"}`. Set
+`quota_reserve` to `null` to remove it. Invalid values, nested paths such as
+`quota_reserve.percent`, and credentials other than Codex or Claude return `400`.
+
+Each entry in `GET /v8/management/credentials` includes:
+
+| Field | Description |
+| --- | --- |
+| `quota_reserve` | The configured `{"percent", "mode"}`. Omitted when no reserve is set. |
+| `quota_reserve_active` | `true` when the latest observation is below the reserve. Always present. |
+| `quota_reserve_until` | RFC3339 time when the reserve stops applying: the latest reset among the windows below the reserve. Present only while active. |
+
+The reserve is implemented for standalone CLIProxyAPI. Home mode uses its own
+selector and disables these local management endpoints. CLIProxyAPIHome needs
+matching reserve support before this works in a cluster.
+
 ### Codex multi-agent configuration migration
 
 `client.codex.optimize-multi-agent-v2` is the sole runtime setting. Loading older

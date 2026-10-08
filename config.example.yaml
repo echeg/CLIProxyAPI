@@ -141,6 +141,14 @@ routing:
   # to the configured strategy. Empty map means automatic selection for both providers.
   # Native standalone routing only; Home and scheduler plugins own their own selection.
   preferred-accounts: {} # Example: {codex: "auth-index", claude: "auth-index"}
+  # Codex/Claude OAuth credentials can keep part of their subscription quota for tools
+  # outside the proxy. Add a top-level "quota_reserve" next to "priority" in the auth JSON:
+  #   "quota_reserve": {"percent": 25, "mode": "soft"}
+  # percent is 1..99 and applies to every subscription window (Codex primary/secondary,
+  # Claude 5h/7d). Once any window has less than percent remaining, new selections skip
+  # the credential: hard excludes it, and soft (default) uses it only when no credential
+  # outside its reserve is available in any priority tier. Existing affinity bindings keep
+  # their credential. Uses recorded quota observations only; no background probes.
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,

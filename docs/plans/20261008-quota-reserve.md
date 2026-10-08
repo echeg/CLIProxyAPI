@@ -159,7 +159,7 @@
 - [x] ➕ coverage gaps closed: the all-hard session-affinity test now also runs the mixed-provider path (cooldown error reports no provider), and `newestSubscriptionSnapshot` is tested with no window prefixes. Combined `sdk/cliproxy/auth` + management coverage of `quota_reserve.go`, `newSelectionAuths` and `getSelectorAvailableAuthsWithPriorityMode` is 100%.
 
 ### Task 6: [Final] Update documentation
-- [ ] add a "Quota reserve for shared subscriptions" section to `docs/management-api-v8.md` next to "Subscription priority and session affinity". Cover:
+- [x] add a "Quota reserve for shared subscriptions" section to `docs/management-api-v8.md` next to "Subscription priority and session affinity". Cover:
   - format and modes
   - one percent for all windows
   - new-selection-only and affinity behavior
@@ -168,7 +168,7 @@
   - no background probes
   - the PATCH/GET fields
   - the Home-mode note
-- [ ] document the credential JSON field in `config.example.yaml`, in the comment block where `priority` is documented for credentials
+- [x] document the credential JSON field in `config.example.yaml`, in the comment block where `priority` is documented for credentials
 
 ## Technical Details
 - **Credential JSON**: `"quota_reserve": {"percent": 25, "mode": "soft"}`. `percent` is an int 1..99; `mode` is `soft` (default) or `hard`.
