@@ -112,7 +112,7 @@
 - [x] run `gofmt`, the compile check, and `go test ./sdk/cliproxy/auth/... ./internal/watcher/... ./sdk/auth/...` - must pass before task 2
 
 ### Task 2: Compute the reserve verdict from quota observations
-- [ ] write failing table tests for `quotaReserveVerdict(auth, now) (active bool, until time.Time)`:
+- [x] write failing table tests for `quotaReserveVerdict(auth, now) (active bool, until time.Time)`:
   - Codex: primary and secondary each trip on their own
   - Claude: 5h and 7d (utilization is a 0-1 fraction) each trip on their own
   - boundary `remaining == percent` is inactive; `remaining < percent` is active
@@ -120,8 +120,8 @@
   - missing or malformed signals are inactive
   - no reserve configured is inactive
   - `until` = the reset time of the tripping window; with several tripping windows, use the latest reset (the reserve holds until all tripping windows recover)
-- [ ] implement it in `sdk/cliproxy/auth/quota_reserve.go`, reusing the signal helpers in `quota_selector.go` (`subscriptionWindowPrefixes`, `quotaSignal`, the reset parsing) on a single snapshot, never merged across responses
-- [ ] run `go test ./sdk/cliproxy/auth/...` - must pass before task 3
+- [x] implement it in `sdk/cliproxy/auth/quota_reserve.go`, reusing the signal helpers in `quota_selector.go` (`subscriptionWindowPrefixes`, `quotaSignal`, the reset parsing) on a single snapshot, never merged across responses
+- [x] run `go test ./sdk/cliproxy/auth/...` - must pass before task 3
 
 ### Task 3: Apply the reserve in selection (new selections only)
 - [ ] write failing selector tests (`sdk/cliproxy/auth/quota_reserve_selector_test.go`) with `nowFunc`:

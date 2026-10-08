@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -118,4 +119,74 @@ func authQuotaReserve(auth *Auth) (percent int, hard bool, ok bool) {
 	default:
 		return 0, false, false
 	}
+}
+
+// quotaReserveVerdict reports whether the newest subscription window observation
+// leaves less remaining quota than the configured reserve in any window. until is
+// the latest reset among tripping windows, when the reserve stops holding.
+// Expired windows, windows without a usable reset, and malformed values are
+// ignored so a reserve can never pin a credential beyond its observed reset.
+func quotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Time) {
+	percent, _, ok := authQuotaReserve(auth)
+	if !ok {
+		return false, time.Time{}
+	}
+	prefixes := subscriptionWindowPrefixes(auth.Provider)
+	snapshot := newestSubscriptionSnapshot(auth, prefixes)
+	if snapshot == nil || snapshot.ObservedAt.IsZero() || snapshot.ObservedAt.After(now) {
+		return false, time.Time{}
+	}
+	claude := strings.EqualFold(strings.TrimSpace(auth.Provider), "claude")
+	for _, prefix := range prefixes {
+		var reset time.Time
+		var usedRaw string
+		scale := 1.0
+		if claude {
+			reset, _ = subscriptionResetTimestamp(quotaSignal(snapshot.Signals, prefix+"reset"))
+			usedRaw = quotaSignal(snapshot.Signals, prefix+"utilization")
+			scale = 100
+		} else {
+			reset = codexSubscriptionReset(snapshot, prefix)
+			usedRaw = quotaSignal(snapshot.Signals, prefix+"used-percent")
+		}
+		if !reset.After(now) {
+			continue
+		}
+		used, errParse := strconv.ParseFloat(usedRaw, 64)
+		if errParse != nil || math.IsNaN(used) || math.IsInf(used, 0) || used < 0 || used*scale > 100 {
+			continue
+		}
+		// Round away float noise from fractional utilization (0.7*100 != 70).
+		remaining := math.Round((100-used*scale)*1e6) / 1e6
+		if remaining >= float64(percent) {
+			continue
+		}
+		if reset.After(until) {
+			until = reset
+		}
+	}
+	return !until.IsZero(), until
+}
+
+// newestSubscriptionSnapshot returns the most recent observation carrying
+// subscription window signals. Windows are account-wide, so any model's
+// snapshot describes the whole credential; snapshots are never merged.
+func newestSubscriptionSnapshot(auth *Auth, prefixes []string) *QuotaState {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	var snapshot *QuotaState
+	consider := func(quota *QuotaState) {
+		if quota != nil && hasSubscriptionWindowSignals(quota.Signals, prefixes) &&
+			(snapshot == nil || quota.ObservedAt.After(snapshot.ObservedAt)) {
+			snapshot = quota
+		}
+	}
+	consider(&auth.Quota)
+	for _, state := range auth.ModelStates {
+		if state != nil {
+			consider(&state.Quota)
+		}
+	}
+	return snapshot
 }
