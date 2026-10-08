@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"strconv"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ func TestApplyAuthQuotaReserveMetadata(t *testing.T) {
 		{name: "missing mode defaults to soft", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25)}}, wantPercent: "25", wantMode: QuotaReserveModeSoft},
 		{name: "int percent", provider: "Claude", metadata: map[string]any{"quota_reserve": map[string]any{"percent": 1}}, wantPercent: "1", wantMode: QuotaReserveModeSoft},
 		{name: "upper bound", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(99)}}, wantPercent: "99", wantMode: QuotaReserveModeSoft},
+		{name: "json number percent", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": json.Number("35"), "mode": "hard"}}, wantPercent: "35", wantMode: QuotaReserveModeHard},
 		{name: "missing key", provider: "codex", metadata: map[string]any{}},
 		{name: "nil metadata", provider: "codex"},
 		{name: "null value", provider: "codex", metadata: map[string]any{"quota_reserve": nil}},
@@ -30,6 +32,8 @@ func TestApplyAuthQuotaReserveMetadata(t *testing.T) {
 		{name: "percent negative", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(-5)}}},
 		{name: "percent fractional", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25.5)}}},
 		{name: "percent string", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": "25"}}},
+		{name: "json number fractional", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": json.Number("25.5")}}},
+		{name: "json number malformed", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": json.Number("x")}}},
 		{name: "unknown mode", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25), "mode": "strict"}}},
 		{name: "mode not a string", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25), "mode": true}}},
 		{name: "unsupported provider", provider: "gemini", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25), "mode": "hard"}}},
@@ -225,5 +229,29 @@ func TestQuotaReserveVerdictUsesNewestSnapshot(t *testing.T) {
 	auth.ModelStates = map[string]*ModelState{"gpt-5": {Quota: QuotaState{ObservedAt: now.Add(-time.Minute), Signals: map[string]string{"Retry-After": "5"}}}}
 	if active, _ := quotaReserveVerdict(auth, now); !active {
 		t.Fatal("snapshot without window signals must not supersede a window observation")
+	}
+}
+
+func TestQuotaReserveForAuth(t *testing.T) {
+	tests := []struct {
+		name        string
+		auth        *Auth
+		wantPercent int
+		wantMode    string
+		wantOK      bool
+	}{
+		{name: "nil", auth: nil},
+		{name: "none", auth: &Auth{Provider: "codex"}},
+		{name: "soft default", auth: &Auth{Provider: "codex", Attributes: map[string]string{AttributeQuotaReservePercent: "25"}}, wantPercent: 25, wantMode: QuotaReserveModeSoft, wantOK: true},
+		{name: "hard", auth: &Auth{Provider: "claude", Attributes: map[string]string{AttributeQuotaReservePercent: "40", AttributeQuotaReserveMode: QuotaReserveModeHard}}, wantPercent: 40, wantMode: QuotaReserveModeHard, wantOK: true},
+		{name: "unsupported provider", auth: &Auth{Provider: "gemini", Attributes: map[string]string{AttributeQuotaReservePercent: "25"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			percent, mode, ok := QuotaReserveForAuth(tt.auth)
+			if percent != tt.wantPercent || mode != tt.wantMode || ok != tt.wantOK {
+				t.Fatalf("QuotaReserveForAuth() = (%d, %q, %v), want (%d, %q, %v)", percent, mode, ok, tt.wantPercent, tt.wantMode, tt.wantOK)
+			}
+		})
 	}
 }

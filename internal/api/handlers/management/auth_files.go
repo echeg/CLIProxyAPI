@@ -784,6 +784,14 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
 	}
+	if percent, mode, ok := coreauth.QuotaReserveForAuth(auth); ok {
+		entry["quota_reserve"] = gin.H{"percent": percent, "mode": mode}
+	}
+	reserveActive, reserveUntil := coreauth.QuotaReserveVerdict(auth, h.now())
+	entry["quota_reserve_active"] = reserveActive
+	if reserveActive {
+		entry["quota_reserve_until"] = reserveUntil.UTC().Format(time.RFC3339)
+	}
 	return entry
 }
 

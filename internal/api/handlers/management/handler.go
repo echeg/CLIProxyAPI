@@ -61,6 +61,15 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
 	pluginReleases          pluginReleaseCache
+	nowFunc                 func() time.Time
+}
+
+// now returns the handler clock; tests inject nowFunc to evaluate time-based verdicts.
+func (h *Handler) now() time.Time {
+	if h.nowFunc != nil {
+		return h.nowFunc()
+	}
+	return time.Now()
 }
 
 type configReloadSnapshot struct {

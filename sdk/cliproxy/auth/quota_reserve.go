@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -65,6 +66,12 @@ func parseQuotaReservePercent(raw any) (int, error) {
 		value = typed
 	case int:
 		value = float64(typed)
+	case json.Number:
+		parsed, errParse := typed.Float64()
+		if errParse != nil {
+			return 0, fmt.Errorf("quota_reserve.percent must be an integer between 1 and 99")
+		}
+		value = parsed
 	default:
 		return 0, fmt.Errorf("quota_reserve.percent must be an integer between 1 and 99")
 	}
@@ -100,6 +107,24 @@ func ApplyAuthQuotaReserveMetadata(auth *Auth, metadata map[string]any) {
 	}
 	auth.Attributes[AttributeQuotaReservePercent] = strconv.Itoa(percent)
 	auth.Attributes[AttributeQuotaReserveMode] = mode
+}
+
+// QuotaReserveForAuth returns the reserve synced into an auth's attributes.
+func QuotaReserveForAuth(auth *Auth) (percent int, mode string, ok bool) {
+	percent, hard, ok := authQuotaReserve(auth)
+	if !ok {
+		return 0, "", false
+	}
+	if hard {
+		return percent, QuotaReserveModeHard, true
+	}
+	return percent, QuotaReserveModeSoft, true
+}
+
+// QuotaReserveVerdict reports whether new selections currently avoid the auth
+// because of its quota reserve, and until when the tripping windows hold.
+func QuotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Time) {
+	return quotaReserveVerdict(auth, now)
 }
 
 // authQuotaReserve returns the configured reserve percent and whether it is hard.

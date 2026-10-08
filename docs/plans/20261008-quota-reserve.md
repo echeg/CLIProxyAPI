@@ -140,14 +140,16 @@
 - [x] run `gofmt`, the compile check, and `go test ./sdk/cliproxy/... ./internal/...` - must pass before task 4
 
 ### Task 4: Management API — PATCH and GET support
-- [ ] write failing handler tests in `internal/api/handlers/management` for `PATCH /v8/management/credentials/fields`:
+- [x] write failing handler tests in `internal/api/handlers/management` for `PATCH /v8/management/credentials/fields`:
   - `{"quota_reserve": {"percent": 25, "mode": "soft"}}` persists to the auth JSON and syncs the attributes
   - `null` deletes the field and the attributes
   - invalid values return 400 with a clear error
   - a non-codex/claude credential returns 400 "quota reserve is supported for codex and claude"
-- [ ] write failing tests for `GET /v8/management/credentials`: entries expose `quota_reserve` when set, `quota_reserve_active` (bool) and `quota_reserve_until` (RFC3339, only when active), computed with an injectable clock
-- [ ] implement validation in `normalizeAuthFilePatchFields` (`auth_files_fields.go:433`), a new `syncAuthFileQuotaReserveAttribute` invoked from `syncAuthFileMetadataFields` (`:603`), and the list fields in `ListAuthFiles` (`auth_files.go:~747`). Do not touch `/v0/management`.
-- [ ] run `gofmt`, the compile check, and `go test ./internal/api/...` - must pass before task 5
+- [x] write failing tests for `GET /v8/management/credentials`: entries expose `quota_reserve` when set, `quota_reserve_active` (bool) and `quota_reserve_until` (RFC3339, only when active), computed with an injectable clock
+- [x] implement validation in `normalizeAuthFilePatchFields` (`auth_files_fields.go:433`), a new `syncAuthFileQuotaReserveAttribute` invoked from `syncAuthFileMetadataFields` (`:603`), and the list fields in `ListAuthFiles` (`auth_files.go:~747`). Do not touch `/v0/management`.
+- [x] ➕ validation lives in the PATCH field loop next to `weight` (`normalizeAuthFileQuotaReserve`), not in `normalizeAuthFilePatchFields`, because the provider check needs the target auth. The sync step calls `coreauth.ApplyAuthQuotaReserveMetadata` directly. `quota_reserve.*` nested paths return 400. `null` deletes the field for any provider. The persisted value is canonical: `{"percent": N, "mode": "soft"|"hard"}`.
+- [x] ➕ GET always includes `quota_reserve_active`, even with no reserve set. `coreauth` exports `QuotaReserveForAuth`/`QuotaReserveVerdict`. `ParseQuotaReserve` accepts `json.Number`. The handler clock is `Handler.nowFunc`.
+- [x] run `gofmt`, the compile check, and `go test ./internal/api/...` - must pass before task 5
 
 ### Task 5: Verify acceptance criteria
 - [ ] verify every Overview requirement: storage, verdict, hard/soft, new-selection-only, preferred fallback, no cooldown writes, API read/write

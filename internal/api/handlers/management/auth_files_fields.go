@@ -363,6 +363,20 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "weight does not support nested fields"})
 			return
+		} else if fieldPath == authFileQuotaReserveField {
+			if value == nil {
+				delete(targetAuth.Metadata, authFileQuotaReserveField)
+			} else {
+				reserve, errReserve := normalizeAuthFileQuotaReserve(targetAuth, value)
+				if errReserve != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": errReserve.Error()})
+					return
+				}
+				targetAuth.Metadata[authFileQuotaReserveField] = reserve
+			}
+		} else if rootAuthFileField(fieldPath) == authFileQuotaReserveField {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "quota_reserve does not support nested fields"})
+			return
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
@@ -423,6 +437,21 @@ func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+const authFileQuotaReserveField = "quota_reserve"
+
+// normalizeAuthFileQuotaReserve validates a quota_reserve patch value and returns
+// the canonical object persisted to the auth file.
+func normalizeAuthFileQuotaReserve(auth *coreauth.Auth, value any) (map[string]any, error) {
+	if !coreauth.QuotaReserveSupportedProvider(auth.Provider) {
+		return nil, fmt.Errorf("quota reserve is supported for codex and claude")
+	}
+	percent, mode, errParse := coreauth.ParseQuotaReserve(value)
+	if errParse != nil {
+		return nil, errParse
+	}
+	return map[string]any{"percent": percent, "mode": mode}, nil
 }
 
 type authFileRequestRetryPatch struct {
@@ -622,6 +651,9 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	}
 	if _, ok := touchedRoots[coreauth.AttributeWeight]; ok {
 		syncAuthFileWeightAttribute(auth)
+	}
+	if _, ok := touchedRoots[authFileQuotaReserveField]; ok {
+		coreauth.ApplyAuthQuotaReserveMetadata(auth, auth.Metadata)
 	}
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
