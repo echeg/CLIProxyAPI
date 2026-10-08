@@ -333,6 +333,31 @@ func quotaReserveSkipped(ctx context.Context) bool {
 	return skipped
 }
 
+// quotaReserveExhaustedContextKey carries the manager's error for a new selection that the
+// quota reserve leaves without candidates.
+type quotaReserveExhaustedContextKey struct{}
+
+// withQuotaReserveExhaustedError hands the selector the error a reserve-aware availability
+// pass reported. The selector only sees available credentials, so this error is the one that
+// also accounts for credentials cooling down.
+func withQuotaReserveExhaustedError(ctx context.Context, err error) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, quotaReserveExhaustedContextKey{}, err)
+}
+
+// quotaReserveExhaustedError reports a new selection whose available candidates are all held
+// by a hard reserve, preferring the error supplied by the manager.
+func quotaReserveExhaustedError(ctx context.Context, provider, model string, recoverAt, now time.Time) error {
+	if ctx != nil {
+		if errExhausted, _ := ctx.Value(quotaReserveExhaustedContextKey{}).(error); errExhausted != nil {
+			return errExhausted
+		}
+	}
+	return quotaReserveCooldownError(provider, model, recoverAt, now)
+}
+
 // quotaReserveCooldownError reports that every available candidate is held by a hard
 // reserve. It reuses the model-cooldown 429 so Retry-After points at the earliest recovery.
 func quotaReserveCooldownError(provider, model string, recoverAt, now time.Time) *modelCooldownError {

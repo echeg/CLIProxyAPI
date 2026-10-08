@@ -520,7 +520,7 @@ func newSelectionAuths(ctx context.Context, available []*Auth, provider, model s
 	}
 	selectable, _, recoverAt := quotaReserveFilter(available, now)
 	if len(selectable) == 0 && len(available) > 0 {
-		return nil, quotaReserveCooldownError(provider, model, recoverAt, now)
+		return nil, quotaReserveExhaustedError(ctx, provider, model, recoverAt, now)
 	}
 	return preferredOrHighestPriorityAuths(ctx, selectable), nil
 }
@@ -535,7 +535,7 @@ func getSelectorAvailableAuthsWithPriorityMode(ctx context.Context, auths []*Aut
 			if reserve {
 				selectable, _, recoverAt := quotaReserveFilter(auths, now)
 				if len(selectable) == 0 {
-					return nil, quotaReserveCooldownError(provider, model, recoverAt, now)
+					return nil, quotaReserveExhaustedError(ctx, provider, model, recoverAt, now)
 				}
 				auths = selectable
 			}

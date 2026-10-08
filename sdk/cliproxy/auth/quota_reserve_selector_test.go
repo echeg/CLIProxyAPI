@@ -426,6 +426,26 @@ func TestQuotaReserveCooldownMixesWithRealCooldown(t *testing.T) {
 	}
 }
 
+func TestQuotaReserveSessionAffinityCooldownMixesWithRealCooldown(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		for _, session := range []string{"", "reserve-cooldown-session"} {
+			t.Run(fmt.Sprintf("mixed=%t/session=%q", mixed, session), func(t *testing.T) {
+				manager, accounts, model := reserveTestManager(t, NewSessionAffinitySelector(&RoundRobinSelector{}), []reserveSpec{
+					{mode: QuotaReserveModeHard, used: 90, reset: 3 * time.Hour},
+					{},
+				})
+				manager.mu.Lock()
+				manager.auths[accounts[1].ID].Quota = QuotaState{
+					Exceeded: true, Reason: "credential_quota", NextRecoverAt: time.Now().Add(10 * time.Minute),
+				}
+				manager.mu.Unlock()
+				selected, errPick := reservePick(manager, model, session, mixed)
+				assertReserveCooldown(t, selected, errPick, 10*time.Minute)
+			})
+		}
+	}
+}
+
 func assertReserveCooldown(t *testing.T, selected *Auth, errPick error, wantResetIn time.Duration) {
 	t.Helper()
 	var cooldownErr *modelCooldownError

@@ -621,8 +621,10 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
 // unless session affinity, a manual preference, or an across-priorities scheduler is active,
 // in which case the selector or scheduler additionally receives lower priority tiers.
-// With reserve unset (a pinned execution) the quota reserve is not applied.
-func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, err error) {
+// With reserve unset (a pinned execution) the quota reserve is not applied. Under session
+// affinity, newSelectionErr is the error for a new binding when every available credential
+// is hard-reserved; bound sessions still reach the selector.
+func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, newSelectionErr error, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
 	manualPreference := supportsPreferredAccounts(selector) && len(m.preferredAccounts()) > 0
@@ -630,10 +632,10 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 	if !sessionAffinity && !schedulerAcross && !manualPreference {
 		priorityAuths, err = m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, false, reserve)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		priorityAuths = cloneAuthSlice(priorityAuths)
-		return priorityAuths, priorityAuths, nil
+		return priorityAuths, priorityAuths, nil, nil
 	}
 
 	// One availability pass and one clone pass serve both lists: the highest priority tier is a
@@ -642,13 +644,18 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 	// quota reserve is left to the selector, which applies it only to new bindings.
 	allAuths, errAcross := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, reserve && !sessionAffinity)
 	if errAcross != nil {
-		return nil, nil, errAcross
+		return nil, nil, nil, errAcross
 	}
 	allAuths = cloneAuthSlice(allAuths)
 
 	reservedAuths := allAuths
 	if sessionAffinity && reserve {
 		reservedAuths, _, _ = quotaReserveFilter(allAuths, now)
+		if len(reservedAuths) == 0 {
+			// The reserve-aware pass also counts credentials cooling down, so its Retry-After
+			// matches the error the non-affinity path reports.
+			_, newSelectionErr = m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, true)
+		}
 	}
 	if schedulerAcross {
 		priorityAuths = reservedAuths
@@ -661,7 +668,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 	} else {
 		selectorAuths = highestPriorityAuths(allAuths)
 	}
-	return priorityAuths, selectorAuths, nil
+	return priorityAuths, selectorAuths, newSelectionErr, nil
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
@@ -1801,7 +1808,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, time.Now(), pinnedAuthID == "")
+	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, time.Now(), pinnedAuthID == "")
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -1819,6 +1826,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if pinnedAuthID != "" {
 			// A pinned credential serves an existing binding, so the quota reserve does not apply.
 			selectorCtx = withQuotaReserveSkipped(selectorCtx)
+		}
+		if errNewSelection != nil {
+			selectorCtx = withQuotaReserveExhaustedError(selectorCtx, errNewSelection)
 		}
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
@@ -2138,7 +2148,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now(), pinnedAuthID == "")
+	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now(), pinnedAuthID == "")
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
@@ -2156,6 +2166,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if pinnedAuthID != "" {
 			// A pinned credential serves an existing binding, so the quota reserve does not apply.
 			selectorCtx = withQuotaReserveSkipped(selectorCtx)
+		}
+		if errNewSelection != nil {
+			selectorCtx = withQuotaReserveExhaustedError(selectorCtx, errNewSelection)
 		}
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
