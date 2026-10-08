@@ -625,8 +625,17 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // affinity, newSelectionErr is the error for a new binding when every available credential
 // is hard-reserved; bound sessions still reach the selector.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, newSelectionErr error, err error) {
-	_, sessionAffinity := selector.(*SessionAffinitySelector)
+	affinitySelector, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
+	weighted := selector
+	if sessionAffinity {
+		weighted = affinitySelector.fallback
+	}
+	if _, ok := weighted.(*WeightedRoundRobinSelector); ok && reserve && anyQuotaReserveConfigured(auths) {
+		// Weighted round-robin never serves non-positive weights, so they must not count as
+		// unreserved alternatives that push reserved credentials out of a new selection.
+		auths = positiveWeightAuths(auths)
+	}
 	manualPreference := supportsPreferredAccounts(selector) && len(m.preferredAccounts()) > 0
 
 	if !sessionAffinity && !schedulerAcross && !manualPreference {

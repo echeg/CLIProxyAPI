@@ -23,6 +23,8 @@ type reserveSpec struct {
 	used int
 	// reset is the primary window reset relative to the observation.
 	reset time.Duration
+	// weight is the weighted round-robin weight; empty keeps the default.
+	weight string
 }
 
 // reserveQuota builds a Codex observation whose primary window used percent and reset are given.
@@ -37,6 +39,9 @@ func reserveSpecAuth(id string, spec reserveSpec, observedAt time.Time) *Auth {
 	attributes := map[string]string{}
 	if spec.priority != "" {
 		attributes["priority"] = spec.priority
+	}
+	if spec.weight != "" {
+		attributes[AttributeWeight] = spec.weight
 	}
 	if spec.mode != "" {
 		attributes[AttributeQuotaReservePercent] = "30"
@@ -259,6 +264,44 @@ func TestQuotaReservePreferredAccountFallback(t *testing.T) {
 			t.Fatalf("selected %v, %v; want preferred %s", selected, errPick, accounts[1].ID)
 		}
 	})
+}
+
+func TestQuotaReserveWeightedIgnoresZeroWeightAlternatives(t *testing.T) {
+	selectors := map[string]func() Selector{
+		"weighted":          func() Selector { return &WeightedRoundRobinSelector{} },
+		"affinity-weighted": func() Selector { return NewSessionAffinitySelector(&WeightedRoundRobinSelector{}) },
+	}
+	for name, newSelector := range selectors {
+		for _, mixed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/mixed=%t/soft kept as last resort", name, mixed), func(t *testing.T) {
+				selector := newSelector()
+				if affinity, ok := selector.(*SessionAffinitySelector); ok {
+					t.Cleanup(affinity.Stop)
+				}
+				manager, accounts, model := reserveTestManager(t, selector, []reserveSpec{
+					{mode: QuotaReserveModeSoft, used: 90},
+					{weight: "0"},
+				})
+				for _, session := range []string{"", "fresh"} {
+					if selected, errPick := reservePick(manager, model, session, mixed); errPick != nil || selected.ID != accounts[0].ID {
+						t.Fatalf("session %q selected %v, %v; want %s", session, selected, errPick, accounts[0].ID)
+					}
+				}
+			})
+			t.Run(fmt.Sprintf("%s/mixed=%t/hard returns model cooldown", name, mixed), func(t *testing.T) {
+				selector := newSelector()
+				if affinity, ok := selector.(*SessionAffinitySelector); ok {
+					t.Cleanup(affinity.Stop)
+				}
+				manager, _, model := reserveTestManager(t, selector, []reserveSpec{
+					{mode: QuotaReserveModeHard, used: 90},
+					{weight: "0"},
+				})
+				selected, errPick := reservePick(manager, model, "", mixed)
+				assertReserveCooldown(t, selected, errPick, time.Hour)
+			})
+		}
+	}
 }
 
 func TestQuotaReserveSessionAffinityKeepsBoundSessions(t *testing.T) {
