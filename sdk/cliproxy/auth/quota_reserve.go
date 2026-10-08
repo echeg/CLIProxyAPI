@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -121,12 +122,6 @@ func QuotaReserveForAuth(auth *Auth) (percent int, mode string, ok bool) {
 	return percent, QuotaReserveModeSoft, true
 }
 
-// QuotaReserveVerdict reports whether new selections currently avoid the auth
-// because of its quota reserve, and until when the tripping windows hold.
-func QuotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Time) {
-	return quotaReserveVerdict(auth, now)
-}
-
 // authQuotaReserve returns the configured reserve percent and whether it is hard.
 func authQuotaReserve(auth *Auth) (percent int, hard bool, ok bool) {
 	if auth == nil || !QuotaReserveSupportedProvider(auth.Provider) {
@@ -146,12 +141,13 @@ func authQuotaReserve(auth *Auth) (percent int, hard bool, ok bool) {
 	}
 }
 
-// quotaReserveVerdict reports whether the newest subscription window observation
-// leaves less remaining quota than the configured reserve in any window. until is
-// the latest reset among tripping windows, when the reserve stops holding.
+// QuotaReserveVerdict reports whether the newest subscription window observation
+// leaves less remaining quota than the configured reserve in any window, so new
+// selections avoid the auth. until is the latest reset among tripping windows,
+// when the reserve stops holding.
 // Expired windows, windows without a usable reset, and malformed values are
 // ignored so a reserve can never pin a credential beyond its observed reset.
-func quotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Time) {
+func QuotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Time) {
 	percent, _, ok := authQuotaReserve(auth)
 	if !ok {
 		return false, time.Time{}
@@ -229,7 +225,7 @@ func quotaReserveFilter(auths []*Auth, now time.Time) (selectable []*Auth, hardC
 	unreserved := make([]*Auth, 0, len(auths))
 	var soft []*Auth
 	for _, candidate := range auths {
-		active, until := quotaReserveVerdict(candidate, now)
+		active, until := QuotaReserveVerdict(candidate, now)
 		if !active {
 			unreserved = append(unreserved, candidate)
 			continue
@@ -254,8 +250,9 @@ func quotaReserveFilter(auths []*Auth, now time.Time) (selectable []*Auth, hardC
 
 // applyQuotaReserveToBuckets applies quotaReserveFilter across every priority tier at
 // once, so a reserved top tier yields to unreserved lower tiers before tier narrowing.
-// Emptied tiers are removed from the map.
-func applyQuotaReserveToBuckets(buckets map[int][]*Auth, now time.Time) (hardCount int, recoverAt time.Time) {
+// Emptied tiers are removed from the map. Dropped hard-reserved candidates are added to
+// cooldownCount, and earliest moves to their reserve recovery when that comes sooner.
+func applyQuotaReserveToBuckets(buckets map[int][]*Auth, now time.Time, cooldownCount int, earliest time.Time) (int, time.Time) {
 	configured := false
 	total := 0
 	for _, bucket := range buckets {
@@ -263,15 +260,19 @@ func applyQuotaReserveToBuckets(buckets map[int][]*Auth, now time.Time) (hardCou
 		configured = configured || anyQuotaReserveConfigured(bucket)
 	}
 	if !configured {
-		return 0, time.Time{}
+		return cooldownCount, earliest
 	}
 	all := make([]*Auth, 0, total)
 	for _, bucket := range buckets {
 		all = append(all, bucket...)
 	}
 	selectable, hardCount, recoverAt := quotaReserveFilter(all, now)
+	cooldownCount += hardCount
+	if !recoverAt.IsZero() && (earliest.IsZero() || recoverAt.Before(earliest)) {
+		earliest = recoverAt
+	}
 	if len(selectable) == len(all) {
-		return hardCount, recoverAt
+		return cooldownCount, earliest
 	}
 	keep := make(map[*Auth]struct{}, len(selectable))
 	for _, candidate := range selectable {
@@ -290,7 +291,7 @@ func applyQuotaReserveToBuckets(buckets map[int][]*Auth, now time.Time) (hardCou
 			buckets[priority] = kept
 		}
 	}
-	return hardCount, recoverAt
+	return cooldownCount, earliest
 }
 
 func anyQuotaReserveConfigured(auths []*Auth) bool {
@@ -300,6 +301,36 @@ func anyQuotaReserveConfigured(auths []*Auth) bool {
 		}
 	}
 	return false
+}
+
+// hardQuotaReserveUntil reports when an auth held by an active hard reserve becomes
+// selectable again for new selections.
+func hardQuotaReserveUntil(auth *Auth, now time.Time) (time.Time, bool) {
+	if _, hard, _ := authQuotaReserve(auth); !hard {
+		return time.Time{}, false
+	}
+	active, until := QuotaReserveVerdict(auth, now)
+	return until, active
+}
+
+// quotaReserveSkippedContextKey marks a selection that must ignore the quota reserve.
+type quotaReserveSkippedContextKey struct{}
+
+// withQuotaReserveSkipped marks a selection that serves an existing binding, such as a
+// pinned credential, so the reserve does not apply.
+func withQuotaReserveSkipped(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, quotaReserveSkippedContextKey{}, true)
+}
+
+func quotaReserveSkipped(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	skipped, _ := ctx.Value(quotaReserveSkippedContextKey{}).(bool)
+	return skipped
 }
 
 // quotaReserveCooldownError reports that every available candidate is held by a hard

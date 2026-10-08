@@ -495,10 +495,11 @@ type prevalidatedAuthCandidatesKey struct{}
 // getSelectorAvailableAuths returns the candidates for a new selection: the quota
 // reserve applies across every tier before manual preference or tier narrowing.
 func getSelectorAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	reserve := !quotaReserveSkipped(ctx)
 	if ctx == nil || ctx.Value(preferredAccountsContextKey{}) == nil {
-		return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false, true)
+		return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false, reserve)
 	}
-	available, errAvailable := getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true, true)
+	available, errAvailable := getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true, reserve)
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
@@ -514,6 +515,9 @@ func getSelectorAvailableAuthsAcrossPriorities(ctx context.Context, auths []*Aut
 // newSelectionAuths narrows an across-priority availability set for a new session binding:
 // the quota reserve applies first, then manual preference or the highest available tier.
 func newSelectionAuths(ctx context.Context, available []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	if quotaReserveSkipped(ctx) {
+		return preferredOrHighestPriorityAuths(ctx, available), nil
+	}
 	selectable, _, recoverAt := quotaReserveFilter(available, now)
 	if len(selectable) == 0 && len(available) > 0 {
 		return nil, quotaReserveCooldownError(provider, model, recoverAt, now)
@@ -558,11 +562,7 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 
 	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
 	if reserve {
-		hardCount, recoverAt := applyQuotaReserveToBuckets(availableByPriority, now)
-		cooldownCount += hardCount
-		if !recoverAt.IsZero() && (earliest.IsZero() || recoverAt.Before(earliest)) {
-			earliest = recoverAt
-		}
+		cooldownCount, earliest = applyQuotaReserveToBuckets(availableByPriority, now, cooldownCount, earliest)
 	}
 	if len(availableByPriority) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {

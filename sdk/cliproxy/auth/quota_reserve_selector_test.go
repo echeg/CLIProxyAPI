@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // reserveSpec describes one credential in a quota reserve selection scenario.
@@ -331,6 +332,96 @@ func TestQuotaReserveSelectorDirectAvailability(t *testing.T) {
 			}
 			selected, errPick = selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, []*Auth{reserved})
 			assertReserveCooldown(t, selected, errPick, time.Hour)
+		})
+	}
+}
+
+func TestQuotaReservePinnedAuthIgnoresReserve(t *testing.T) {
+	newSelectors := append(reserveSelectors(), func() Selector {
+		return NewSessionAffinitySelector(&RoundRobinSelector{})
+	})
+	for _, newSelector := range newSelectors {
+		for _, mixed := range []bool{false, true} {
+			selector := newSelector()
+			if sessionSelector, ok := selector.(*SessionAffinitySelector); ok {
+				t.Cleanup(sessionSelector.Stop)
+			}
+			t.Run(fmt.Sprintf("%T/mixed=%t", selector, mixed), func(t *testing.T) {
+				manager, accounts, model := reserveTestManager(t, selector, []reserveSpec{
+					{mode: QuotaReserveModeHard, used: 90},
+					{},
+				})
+				opts := cliproxyexecutor.Options{Metadata: map[string]any{
+					cliproxyexecutor.PinnedAuthMetadataKey:       accounts[0].ID,
+					cliproxyexecutor.DerivedSessionIDMetadataKey: "pinned-session",
+				}}
+				var selected *Auth
+				var errPick error
+				if mixed {
+					selected, _, _, errPick = manager.pickNextMixed(context.Background(), []string{"codex"}, model, opts, nil)
+				} else {
+					selected, _, errPick = manager.pickNext(context.Background(), "codex", model, opts, nil)
+				}
+				if errPick != nil || selected == nil || selected.ID != accounts[0].ID {
+					t.Fatalf("pinned selection = %v, %v; want %s", selected, errPick, accounts[0].ID)
+				}
+			})
+		}
+	}
+}
+
+func TestQuotaReservePluginSchedulerDelegatedBuiltinHonorsReserve(t *testing.T) {
+	for _, delegate := range []string{pluginapi.SchedulerBuiltinRoundRobin, pluginapi.SchedulerBuiltinFillFirst} {
+		t.Run(delegate, func(t *testing.T) {
+			manager, accounts, model := reserveTestManager(t, &RoundRobinSelector{}, []reserveSpec{
+				{mode: QuotaReserveModeHard, used: 90},
+				{},
+			})
+			manager.SetPluginScheduler(&fakePluginScheduler{
+				resp:    pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: delegate},
+				handled: true,
+			})
+			for range 3 {
+				if selected, errPick := reservePick(manager, model, "", false); errPick != nil || selected.ID != accounts[1].ID {
+					t.Fatalf("selected %v, %v; want %s", selected, errPick, accounts[1].ID)
+				}
+			}
+		})
+	}
+}
+
+func TestQuotaReserveRetryWaitsForHardReserve(t *testing.T) {
+	manager, accounts, model := reserveTestManager(t, &RoundRobinSelector{}, []reserveSpec{
+		{mode: QuotaReserveModeHard, used: 90, reset: time.Hour},
+	})
+	wait, found := manager.closestCooldownWait([]string{"codex"}, model, 0, authSelectionEligibility{}, "", 3)
+	if !found || wait < 55*time.Minute || wait > time.Hour {
+		t.Fatalf("closestCooldownWait = %s, %t; want about 1h", wait, found)
+	}
+	wait, found = manager.closestCooldownWait([]string{"codex"}, model, 0, authSelectionEligibility{}, accounts[0].ID, 3)
+	if !found || wait != 0 {
+		t.Fatalf("pinned closestCooldownWait = %s, %t; want immediate retry", wait, found)
+	}
+}
+
+func TestQuotaReserveCooldownMixesWithRealCooldown(t *testing.T) {
+	now := time.Now()
+	observed := now.Add(-time.Minute)
+	reserved := reserveSpecAuth("a-reserved", reserveSpec{mode: QuotaReserveModeHard, used: 90, reset: time.Hour}, observed)
+	for _, tt := range []struct {
+		name      string
+		cooldown  time.Duration
+		wantReset time.Duration
+	}{
+		{name: "cooldown recovers first", cooldown: 10 * time.Minute, wantReset: 10 * time.Minute},
+		{name: "reserve recovers first", cooldown: 3 * time.Hour, wantReset: time.Hour},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cooling := &Auth{ID: "b-cooling", Provider: "codex", Status: StatusActive, Quota: QuotaState{
+				Exceeded: true, Reason: "credential_quota", NextRecoverAt: now.Add(tt.cooldown),
+			}}
+			selected, errPick := (&RoundRobinSelector{}).Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, []*Auth{reserved, cooling})
+			assertReserveCooldown(t, selected, errPick, tt.wantReset)
 		})
 	}
 }

@@ -76,8 +76,8 @@ send `PATCH /v8/management/config/routing` with:
 }
 ```
 
-The selector first applies availability, model eligibility, and manual credential
-priority. Within the highest available priority tier it chooses the earliest
+The selector first applies availability, model eligibility, quota reserves (see
+below), and manual credential priority. Within the highest available priority tier it chooses the earliest
 future reset of a shared subscription window with remaining quota: Codex primary
 and secondary windows, or Claude five-hour and seven-day windows. Equal reset
 times use stable credential ordering. Unknown, malformed, exhausted, and expired
@@ -109,8 +109,8 @@ To prefer a particular subscription for new threads, use its `auth_index` from
 Send this body to `PATCH /v8/management/config/routing`. A usable preferred
 account takes precedence over automatic ordering and numeric credential priority.
 Existing session bindings remain intact when preferences change or are cleared.
-Unavailable, disabled, removed, or model-ineligible preferred accounts fall back
-to the configured strategy. With affinity disabled, preferences apply to each
+Unavailable, disabled, removed, or model-ineligible preferred accounts, and
+preferred accounts below their quota reserve, fall back to the configured strategy. With affinity disabled, preferences apply to each
 request. To restore automatic selection for one provider, patch its value to
 `null`; to clear both, patch `preferred-accounts` to `null`. Other providers are
 not supported by this setting. Home and plugin schedulers remain authoritative.
@@ -165,14 +165,16 @@ The reserve affects only new selections:
 
 - `hard` excludes the credential.
 - `soft` makes the credential a last resort. It is used only when no credential
-  outside its reserve is available in any priority tier. The configured strategy
-  then chooses among the soft-reserved credentials.
+  outside its reserve is available in any priority tier. Among soft-reserved
+  credentials the usual rules apply: a preferred account first, otherwise the
+  highest priority tier, where the configured strategy chooses.
 - When every candidate is excluded by a hard reserve or is cooling down, the
   request gets the usual model-cooldown `429`. Its `Retry-After` points to the
   earliest window reset that would make a candidate selectable again.
 
 A session already bound by session affinity keeps its credential after the
-reserve trips, so the session continues. New sessions are bound elsewhere. A
+reserve trips, so the session continues. Executions pinned to a credential, such
+as Codex websocket continuations, also ignore the reserve. New sessions are bound elsewhere. A
 preferred account below its reserve counts as unavailable: `hard` excludes it,
 and `soft` moves it to the last-resort pool. The reserve is only a selection
 filter. It never writes cooldown state.
@@ -187,14 +189,16 @@ To set the reserve, send `PATCH /v8/management/credentials/fields`:
 
 ```json
 {
-  "auth_index": "claude-account-index",
-  "fields": {"quota_reserve": {"percent": 25, "mode": "hard"}}
+  "name": "claude-account.json",
+  "quota_reserve": {"percent": 25, "mode": "hard"}
 }
 ```
 
-The stored value is normalized to `{"percent": N, "mode": "soft"|"hard"}`. Set
-`quota_reserve` to `null` to remove it. Invalid values, nested paths such as
-`quota_reserve.percent`, and credentials other than Codex or Claude return `400`.
+`name` is the credential file name or ID. The stored value is normalized to
+`{"percent": N, "mode": "soft"|"hard"}`. Set `quota_reserve` to `null` to remove
+it; this works for any credential. Invalid values, nested paths such as
+`quota_reserve.percent`, and a non-null reserve on a credential other than Codex
+or Claude return `400`.
 
 Each entry in `GET /v8/management/credentials` includes:
 
@@ -204,7 +208,9 @@ Each entry in `GET /v8/management/credentials` includes:
 | `quota_reserve_active` | `true` when the latest observation is below the reserve. Always present. |
 | `quota_reserve_until` | RFC3339 time when the reserve stops applying: the latest reset among the windows below the reserve. Present only while active. |
 
-The reserve is implemented for standalone CLIProxyAPI. Home mode uses its own
+Scheduler plugins receive candidates with the reserve already applied: hard-reserved
+credentials are removed, and soft-reserved ones appear only when no unreserved
+credential is available. The reserve is implemented for standalone CLIProxyAPI. Home mode uses its own
 selector and disables these local management endpoints. CLIProxyAPIHome needs
 matching reserve support before this works in a cluster.
 

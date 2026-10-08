@@ -184,13 +184,13 @@
     → drop hard-reserved
     → split: normal pool (by priority tier, as today) | soft pool
     → if normal pool non-empty: existing tier+strategy+preferred logic on normal pool
-    → else if soft pool non-empty: strategy on soft pool
+    → else if soft pool non-empty: preferred/tier+strategy on soft pool
     → else: model-cooldown 429 (Retry-After = earliest of cooldown/reserve recovery)
   ```
 
-  Bound sessions skip the reserve check.
+  Bound sessions and pinned executions skip the reserve check.
 - **API**:
-  - `PATCH /v8/management/credentials/fields` `{"auth_index":"…","fields":{"quota_reserve":{…}|null}}`
+  - `PATCH /v8/management/credentials/fields` `{"name":"<file name or ID>","quota_reserve":{…}|null}`
   - `GET /v8/management/credentials` entries add `quota_reserve`, `quota_reserve_active` and `quota_reserve_until`
 
 ## Post-Completion

@@ -34,6 +34,7 @@ func TestApplyAuthQuotaReserveMetadata(t *testing.T) {
 		{name: "percent string", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": "25"}}},
 		{name: "json number fractional", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": json.Number("25.5")}}},
 		{name: "json number malformed", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": json.Number("x")}}},
+		{name: "null mode defaults to soft", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25), "mode": nil}}, wantPercent: "25", wantMode: QuotaReserveModeSoft},
 		{name: "unknown mode", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25), "mode": "strict"}}},
 		{name: "mode not a string", provider: "codex", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25), "mode": true}}},
 		{name: "unsupported provider", provider: "gemini", metadata: map[string]any{"quota_reserve": map[string]any{"percent": float64(25), "mode": "hard"}}},
@@ -189,7 +190,7 @@ func TestQuotaReserveVerdict(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			active, until := quotaReserveVerdict(tt.auth, now)
+			active, until := QuotaReserveVerdict(tt.auth, now)
 			if active != tt.active {
 				t.Fatalf("active = %v, want %v", active, tt.active)
 			}
@@ -214,20 +215,20 @@ func TestQuotaReserveVerdictUsesNewestSnapshot(t *testing.T) {
 
 	auth := reserveVerdictAuth("codex", "25", now.Add(-2*time.Minute), tripped)
 	auth.ModelStates = map[string]*ModelState{"gpt-5": {Quota: QuotaState{ObservedAt: now.Add(-time.Minute), Signals: healthy}}}
-	if active, _ := quotaReserveVerdict(auth, now); active {
+	if active, _ := QuotaReserveVerdict(auth, now); active {
 		t.Fatal("newer healthy model snapshot must supersede older tripped auth snapshot")
 	}
 
 	auth = reserveVerdictAuth("codex", "25", now.Add(-2*time.Minute), healthy)
 	auth.ModelStates = map[string]*ModelState{"gpt-5": {Quota: QuotaState{ObservedAt: now.Add(-time.Minute), Signals: tripped}}, "nil-model": nil}
-	if active, _ := quotaReserveVerdict(auth, now); !active {
+	if active, _ := QuotaReserveVerdict(auth, now); !active {
 		t.Fatal("newer tripped model snapshot must supersede older healthy auth snapshot")
 	}
 
 	// Unrelated signals (e.g. a bare Retry-After) must not hide the last window observation.
 	auth = reserveVerdictAuth("codex", "25", now.Add(-2*time.Minute), tripped)
 	auth.ModelStates = map[string]*ModelState{"gpt-5": {Quota: QuotaState{ObservedAt: now.Add(-time.Minute), Signals: map[string]string{"Retry-After": "5"}}}}
-	if active, _ := quotaReserveVerdict(auth, now); !active {
+	if active, _ := QuotaReserveVerdict(auth, now); !active {
 		t.Fatal("snapshot without window signals must not supersede a window observation")
 	}
 

@@ -580,11 +580,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		}
 	}
 	if reserve {
-		hardCount, recoverAt := applyQuotaReserveToBuckets(availableByPriority, now)
-		cooldownCount += hardCount
-		if !recoverAt.IsZero() && (earliest.IsZero() || recoverAt.Before(earliest)) {
-			earliest = recoverAt
-		}
+		cooldownCount, earliest = applyQuotaReserveToBuckets(availableByPriority, now, cooldownCount, earliest)
 	}
 
 	if len(availableByPriority) == 0 {
@@ -625,13 +621,14 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
 // unless session affinity, a manual preference, or an across-priorities scheduler is active,
 // in which case the selector or scheduler additionally receives lower priority tiers.
-func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
+// With reserve unset (a pinned execution) the quota reserve is not applied.
+func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
 	manualPreference := supportsPreferredAccounts(selector) && len(m.preferredAccounts()) > 0
 
 	if !sessionAffinity && !schedulerAcross && !manualPreference {
-		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
+		priorityAuths, err = m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, false, reserve)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -643,14 +640,14 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 	// subset of the across-priority candidates, so it is narrowed from the same cloned auths.
 	// Session affinity validates existing bindings against every available credential, so the
 	// quota reserve is left to the selector, which applies it only to new bindings.
-	allAuths, errAcross := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, !sessionAffinity)
+	allAuths, errAcross := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, reserve && !sessionAffinity)
 	if errAcross != nil {
 		return nil, nil, errAcross
 	}
 	allAuths = cloneAuthSlice(allAuths)
 
 	reservedAuths := allAuths
-	if sessionAffinity {
+	if sessionAffinity && reserve {
 		reservedAuths, _, _ = quotaReserveFilter(allAuths, now)
 	}
 	if schedulerAcross {
@@ -1007,7 +1004,15 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if !okStrategy {
 		return nil, false, nil
 	}
-	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+	selected, handled, errPick := m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+	// The built-in scheduler does not know about quota reserves. When it picks a credential
+	// the reserve withheld, the configured selector picks from the reserve-filtered candidates.
+	if selected != nil && pickSchedulerAuthByID(candidates, selected.ID) == nil {
+		if active, _ := QuotaReserveVerdict(selected, time.Now()); active {
+			return nil, false, nil
+		}
+	}
+	return selected, handled, errPick
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -1241,6 +1246,12 @@ func (m *Manager) closestCooldownWaitWithAttempted(providers []string, model str
 		retryEligible, next := retryRoundAvailabilityForAuth(auth, checkModel, now)
 		if !retryEligible {
 			continue
+		}
+		if pinnedAuthID == "" && next.IsZero() {
+			// A hard reserve writes no cooldown but keeps new selections away until it recovers.
+			if until, held := hardQuotaReserveUntil(auth, now); held {
+				next = until
+			}
 		}
 
 		wasAttempted := false
@@ -1790,7 +1801,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, time.Now())
+	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, time.Now(), pinnedAuthID == "")
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -1805,6 +1816,10 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(m.withPreferredAccounts(ctx), selector, model)
+		if pinnedAuthID != "" {
+			// A pinned credential serves an existing binding, so the quota reserve does not apply.
+			selectorCtx = withQuotaReserveSkipped(selectorCtx)
+		}
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -2123,7 +2138,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now())
+	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now(), pinnedAuthID == "")
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
@@ -2138,6 +2153,10 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(m.withPreferredAccounts(ctx), selector, model)
+		if pinnedAuthID != "" {
+			// A pinned credential serves an existing binding, so the quota reserve does not apply.
+			selectorCtx = withQuotaReserveSkipped(selectorCtx)
+		}
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
