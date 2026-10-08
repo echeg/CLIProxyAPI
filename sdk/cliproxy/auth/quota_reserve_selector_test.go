@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strconv"
 	"testing"
@@ -444,6 +445,12 @@ func TestQuotaReserveRetryWaitsForHardReserve(t *testing.T) {
 	wait, found = manager.closestCooldownWait([]string{"codex"}, model, 0, authSelectionEligibility{}, accounts[0].ID, 3)
 	if !found || wait != 0 {
 		t.Fatalf("pinned closestCooldownWait = %s, %t; want immediate retry", wait, found)
+	}
+	// A session bound to the held auth was served in the failed round, so a 5xx retries at once.
+	attempted := map[string]struct{}{accounts[0].ID: {}}
+	wait, found = manager.closestCooldownWaitWithAttempted([]string{"codex"}, model, 0, authSelectionEligibility{}, "", 3, http.StatusBadGateway, attempted)
+	if !found || wait != 0 {
+		t.Fatalf("bound closestCooldownWait = %s, %t; want immediate retry", wait, found)
 	}
 }
 

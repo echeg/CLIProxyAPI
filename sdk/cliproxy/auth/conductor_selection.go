@@ -1263,16 +1263,17 @@ func (m *Manager) closestCooldownWaitWithAttempted(providers []string, model str
 		if !retryEligible {
 			continue
 		}
-		if pinnedAuthID == "" && next.IsZero() {
-			// A hard reserve writes no cooldown but keeps new selections away until it recovers.
-			if until, held := hardQuotaReserveUntil(auth, now); held {
-				next = until
-			}
-		}
-
 		wasAttempted := false
 		if len(attempted) > 0 {
 			_, wasAttempted = attempted[auth.ID]
+		}
+		if pinnedAuthID == "" && next.IsZero() && !wasAttempted {
+			// A hard reserve writes no cooldown but keeps new selections away until it recovers.
+			// An auth served in the failed round despite the reserve is bound to the request
+			// (session affinity), so the retry reaches it again.
+			if until, held := hardQuotaReserveUntil(auth, now); held {
+				next = until
+			}
 		}
 		coolingDisabled := m.cooldownDisabledForAuth(auth)
 		if !wasAttempted || coolingDisabled || status != http.StatusTooManyRequests {
