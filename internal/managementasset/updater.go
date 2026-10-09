@@ -26,8 +26,12 @@ import (
 )
 
 const (
-	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
-	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
+	defaultManagementReleaseURL = "https://api.github.com/repos/echeg/Cli-Proxy-API-Management-Center/releases/latest"
+	// Direct asset download from the same fork's latest release. Unlike the API
+	// endpoint it is not subject to the 60 req/h unauthenticated rate limit, so
+	// a first start behind a shared IP still gets this fork's panel rather than
+	// the upstream one.
+	defaultManagementFallbackURL = "https://github.com/echeg/Cli-Proxy-API-Management-Center/releases/latest/download/management.html"
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second

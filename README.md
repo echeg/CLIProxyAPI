@@ -2,6 +2,20 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
+> [!NOTE]
+> **This is the `echeg` fork.** It pairs with the management UI fork
+> [echeg/Cli-Proxy-API-Management-Center](https://github.com/echeg/Cli-Proxy-API-Management-Center):
+> the backend downloads `management.html` from that fork's latest release by default, so you do not need to build the UI yourself.
+>
+> **Install**
+> 1. Download the archive for your OS from [Releases](https://github.com/echeg/CLIProxyAPI/releases/latest)
+>    (`CLIProxyAPI_<version>_darwin_arm64.tar.gz`, `_linux_amd64.tar.gz`, `_windows_amd64.zip`, …) and unpack it.
+>    On macOS run `xattr -d com.apple.quarantine cli-proxy-api` once.
+>    Or build from source: `go build -o cli-proxy-api ./cmd/server`.
+> 2. `cp config.example.yaml config.yaml`, then set `management.secret-key` and `access.api-keys`.
+>    Keep `disable-auto-update-panel` unset (or `false`) so the panel stays in sync with the UI fork.
+> 3. Run `./cli-proxy-api --config config.yaml` and open `http://127.0.0.1:8317/management.html`.
+
 If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.
 
 CLIProxyAPI is a proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
