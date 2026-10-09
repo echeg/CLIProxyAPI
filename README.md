@@ -9,7 +9,7 @@ English | [中文](README_CN.md) | [日本語](README_JA.md)
 >
 > **Install**
 > 1. Download the archive for your OS from [Releases](https://github.com/echeg/CLIProxyAPI/releases/latest)
->    (`CLIProxyAPI_<version>_darwin_arm64.tar.gz`, `_linux_amd64.tar.gz`, `_windows_amd64.zip`, …) and unpack it.
+>    (Apple Silicon: `CLIProxyAPI_<version>_darwin_aarch64.tar.gz`; also `_linux_amd64.tar.gz`, `_windows_amd64.zip`, …) and unpack it.
 >    On macOS run `xattr -d com.apple.quarantine cli-proxy-api` once.
 >    Or build from source: `go build -o cli-proxy-api ./cmd/server`.
 > 2. `cp config.example.yaml config.yaml`, then set `management.secret-key` and `access.api-keys`.
