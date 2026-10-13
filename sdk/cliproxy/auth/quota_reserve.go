@@ -17,6 +17,8 @@ const (
 	AttributeQuotaReservePercent = "quota_reserve_percent"
 	// AttributeQuotaReserveMode stores how selection treats a credential below its reserve.
 	AttributeQuotaReserveMode = "quota_reserve_mode"
+	// AttributeQuotaReserveSteps stores additional soft thresholds as a JSON array.
+	AttributeQuotaReserveSteps = "quota_reserve_steps"
 
 	// QuotaReserveModeSoft keeps a credential below its reserve as a last resort.
 	QuotaReserveModeSoft = "soft"
@@ -36,28 +38,84 @@ func QuotaReserveSupportedProvider(provider string) bool {
 	}
 }
 
+// QuotaReservePolicy defines a credential's remaining-quota reserve. Percent is
+// the first threshold; Steps optionally adds up to two strictly lower soft thresholds.
+// A single soft threshold remains level 1 even below another credential's later levels.
+type QuotaReservePolicy struct {
+	Percent int    `json:"percent"`
+	Mode    string `json:"mode"`
+	Steps   []int  `json:"steps,omitempty"`
+}
+
 // ParseQuotaReserve validates a raw quota_reserve value decoded from JSON.
+// It retains the original single-threshold API and ignores additional fields.
+// Use ParseQuotaReservePolicy to validate and read steps.
 func ParseQuotaReserve(raw any) (int, string, error) {
+	if object, ok := raw.(map[string]any); ok {
+		raw = map[string]any{"percent": object["percent"], "mode": object["mode"]}
+	}
+	policy, errParse := ParseQuotaReservePolicy(raw)
+	if errParse != nil {
+		return 0, "", errParse
+	}
+	return policy.Percent, policy.Mode, nil
+}
+
+// ParseQuotaReservePolicy validates and normalizes a raw quota_reserve JSON object.
+func ParseQuotaReservePolicy(raw any) (QuotaReservePolicy, error) {
 	object, ok := raw.(map[string]any)
 	if !ok {
-		return 0, "", fmt.Errorf("quota_reserve must be an object")
+		return QuotaReservePolicy{}, fmt.Errorf("quota_reserve must be an object")
 	}
 	percent, errPercent := parseQuotaReservePercent(object["percent"])
 	if errPercent != nil {
-		return 0, "", errPercent
+		return QuotaReservePolicy{}, errPercent
 	}
 	mode := QuotaReserveModeSoft
 	if rawMode, exists := object["mode"]; exists && rawMode != nil {
 		modeString, isString := rawMode.(string)
 		if !isString {
-			return 0, "", fmt.Errorf("quota_reserve.mode must be %q or %q", QuotaReserveModeSoft, QuotaReserveModeHard)
+			return QuotaReservePolicy{}, fmt.Errorf("quota_reserve.mode must be %q or %q", QuotaReserveModeSoft, QuotaReserveModeHard)
 		}
 		mode = strings.ToLower(strings.TrimSpace(modeString))
 		if mode != QuotaReserveModeSoft && mode != QuotaReserveModeHard {
-			return 0, "", fmt.Errorf("quota_reserve.mode must be %q or %q", QuotaReserveModeSoft, QuotaReserveModeHard)
+			return QuotaReservePolicy{}, fmt.Errorf("quota_reserve.mode must be %q or %q", QuotaReserveModeSoft, QuotaReserveModeHard)
 		}
 	}
-	return percent, mode, nil
+	policy := QuotaReservePolicy{Percent: percent, Mode: mode}
+	if rawSteps, exists := object["steps"]; exists {
+		var values []any
+		switch typed := rawSteps.(type) {
+		case []any:
+			values = typed
+		case []int:
+			values = make([]any, len(typed))
+			for i, step := range typed {
+				values[i] = step
+			}
+		default:
+			return QuotaReservePolicy{}, fmt.Errorf("quota_reserve.steps must be an array")
+		}
+		if len(values) > 2 {
+			return QuotaReservePolicy{}, fmt.Errorf("quota_reserve.steps supports at most two additional thresholds")
+		}
+		if len(values) > 0 && mode == QuotaReserveModeHard {
+			return QuotaReservePolicy{}, fmt.Errorf("quota_reserve.steps is only supported in soft mode")
+		}
+		previous := percent
+		for i, rawStep := range values {
+			step, errStep := parseQuotaReservePercent(rawStep)
+			if errStep != nil {
+				return QuotaReservePolicy{}, fmt.Errorf("quota_reserve.steps[%d] must be an integer between 1 and 99", i)
+			}
+			if step >= previous {
+				return QuotaReservePolicy{}, fmt.Errorf("quota_reserve.steps must strictly decrease below quota_reserve.percent")
+			}
+			policy.Steps = append(policy.Steps, step)
+			previous = step
+		}
+	}
+	return policy, nil
 }
 
 func parseQuotaReservePercent(raw any) (int, error) {
@@ -90,6 +148,7 @@ func ApplyAuthQuotaReserveMetadata(auth *Auth, metadata map[string]any) {
 	}
 	delete(auth.Attributes, AttributeQuotaReservePercent)
 	delete(auth.Attributes, AttributeQuotaReserveMode)
+	delete(auth.Attributes, AttributeQuotaReserveSteps)
 	raw, ok := metadata[quotaReserveMetadataKey]
 	if !ok || raw == nil {
 		return
@@ -98,7 +157,7 @@ func ApplyAuthQuotaReserveMetadata(auth *Auth, metadata map[string]any) {
 		log.WithFields(log.Fields{"auth_id": auth.ID, "provider": auth.Provider}).Warn("ignoring quota_reserve: provider does not support quota reserve")
 		return
 	}
-	percent, mode, errParse := ParseQuotaReserve(raw)
+	policy, errParse := ParseQuotaReservePolicy(raw)
 	if errParse != nil {
 		log.WithField("auth_id", auth.ID).Warnf("ignoring invalid quota_reserve: %v", errParse)
 		return
@@ -106,39 +165,62 @@ func ApplyAuthQuotaReserveMetadata(auth *Auth, metadata map[string]any) {
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
-	auth.Attributes[AttributeQuotaReservePercent] = strconv.Itoa(percent)
-	auth.Attributes[AttributeQuotaReserveMode] = mode
+	auth.Attributes[AttributeQuotaReservePercent] = strconv.Itoa(policy.Percent)
+	auth.Attributes[AttributeQuotaReserveMode] = policy.Mode
+	if len(policy.Steps) > 0 {
+		steps, _ := json.Marshal(policy.Steps)
+		auth.Attributes[AttributeQuotaReserveSteps] = string(steps)
+	}
+}
+
+// QuotaReservePolicyForAuth returns the complete reserve synced into an auth's attributes.
+func QuotaReservePolicyForAuth(auth *Auth) (QuotaReservePolicy, bool) {
+	if auth == nil || !QuotaReserveSupportedProvider(auth.Provider) {
+		return QuotaReservePolicy{}, false
+	}
+	percent, errAtoi := strconv.Atoi(strings.TrimSpace(auth.Attributes[AttributeQuotaReservePercent]))
+	if errAtoi != nil || percent < 1 || percent > 99 {
+		return QuotaReservePolicy{}, false
+	}
+	mode := strings.TrimSpace(auth.Attributes[AttributeQuotaReserveMode])
+	if mode == "" {
+		mode = QuotaReserveModeSoft
+	}
+	if mode != QuotaReserveModeSoft && mode != QuotaReserveModeHard {
+		return QuotaReservePolicy{}, false
+	}
+	policy := QuotaReservePolicy{Percent: percent, Mode: mode}
+	if rawSteps, exists := auth.Attributes[AttributeQuotaReserveSteps]; exists {
+		var steps []int
+		if errDecode := json.Unmarshal([]byte(rawSteps), &steps); errDecode != nil || steps == nil {
+			return QuotaReservePolicy{}, false
+		}
+		parsed, errParse := ParseQuotaReservePolicy(map[string]any{"percent": percent, "mode": mode, "steps": steps})
+		if errParse != nil {
+			return QuotaReservePolicy{}, false
+		}
+		policy = parsed
+	}
+	return policy, true
 }
 
 // QuotaReserveForAuth returns the reserve synced into an auth's attributes.
+// It retains the original single-threshold API; use QuotaReservePolicyForAuth to read steps.
 func QuotaReserveForAuth(auth *Auth) (percent int, mode string, ok bool) {
-	percent, hard, ok := authQuotaReserve(auth)
+	policy, ok := QuotaReservePolicyForAuth(auth)
 	if !ok {
 		return 0, "", false
 	}
-	if hard {
-		return percent, QuotaReserveModeHard, true
-	}
-	return percent, QuotaReserveModeSoft, true
+	return policy.Percent, policy.Mode, true
 }
 
 // authQuotaReserve returns the configured reserve percent and whether it is hard.
 func authQuotaReserve(auth *Auth) (percent int, hard bool, ok bool) {
-	if auth == nil || !QuotaReserveSupportedProvider(auth.Provider) {
+	policy, ok := QuotaReservePolicyForAuth(auth)
+	if !ok {
 		return 0, false, false
 	}
-	percent, errAtoi := strconv.Atoi(strings.TrimSpace(auth.Attributes[AttributeQuotaReservePercent]))
-	if errAtoi != nil || percent < 1 || percent > 99 {
-		return 0, false, false
-	}
-	switch strings.TrimSpace(auth.Attributes[AttributeQuotaReserveMode]) {
-	case "", QuotaReserveModeSoft:
-		return percent, false, true
-	case QuotaReserveModeHard:
-		return percent, true, true
-	default:
-		return 0, false, false
-	}
+	return policy.Percent, policy.Mode == QuotaReserveModeHard, true
 }
 
 // QuotaReserveVerdict reports whether the newest subscription window observation
@@ -149,14 +231,28 @@ func authQuotaReserve(auth *Auth) (percent int, hard bool, ok bool) {
 // ignored so a reserve can never pin a credential beyond its observed reset.
 // Usage above the limit counts as nothing remaining.
 func QuotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Time) {
-	percent, _, ok := authQuotaReserve(auth)
+	level, until := QuotaReserveLevel(auth, now)
+	return level > 0, until
+}
+
+// QuotaReserveLevel returns the worst active reserve level across usable windows:
+// 0 above all thresholds, then 1 through 3 for successive soft thresholds. An active
+// hard reserve has level 1; its policy mode distinguishes it from a soft reserve.
+// until retains QuotaReserveVerdict's meaning: the last reset holding any reserve,
+// so a level can improve before until when its worst window expires first.
+func QuotaReserveLevel(auth *Auth, now time.Time) (level int, until time.Time) {
+	policy, ok := QuotaReservePolicyForAuth(auth)
 	if !ok {
-		return false, time.Time{}
+		return 0, time.Time{}
 	}
+	return quotaReserveLevel(auth, policy, now)
+}
+
+func quotaReserveLevel(auth *Auth, policy QuotaReservePolicy, now time.Time) (level int, until time.Time) {
 	prefixes := subscriptionWindowPrefixes(auth.Provider)
 	snapshot := newestSubscriptionSnapshot(auth, prefixes)
 	if snapshot == nil || snapshot.ObservedAt.IsZero() || snapshot.ObservedAt.After(now) {
-		return false, time.Time{}
+		return 0, time.Time{}
 	}
 	claude := strings.EqualFold(strings.TrimSpace(auth.Provider), "claude")
 	for _, prefix := range prefixes {
@@ -182,14 +278,22 @@ func QuotaReserveVerdict(auth *Auth, now time.Time) (active bool, until time.Tim
 		// leaves nothing remaining. Round away float noise from fractional
 		// utilization (0.7*100 != 70).
 		remaining := math.Max(0, math.Round((100-used*scale)*1e6)/1e6)
-		if remaining >= float64(percent) {
+		if remaining >= float64(policy.Percent) {
 			continue
 		}
+		windowLevel := 1
+		for _, threshold := range policy.Steps {
+			if remaining >= float64(threshold) {
+				break
+			}
+			windowLevel++
+		}
+		level = max(level, windowLevel)
 		if reset.After(until) {
 			until = reset
 		}
 	}
-	return !until.IsZero(), until
+	return level, until
 }
 
 // newestSubscriptionSnapshot returns the most recent observation carrying
@@ -216,43 +320,43 @@ func newestSubscriptionSnapshot(auth *Auth, prefixes []string) *QuotaState {
 }
 
 // quotaReserveFilter narrows available candidates for a new selection. Credentials
-// below a hard reserve are dropped; credentials below a soft reserve are kept only
-// as a last-resort pool when no unreserved candidate remains. hardCount and
-// recoverAt describe the dropped hard-reserved candidates so callers can report a
-// model cooldown that lasts until the earliest reserve recovers. The filter never
-// writes credential state. Without any configured reserve the input is returned.
+// below a hard reserve are dropped. Among the remainder, only the lowest active
+// soft level is retained, including level 0 for credentials above all thresholds.
+// The deepest soft level stays eligible as a last resort. hardCount and recoverAt
+// describe hard reserves for model cooldown reporting. The filter never writes state.
 func quotaReserveFilter(auths []*Auth, now time.Time) (selectable []*Auth, hardCount int, recoverAt time.Time) {
 	if !anyQuotaReserveConfigured(auths) {
 		return auths, 0, time.Time{}
 	}
-	unreserved := make([]*Auth, 0, len(auths))
-	var soft []*Auth
+	selectable = make([]*Auth, 0, len(auths))
+	lowestLevel := 4
 	for _, candidate := range auths {
-		active, until := QuotaReserveVerdict(candidate, now)
-		if !active {
-			unreserved = append(unreserved, candidate)
-			continue
+		policy, configured := QuotaReservePolicyForAuth(candidate)
+		level := 0
+		var until time.Time
+		if configured {
+			level, until = quotaReserveLevel(candidate, policy, now)
 		}
-		if _, hard, _ := authQuotaReserve(candidate); hard {
+		if level > 0 && policy.Mode == QuotaReserveModeHard {
 			hardCount++
 			if recoverAt.IsZero() || until.Before(recoverAt) {
 				recoverAt = until
 			}
 			continue
 		}
-		soft = append(soft, candidate)
+		if level < lowestLevel {
+			lowestLevel = level
+			selectable = selectable[:0]
+		}
+		if level == lowestLevel {
+			selectable = append(selectable, candidate)
+		}
 	}
-	if len(unreserved) > 0 {
-		return unreserved, hardCount, recoverAt
-	}
-	if soft == nil {
-		soft = []*Auth{}
-	}
-	return soft, hardCount, recoverAt
+	return selectable, hardCount, recoverAt
 }
 
 // applyQuotaReserveToBuckets applies quotaReserveFilter across every priority tier at
-// once, so a reserved top tier yields to unreserved lower tiers before tier narrowing.
+// once, so a higher reserve level yields to a lower one before priority narrowing.
 // Emptied tiers are removed from the map. Dropped hard-reserved candidates are added to
 // cooldownCount, and earliest moves to their reserve recovery when that comes sooner.
 func applyQuotaReserveToBuckets(buckets map[int][]*Auth, now time.Time, cooldownCount int, earliest time.Time) (int, time.Time) {
@@ -340,6 +444,7 @@ func withoutQuotaReserveFor(auths []*Auth, exempt *Auth) []*Auth {
 		unreserved := auth.Clone()
 		delete(unreserved.Attributes, AttributeQuotaReservePercent)
 		delete(unreserved.Attributes, AttributeQuotaReserveMode)
+		delete(unreserved.Attributes, AttributeQuotaReserveSteps)
 		out[i] = unreserved
 	}
 	return out

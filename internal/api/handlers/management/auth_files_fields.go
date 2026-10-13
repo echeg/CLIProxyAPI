@@ -256,6 +256,10 @@ func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {
 
 // PatchAuthFileFields updates arbitrary metadata fields of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
+	h.patchAuthFileFields(c, false)
+}
+
+func (h *Handler) patchAuthFileFields(c *gin.Context, stagedReserve bool) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
@@ -304,6 +308,18 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
+	locked := false
+	if stagedReserve {
+		// Serialize v8 field edits with status edits so omission checks see the latest policy.
+		h.authStatusMu.Lock()
+		locked = true
+		defer func() {
+			if locked {
+				h.authStatusMu.Unlock()
+			}
+		}()
+	}
+
 	// Find auth by name or ID
 	var targetAuth *coreauth.Auth
 	if auth, ok := h.authManager.GetByID(name); ok {
@@ -325,6 +341,16 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if coreauth.IsPluginVirtualAuth(targetAuth) {
 		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
 		return
+	}
+	var stagedPolicy map[string]any
+	if stagedReserve {
+		var status int
+		var errReserve error
+		stagedPolicy, status, errReserve = validateAuthFileQuotaReservePatchV8(targetAuth, req)
+		if errReserve != nil {
+			c.JSON(status, gin.H{"error": errReserve.Error()})
+			return
+		}
 	}
 	coreauth.NormalizeCredentialMetadata(targetAuth.Metadata)
 
@@ -366,6 +392,8 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		} else if fieldPath == authFileQuotaReserveField {
 			if value == nil {
 				delete(targetAuth.Metadata, authFileQuotaReserveField)
+			} else if stagedReserve {
+				targetAuth.Metadata[authFileQuotaReserveField] = stagedPolicy
 			} else {
 				reserve, errReserve := normalizeAuthFileQuotaReserve(targetAuth, value)
 				if errReserve != nil {
@@ -414,6 +442,10 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
+	}
+	if locked {
+		locked = false
+		h.authStatusMu.Unlock()
 	}
 	if h.postAuthPersistHook != nil {
 		hookAuth := updatedAuth

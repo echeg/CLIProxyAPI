@@ -101,6 +101,10 @@ func parseLastRefreshValue(v any) (time.Time, bool) {
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
+	h.listAuthFiles(c, false)
+}
+
+func (h *Handler) listAuthFiles(c *gin.Context, stagedReserve bool) {
 	if h == nil {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
 		return
@@ -111,7 +115,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	if h.authManager == nil {
-		h.listAuthFilesFromDisk(c, pagination)
+		h.listAuthFilesFromDisk(c, pagination, stagedReserve)
 		return
 	}
 	nameFilter := strings.TrimSpace(c.Query("name"))
@@ -141,7 +145,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		start, end := pagination.bounds(total)
 		files := make([]gin.H, 0, end-start)
 		for _, auth := range matching[start:end] {
-			if entry := h.buildAuthFileEntry(auth, quotaSupportedProviders); entry != nil {
+			if entry := h.buildAuthFileEntryForVersion(auth, stagedReserve, quotaSupportedProviders); entry != nil {
 				entry["cooldowns"] = nil
 				if cooldownsKnown {
 					entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
@@ -149,7 +153,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 				files = append(files, entry)
 			}
 		}
-		c.JSON(200, authFilesListResponse(observedAt, files, pagination, total, end))
+		c.JSON(200, authFilesListResponseForVersion(authFilesListResponse(observedAt, files, pagination, total, end), stagedReserve))
 		return
 	}
 	files := make([]gin.H, 0, len(auths))
@@ -157,7 +161,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) {
 			continue
 		}
-		if entry := h.buildAuthFileEntry(auth, quotaSupportedProviders); entry != nil {
+		if entry := h.buildAuthFileEntryForVersion(auth, stagedReserve, quotaSupportedProviders); entry != nil {
 			entry["cooldowns"] = nil
 			if cooldownsKnown {
 				entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
@@ -170,7 +174,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		nameJ, _ := files[j]["name"].(string)
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
-	c.JSON(200, gin.H{"observed_at": observedAt, "files": files})
+	c.JSON(200, authFilesListResponseForVersion(gin.H{"observed_at": observedAt, "files": files}, stagedReserve))
 }
 
 func parseAuthFilesPagination(c *gin.Context) (authFilesPagination, error) {
@@ -378,7 +382,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 }
 
 // List auth files from disk when the auth manager is unavailable.
-func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagination) {
+func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagination, stagedReserve bool) {
 	observedAt := time.Now().UTC()
 	nameFilter := strings.TrimSpace(c.Query("name"))
 	authIndexFilter := strings.TrimSpace(c.Query("auth_index"))
@@ -388,7 +392,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 		return
 	}
 	if authIndexFilter != "" {
-		c.JSON(200, authFilesListResponse(observedAt, []gin.H{}, pagination, 0, 0))
+		c.JSON(200, authFilesListResponseForVersion(authFilesListResponse(observedAt, []gin.H{}, pagination, 0, 0), stagedReserve))
 		return
 	}
 	matching := make([]diskAuthFileCandidate, 0, len(entries))
@@ -471,16 +475,23 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 			if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
 				fileData["request_retry"] = requestRetry
 			}
-			if percent, mode, okReserve := authFileQuotaReserveFromJSON(data, typeValue); okReserve {
+			if stagedReserve {
+				if policy, okReserve := authFileQuotaReservePolicyFromJSON(data, typeValue); okReserve {
+					fileData["quota_reserve"] = policy
+				}
+			} else if percent, mode, okReserve := authFileQuotaReserveFromJSON(data, typeValue); okReserve {
 				fileData["quota_reserve"] = gin.H{"percent": percent, "mode": mode}
 			}
 		}
 		// Without the auth manager there is no observed quota, so the reserve never holds.
 		fileData["quota_reserve_active"] = false
+		if stagedReserve {
+			fileData["quota_reserve_level"] = 0
+		}
 
 		files = append(files, fileData)
 	}
-	c.JSON(200, authFilesListResponse(observedAt, files, pagination, total, end))
+	c.JSON(200, authFilesListResponseForVersion(authFilesListResponse(observedAt, files, pagination, total, end), stagedReserve))
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, quotaSupported ...map[string]struct{}) gin.H {

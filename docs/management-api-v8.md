@@ -142,7 +142,7 @@ in a cluster.
 ### Quota reserve for shared subscriptions
 
 A Codex or Claude subscription can also serve tools that do not go through this
-proxy. A quota reserve stops the proxy from spending the last part of such a
+proxy. A quota reserve controls when new proxy sessions may use the last part of such a
 subscription's quota. Store it in the credential JSON next to `priority`:
 
 ```json
@@ -152,7 +152,7 @@ subscription's quota. Store it in the credential JSON next to `priority`:
 ```
 
 `percent` is an integer from 1 to 99. `mode` is `soft` (the default) or `hard`.
-One percent applies to every subscription window: Codex primary and secondary,
+Each threshold applies to every subscription window: Codex primary and secondary,
 or Claude five-hour and seven-day. The reserve is active when the remaining quota
 (`100 - used`) in any window is below `percent`. It is not active when the
 remaining quota equals `percent`. The reserve uses the latest quota observation,
@@ -164,10 +164,11 @@ ignored with a warning, and the credential then has no reserve.
 The reserve affects only new selections:
 
 - `hard` excludes the credential.
-- `soft` makes the credential a last resort. It is used only when no credential
-  outside its reserve is available in any priority tier. Among soft-reserved
-  credentials the usual rules apply: a preferred account first, otherwise the
-  highest priority tier, where the configured strategy chooses.
+- `soft` assigns a reserve level. The lowest available level wins across all
+  credential priority tiers; level 0 means no active reserve. Within the winning
+  level the usual rules apply: a preferred account first, otherwise the highest
+  priority tier, where the configured strategy chooses. The deepest soft level
+  remains eligible as the last resort.
 - When every candidate is excluded by a hard reserve or is cooling down, the
   request gets the usual model-cooldown `429`. Its `Retry-After` points to the
   earliest window reset that would make a candidate selectable again.
@@ -176,14 +177,34 @@ A session already bound by session affinity keeps its credential after the
 reserve trips, so the session continues. Executions pinned to a credential, such
 as Codex websocket continuations, also ignore the reserve. New sessions are bound elsewhere. A
 preferred account below its reserve counts as unavailable: `hard` excludes it,
-and `soft` moves it to the last-resort pool. The reserve is only a selection
+and `soft` allows it only if no eligible account has a lower reserve level. The reserve is only a selection
 filter. It never writes cooldown state.
 
 The proxy does not send background probes. Subscription limits are account-wide,
 so upstream rate-limit headers already include usage by other tools, and the next
 proxied request refreshes a stale observation. Requests already in flight when
-the reserve trips can still overshoot it. Refresh quotas in CPAMC to observe
+the reserve trips can still overshoot it. Refresh quotas in the CPAMP workbench to observe
 idle accounts.
+
+A soft policy can have two additional descending thresholds:
+
+```json
+{"quota_reserve": {"percent": 30, "mode": "soft", "steps": [15, 5]}}
+```
+
+Here `percent` is soft1, and `steps` supplies soft2 and soft3. Remaining quota at
+least 30% is level 0; `[15, 30)` is soft1; `[5, 15)` is soft2; below 5% is soft3.
+The highest level across usable windows is the account's level. Each additional
+threshold is an integer from 1 to 99 and strictly lower than its predecessor.
+A legacy single threshold remains a single soft1 level, even at very low remaining
+quota. Hard mode cannot contain nonempty steps.
+
+The credential-list response advertises `quota_reserve_max_levels: 3`. Clients
+must check this before sending extra thresholds to an older CPA, which would
+discard them. A staged policy must be replaced explicitly: `steps: []` collapses
+it to one level, and `quota_reserve: null` removes the reserve. A replacement that
+omits steps while a staged policy exists is rejected, except an unchanged
+legacy policy can be treated as a no-op.
 
 To set the reserve, send `PATCH /v8/management/credentials/fields`:
 
@@ -195,7 +216,7 @@ To set the reserve, send `PATCH /v8/management/credentials/fields`:
 ```
 
 `name` is the credential file name or ID. The stored value is normalized to
-`{"percent": N, "mode": "soft"|"hard"}`. Set `quota_reserve` to `null` to remove
+`{"percent": N, "mode": "soft"|"hard"}` with optional nonempty `steps`. Set `quota_reserve` to `null` to remove
 it; this works for any credential. Invalid values, nested paths such as
 `quota_reserve.percent`, and a non-null reserve on a credential other than Codex
 or Claude return `400`.
@@ -204,13 +225,13 @@ Each entry in `GET /v8/management/credentials` includes:
 
 | Field | Description |
 | --- | --- |
-| `quota_reserve` | The configured `{"percent", "mode"}`. Omitted when no reserve is set. |
+| `quota_reserve` | The configured `percent`, `mode`, and optional `steps`. Omitted when no reserve is set. |
+| `quota_reserve_level` | The current server-evaluated level from 0 to 3. An active hard reserve reports 1; inspect `mode` to distinguish it. |
 | `quota_reserve_active` | `true` when the latest observation is below the reserve. Always present. |
-| `quota_reserve_until` | RFC3339 time when the reserve stops applying: the latest reset among the windows below the reserve. Present only while active. |
+| `quota_reserve_until` | RFC3339 time when the reserve stops applying: the latest reset among the windows below the reserve. Present only while active. A level may improve before this time when its most constrained window resets first. |
 
 Scheduler plugins receive candidates with the reserve already applied: hard-reserved
-credentials are removed, and soft-reserved ones appear only when no unreserved
-credential is available. The reserve is implemented for standalone CLIProxyAPI. Home mode uses its own
+credentials are removed, and only the lowest available soft level is supplied. The reserve is implemented for standalone CLIProxyAPI. Home mode uses its own
 selector and disables these local management endpoints. CLIProxyAPIHome needs
 matching reserve support before this works in a cluster.
 

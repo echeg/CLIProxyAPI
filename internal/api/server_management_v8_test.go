@@ -220,3 +220,69 @@ func TestManagementV8PluginOperationMigratesConfiguration(t *testing.T) {
 		t.Fatal("missing configuration reload")
 	}
 }
+
+func TestManagementV8CredentialReserveContract(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if errWrite := os.WriteFile(cfgPath, []byte("port: 8317\nremote-management: {secret-key: test-password}\n"), 0600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(cfgPath)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	cfg.AuthDir = t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID: "staged.json", FileName: "staged.json", Provider: "codex",
+		Attributes: map[string]string{"path": filepath.Join(cfg.AuthDir, "staged.json")},
+		Metadata: map[string]any{"type": "codex", "quota_reserve": map[string]any{
+			"percent": 30, "mode": "soft", "steps": []int{15, 5},
+		}},
+	}
+	coreauth.ApplyAuthQuotaReserveMetadata(auth, auth.Metadata)
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	h := management.NewHandler(cfg, cfgPath, manager)
+	h.SetLocalPassword("test-password")
+	s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
+	s.managementRoutesEnabled.Store(true)
+	s.registerManagementRoutes()
+	request := func(method, url, body string, status int) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, url, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		response := httptest.NewRecorder()
+		s.engine.ServeHTTP(response, req)
+		if response.Code != status {
+			t.Fatalf("%s %s: status=%d want=%d body=%s", method, url, response.Code, status, response.Body.String())
+		}
+		var payload map[string]any
+		if errDecode := json.Unmarshal(response.Body.Bytes(), &payload); errDecode != nil {
+			t.Fatal(errDecode)
+		}
+		return payload
+	}
+	for _, version := range []struct {
+		path string
+		v8   bool
+	}{
+		{"/v8/management/credentials", true},
+		{"/v0/management/auth-files", false},
+	} {
+		payload := request(http.MethodGet, version.path, "", http.StatusOK)
+		_, capability := payload["quota_reserve_max_levels"]
+		file := payload["files"].([]any)[0].(map[string]any)
+		_, level := file["quota_reserve_level"]
+		_, steps := file["quota_reserve"].(map[string]any)["steps"]
+		if capability != version.v8 || level != version.v8 || steps != version.v8 {
+			t.Fatalf("%s: wrong version contract: %#v", version.path, payload)
+		}
+	}
+	body := `{"name":"staged.json","quota_reserve":{"percent":40,"mode":"soft"}}`
+	request(http.MethodPatch, "/v8/management/credentials/fields", body, http.StatusConflict)
+	request(http.MethodPatch, "/v8/management/credentials/fields", `{"name":"staged.json","quota_reserve":{"percent":40,"mode":"soft","steps":[20,10]}}`, http.StatusOK)
+	request(http.MethodPatch, "/v0/management/auth-files/fields", body, http.StatusOK)
+}

@@ -1183,3 +1183,38 @@ func TestSynthesizeAuthFileAppliesQuotaReserveToPluginAuths(t *testing.T) {
 		}
 	}
 }
+
+func TestSynthesizeAuthFileSyncsQuotaReserveSteps(t *testing.T) {
+	fullPath := filepath.Join(t.TempDir(), "codex.json")
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     filepath.Dir(fullPath),
+		Now:         time.Unix(2000000000, 0),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	for _, tt := range []struct {
+		name      string
+		raw       string
+		wantSteps string
+		wantMode  string
+	}{
+		{name: "staged", raw: `{"type":"codex","quota_reserve":{"percent":30,"steps":[15,5]}}`, wantSteps: "[15,5]", wantMode: "soft"},
+		{name: "legacy", raw: `{"type":"codex","quota_reserve":{"percent":30}}`, wantMode: "soft"},
+		{name: "hard", raw: `{"type":"codex","quota_reserve":{"percent":30,"mode":"hard"}}`, wantMode: "hard"},
+		{name: "invalid stages", raw: `{"type":"codex","quota_reserve":{"percent":30,"steps":[15,20]}}`},
+		{name: "removed", raw: `{"type":"codex"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(tt.raw))
+			if errSynthesize != nil || len(auths) != 1 {
+				t.Fatalf("synthesis returned %d credentials, %v", len(auths), errSynthesize)
+			}
+			if got := auths[0].Attributes[coreauth.AttributeQuotaReserveSteps]; got != tt.wantSteps {
+				t.Fatalf("steps = %q, want %q", got, tt.wantSteps)
+			}
+			if got := auths[0].Attributes[coreauth.AttributeQuotaReserveMode]; got != tt.wantMode {
+				t.Fatalf("mode = %q, want %q", got, tt.wantMode)
+			}
+		})
+	}
+}

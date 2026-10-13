@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,6 +22,8 @@ type reserveSpec struct {
 	priority string
 	// mode is "", "soft" or "hard"; empty means no reserve is configured.
 	mode string
+	// steps are optional additional soft thresholds.
+	steps []int
 	// used is the observed primary window usage in percent.
 	used int
 	// reset is the primary window reset relative to the observation.
@@ -48,6 +51,10 @@ func reserveSpecAuth(id string, spec reserveSpec, observedAt time.Time) *Auth {
 	if spec.mode != "" {
 		attributes[AttributeQuotaReservePercent] = "30"
 		attributes[AttributeQuotaReserveMode] = spec.mode
+		if len(spec.steps) > 0 {
+			steps, _ := json.Marshal(spec.steps)
+			attributes[AttributeQuotaReserveSteps] = string(steps)
+		}
 	}
 	reset := spec.reset
 	if reset == 0 {
