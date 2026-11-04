@@ -249,12 +249,46 @@ func QuotaReserveLevel(auth *Auth, now time.Time) (level int, until time.Time) {
 }
 
 func quotaReserveLevel(auth *Auth, policy QuotaReservePolicy, now time.Time) (level int, until time.Time) {
+	for _, window := range subscriptionWindows(auth, now) {
+		if window.remaining >= float64(policy.Percent) {
+			continue
+		}
+		windowLevel := 1
+		for _, threshold := range policy.Steps {
+			if window.remaining >= float64(threshold) {
+				break
+			}
+			windowLevel++
+		}
+		level = max(level, windowLevel)
+		if window.reset.After(until) {
+			until = window.reset
+		}
+	}
+	return level, until
+}
+
+// subscriptionWindow is one usable subscription window of a credential: its future
+// reset and the percent of quota remaining until then.
+type subscriptionWindow struct {
+	reset     time.Time
+	remaining float64
+}
+
+// subscriptionWindows returns the usable windows of the newest subscription snapshot.
+// Expired windows, windows without a usable reset, and malformed usage values are
+// skipped. Usage past the limit counts as nothing remaining.
+func subscriptionWindows(auth *Auth, now time.Time) []subscriptionWindow {
+	if auth == nil {
+		return nil
+	}
 	prefixes := subscriptionWindowPrefixes(auth.Provider)
 	snapshot := newestSubscriptionSnapshot(auth, prefixes)
 	if snapshot == nil || snapshot.ObservedAt.IsZero() || snapshot.ObservedAt.After(now) {
-		return 0, time.Time{}
+		return nil
 	}
 	claude := strings.EqualFold(strings.TrimSpace(auth.Provider), "claude")
+	var windows []subscriptionWindow
 	for _, prefix := range prefixes {
 		var reset time.Time
 		var usedRaw string
@@ -278,22 +312,20 @@ func quotaReserveLevel(auth *Auth, policy QuotaReservePolicy, now time.Time) (le
 		// leaves nothing remaining. Round away float noise from fractional
 		// utilization (0.7*100 != 70).
 		remaining := math.Max(0, math.Round((100-used*scale)*1e6)/1e6)
-		if remaining >= float64(policy.Percent) {
-			continue
-		}
-		windowLevel := 1
-		for _, threshold := range policy.Steps {
-			if remaining >= float64(threshold) {
-				break
-			}
-			windowLevel++
-		}
-		level = max(level, windowLevel)
-		if reset.After(until) {
-			until = reset
+		windows = append(windows, subscriptionWindow{reset: reset, remaining: remaining})
+	}
+	return windows
+}
+
+// subscriptionRemainingForAuth returns the lowest remaining percent across the usable
+// subscription windows. ok is false when the credential has no usable window.
+func subscriptionRemainingForAuth(auth *Auth, now time.Time) (percent float64, ok bool) {
+	for _, window := range subscriptionWindows(auth, now) {
+		if !ok || window.remaining < percent {
+			percent, ok = window.remaining, true
 		}
 	}
-	return level, until
+	return percent, ok
 }
 
 // newestSubscriptionSnapshot returns the most recent observation carrying

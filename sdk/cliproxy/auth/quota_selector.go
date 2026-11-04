@@ -31,14 +31,9 @@ func (s *EarliestResetSelector) Pick(ctx context.Context, provider, model string
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	var selected *Auth
-	var earliest time.Time
-	for _, candidate := range available {
-		reset, ok := subscriptionResetForAuth(candidate, model, now)
-		if !ok {
-			continue
-		}
-		if selected == nil || reset.Before(earliest) || (reset.Equal(earliest) && candidate.ID < selected.ID) {
-			selected, earliest = candidate, reset
+	for _, candidate := range earliestResetGroup(available, model, now) {
+		if selected == nil || candidate.ID < selected.ID {
+			selected = candidate
 		}
 	}
 	if selected != nil {
@@ -48,6 +43,26 @@ func (s *EarliestResetSelector) Pick(ctx context.Context, provider, model string
 		ctx = context.Background()
 	}
 	return s.fallback.Pick(context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true), provider, model, opts, available)
+}
+
+// earliestResetGroup returns the candidates sharing the earliest known future
+// subscription reset, in input order. It is empty when no candidate has a known reset.
+func earliestResetGroup(candidates []*Auth, model string, now time.Time) []*Auth {
+	var group []*Auth
+	var earliest time.Time
+	for _, candidate := range candidates {
+		reset, ok := subscriptionResetForAuth(candidate, model, now)
+		if !ok {
+			continue
+		}
+		switch {
+		case group == nil || reset.Before(earliest):
+			group, earliest = []*Auth{candidate}, reset
+		case reset.Equal(earliest):
+			group = append(group, candidate)
+		}
+	}
+	return group
 }
 
 // subscriptionResetForAuth uses one observation, never a merge of timestamps
