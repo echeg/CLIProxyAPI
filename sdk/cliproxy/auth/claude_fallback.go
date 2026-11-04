@@ -24,11 +24,11 @@ func (m *Manager) claudeFallbackTarget(ctx context.Context, providers []string, 
 	if eligibility.requiredKind != "" && eligibility.requiredKind != AuthKindOAuth {
 		return "", ""
 	}
-	cfg := m.runtimeConfigSnapshot()
-	if cfg == nil || !cfg.Routing.ClaudeFallback.Enabled {
+	profile := routingProfileFromContext(ctx)
+	if profile == nil || !profile.fallback.Enabled {
 		return "", ""
 	}
-	mode := cfg.Routing.ClaudeFallback.Mode
+	mode := profile.fallback.Mode
 	if mode == "" {
 		mode = "auto"
 	}
@@ -36,7 +36,7 @@ func (m *Manager) claudeFallbackTarget(ctx context.Context, providers []string, 
 		return "", ""
 	}
 	source := authSelectionModelFromOptions(opts, req.Model)
-	target := cfg.Routing.ClaudeFallback.Target(thinking.ParseSuffix(source).ModelName)
+	target := profile.fallback.Target(thinking.ParseSuffix(source).ModelName)
 	if strings.TrimSpace(target) == "" {
 		return "", ""
 	}
@@ -97,15 +97,20 @@ func executeWithClaudeFallback[T any](m *Manager, ctx context.Context, providers
 	return execute(withRequiredAuthKind(ctx, AuthKindOAuth), []string{"codex"}, req, opts)
 }
 
+// Execute resolves the request's routing profile before the fallback wrapper so
+// the fallback decision and the Codex leg use the same profile.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = m.ensureRoutingProfile(ctx)
 	return executeWithClaudeFallback(m, ctx, providers, req, opts, m.execute)
 }
 
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = m.ensureRoutingProfile(ctx)
 	return executeWithClaudeFallback(m, ctx, providers, req, opts, m.executeCount)
 }
 
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ctx = m.ensureRoutingProfile(ctx)
 	result, errStream := executeWithClaudeFallback(m, ctx, providers, req, opts, m.executeStream)
 	var bootstrapErr *streamBootstrapError
 	if errors.As(errStream, &bootstrapErr) && bootstrapErr != nil {

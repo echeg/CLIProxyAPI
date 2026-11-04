@@ -627,7 +627,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // With reserve unset (a pinned execution) the quota reserve is not applied. Under session
 // affinity, newSelectionErr is the error for a new binding when every available credential
 // is hard-reserved; bound sessions still reach the selector.
-func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, opts cliproxyexecutor.Options, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, newSelectionErr error, err error) {
+func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Selector, auths []*Auth, provider, routeModel string, opts cliproxyexecutor.Options, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, newSelectionErr error, err error) {
 	affinitySelector, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
 	weighted := selector
@@ -639,7 +639,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 		// unreserved alternatives that push reserved credentials out of a new selection.
 		auths = positiveWeightAuths(auths)
 	}
-	manualPreference := supportsPreferredAccounts(selector) && len(m.preferredAccounts()) > 0
+	manualPreference := supportsPreferredAccounts(selector) && len(routingProfileFromContext(ctx).preferredAccounts()) > 0
 
 	if !sessionAffinity && !schedulerAcross && !manualPreference {
 		priorityAuths, err = m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, false, reserve)
@@ -1687,8 +1687,11 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	}
 }
 
-func (m *Manager) useSchedulerFastPath() bool {
-	if m == nil || m.scheduler == nil || len(m.preferredAccounts()) > 0 {
+// useSchedulerFastPath reports whether the built-in scheduler may pick. The
+// scheduler does not know about manual preferences, so a request whose profile
+// prefers a credential takes the selector path.
+func (m *Manager) useSchedulerFastPath(ctx context.Context) bool {
+	if m == nil || m.scheduler == nil || len(routingProfileFromContext(ctx).preferredAccounts()) > 0 {
 		return false
 	}
 	return isBuiltInSelector(m.Selector())
@@ -1777,6 +1780,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
 	}
+	ctx = m.ensureRoutingProfile(ctx)
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
@@ -1826,7 +1830,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, opts, time.Now(), pinnedAuthID == "")
+	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(ctx, selector, candidates, provider, model, opts, time.Now(), pinnedAuthID == "")
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -1840,7 +1844,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, errPick
 	}
 	if !handled {
-		selectorCtx := selectorContextForAvailableAuths(m.withPreferredAccounts(ctx), selector, model)
+		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		if pinnedAuthID != "" {
 			// A pinned credential serves an existing binding, so the quota reserve does not apply.
 			selectorCtx = withQuotaReserveSkipped(selectorCtx)
@@ -2045,8 +2049,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+	ctx = m.ensureRoutingProfile(ctx)
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if m.hasPluginScheduler() || !m.useSchedulerFastPath(ctx) {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -2101,6 +2106,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
+	ctx = m.ensureRoutingProfile(ctx)
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
@@ -2166,7 +2172,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, opts, time.Now(), pinnedAuthID == "")
+	available, selectorAuths, errNewSelection, errAvailable := m.availableAuthsForSelector(ctx, selector, candidates, "mixed", model, opts, time.Now(), pinnedAuthID == "")
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
@@ -2180,7 +2186,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", errPick
 	}
 	if !handled {
-		selectorCtx := selectorContextForAvailableAuths(m.withPreferredAccounts(ctx), selector, model)
+		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		if pinnedAuthID != "" {
 			// A pinned credential serves an existing binding, so the quota reserve does not apply.
 			selectorCtx = withQuotaReserveSkipped(selectorCtx)
@@ -2224,8 +2230,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+	ctx = m.ensureRoutingProfile(ctx)
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if m.hasPluginScheduler() || !m.useSchedulerFastPath(ctx) {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 

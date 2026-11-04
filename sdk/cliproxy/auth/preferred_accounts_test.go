@@ -19,16 +19,16 @@ func TestPreferredAccountsPreserveExistingBindings(t *testing.T) {
 				t.Cleanup(selector.Stop)
 				manager, accounts, model := preferredAccountTestManager(t, provider, selector)
 				pick := preferredAccountTestPicker(t, manager, provider, model, mixed)
-				pick("old", accounts[0].ID)
-				setPreferredAccount(manager, provider, accounts[1].Index)
-				pick("new", accounts[1].ID)
-				pick("old", accounts[0].ID)
-				setPreferredAccount(manager, provider, accounts[2].Index)
-				pick("newer", accounts[2].ID)
-				pick("new", accounts[1].ID)
-				setPreferredAccount(manager, provider, "")
-				pick("automatic", accounts[0].ID)
-				pick("newer", accounts[2].ID)
+				none := preferredAccountContext(provider, "")
+				pick(none, "old", accounts[0].ID)
+				second := preferredAccountContext(provider, accounts[1].Index)
+				pick(second, "new", accounts[1].ID)
+				pick(second, "old", accounts[0].ID)
+				third := preferredAccountContext(provider, accounts[2].Index)
+				pick(third, "newer", accounts[2].ID)
+				pick(third, "new", accounts[1].ID)
+				pick(none, "automatic", accounts[0].ID)
+				pick(none, "newer", accounts[2].ID)
 			})
 		}
 	}
@@ -40,11 +40,10 @@ func TestPreferredAccountsWithoutAffinityUseEveryStrategy(t *testing.T) {
 			t.Run(fmt.Sprintf("%T/mixed=%t", selector, mixed), func(t *testing.T) {
 				manager, accounts, model := preferredAccountTestManager(t, "codex", selector)
 				pick := preferredAccountTestPicker(t, manager, "codex", model, mixed)
-				setPreferredAccount(manager, "codex", accounts[2].Index)
-				pick("first", accounts[2].ID)
-				pick("second", accounts[2].ID)
-				setPreferredAccount(manager, "codex", "")
-				pick("automatic", accounts[0].ID)
+				preferred := preferredAccountContext("codex", accounts[2].Index)
+				pick(preferred, "first", accounts[2].ID)
+				pick(preferred, "second", accounts[2].ID)
+				pick(preferredAccountContext("codex", ""), "automatic", accounts[0].ID)
 			})
 		}
 	}
@@ -56,7 +55,7 @@ func TestPreferredAccountsUnavailableFallback(t *testing.T) {
 			selector := NewSessionAffinitySelector(&WeightedRoundRobinSelector{})
 			t.Cleanup(selector.Stop)
 			manager, accounts, model := preferredAccountTestManager(t, "codex", selector)
-			setPreferredAccount(manager, "codex", accounts[1].Index)
+			ctx := preferredAccountContext("codex", accounts[1].Index)
 			preferred := accounts[1].Clone()
 			opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "new"}}
 			switch condition {
@@ -70,7 +69,7 @@ func TestPreferredAccountsUnavailableFallback(t *testing.T) {
 			case "unsupported":
 				registry.GetGlobalRegistry().UnregisterClient(preferred.ID)
 			case "removed":
-				setPreferredAccount(manager, "codex", "missing-account")
+				ctx = preferredAccountContext("codex", "missing-account")
 			case "zero-weight":
 				preferred.Attributes["weight"] = "0"
 			case "request-pin":
@@ -79,7 +78,7 @@ func TestPreferredAccountsUnavailableFallback(t *testing.T) {
 			if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), preferred); errUpdate != nil {
 				t.Fatal(errUpdate)
 			}
-			selected, _, errPick := manager.pickNext(context.Background(), "codex", model, opts, nil)
+			selected, _, errPick := manager.pickNext(ctx, "codex", model, opts, nil)
 			if errPick != nil || selected == nil || selected.ID != accounts[0].ID {
 				t.Fatalf("fallback = %+v, %v; want %s", selected, errPick, accounts[0].ID)
 			}
@@ -111,6 +110,8 @@ func preferredAccountTestManager(t *testing.T, provider string, selector Selecto
 	return manager, accounts, model
 }
 
+// setPreferredAccount writes the shared preference; requests without a context
+// profile resolve it through the shared profile.
 func setPreferredAccount(manager *Manager, provider, index string) {
 	preferences := map[string]string{}
 	if index != "" {
@@ -119,17 +120,26 @@ func setPreferredAccount(manager *Manager, provider, index string) {
 	manager.SetConfig(&config.Config{Routing: config.RoutingConfig{PreferredAccounts: preferences}})
 }
 
-func preferredAccountTestPicker(t *testing.T, manager *Manager, provider, model string, mixed bool) func(string, string) {
+// preferredAccountContext carries a request profile that prefers index for provider.
+func preferredAccountContext(provider, index string) context.Context {
+	profile := &routingProfile{}
+	if index != "" {
+		profile.preferred = map[string]string{provider: index}
+	}
+	return withRoutingProfile(context.Background(), profile)
+}
+
+func preferredAccountTestPicker(t *testing.T, manager *Manager, provider, model string, mixed bool) func(context.Context, string, string) {
 	t.Helper()
-	return func(session, want string) {
+	return func(ctx context.Context, session, want string) {
 		t.Helper()
 		opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: session}}
 		var selected *Auth
 		var errPick error
 		if mixed {
-			selected, _, _, errPick = manager.pickNextMixed(context.Background(), []string{provider}, model, opts, nil)
+			selected, _, _, errPick = manager.pickNextMixed(ctx, []string{provider}, model, opts, nil)
 		} else {
-			selected, _, errPick = manager.pickNext(context.Background(), provider, model, opts, nil)
+			selected, _, errPick = manager.pickNext(ctx, provider, model, opts, nil)
 		}
 		if errPick != nil || selected == nil || selected.ID != want {
 			t.Fatalf("session %s selected %+v, %v; want %s", session, selected, errPick, want)

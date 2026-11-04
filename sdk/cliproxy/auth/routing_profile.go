@@ -1,0 +1,135 @@
+package auth
+
+import (
+	"context"
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	log "github.com/sirupsen/logrus"
+)
+
+// routingProfile is the effective routing configuration of one request: the
+// profile of the inbound client API key, or the shared profile built from the
+// global routing fields. It is resolved once per execution and carried in the
+// context through the fallback wrapper, retries, and the Codex leg.
+type routingProfile struct {
+	// keyHash identifies the client key in logs; it is never the raw key.
+	keyHash string
+	// fromKey is true when the profile comes from routing.key-profiles.
+	fromKey   bool
+	sticky    bool
+	preferred map[string]string
+	selection config.SelectionConfig
+	fallback  config.ClaudeFallbackConfig
+}
+
+type routingProfileContextKey struct{}
+
+func withRoutingProfile(ctx context.Context, profile *routingProfile) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if profile == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, routingProfileContextKey{}, profile)
+}
+
+func routingProfileFromContext(ctx context.Context) *routingProfile {
+	if ctx == nil {
+		return nil
+	}
+	profile, _ := ctx.Value(routingProfileContextKey{}).(*routingProfile)
+	return profile
+}
+
+func (p *routingProfile) preferredAccounts() map[string]string {
+	if p == nil {
+		return nil
+	}
+	return p.preferred
+}
+
+func newRoutingProfile(profile config.RoutingProfile, keyHash string, fromKey bool) *routingProfile {
+	return &routingProfile{
+		keyHash:   keyHash,
+		fromKey:   fromKey,
+		sticky:    profile.SessionAffinity,
+		preferred: profile.PreferredAccounts,
+		selection: profile.EffectiveSelection(),
+		fallback:  profile.ClaudeFallback,
+	}
+}
+
+// clientAPIKeyFromContext returns the authenticated inbound client key stored by
+// the access middleware on the gin context, or "" when there is none.
+func clientAPIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(interface{ Get(string) (any, bool) })
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	raw, ok := ginCtx.Get("userApiKey")
+	if !ok {
+		return ""
+	}
+	return contextStringValue(raw)
+}
+
+// resolveRoutingProfile returns the effective profile for the request: nil under
+// Home, the shared profile under a plugin scheduler, otherwise the key profile of
+// the inbound client key when one exists and the shared profile when not.
+func (m *Manager) resolveRoutingProfile(ctx context.Context) *routingProfile {
+	if m == nil || m.HomeEnabled() {
+		return nil
+	}
+	cfg := m.runtimeConfigSnapshot()
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	if m.hasPluginScheduler() {
+		return newRoutingProfile(cfg.Routing.SharedProfile(), "", false)
+	}
+	key := clientAPIKeyFromContext(ctx)
+	keyHash := ""
+	if key != "" {
+		keyHash = config.KeyHashPrefix(key)
+		if profile := cfg.Routing.KeyProfiles[key]; profile != nil {
+			return newRoutingProfile(*profile, keyHash, true)
+		}
+	}
+	return newRoutingProfile(cfg.Routing.SharedProfile(), keyHash, false)
+}
+
+// ensureRoutingProfile injects the resolved profile unless the context already
+// carries one, so nested and internal calls keep the profile of the outer request.
+func (m *Manager) ensureRoutingProfile(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if routingProfileFromContext(ctx) != nil {
+		return ctx
+	}
+	return withRoutingProfile(ctx, m.resolveRoutingProfile(ctx))
+}
+
+// logRoutingProfileSelection reports a selection driven by a key profile. It logs
+// only the key hash prefix and never the raw client key.
+func logRoutingProfileSelection(ctx context.Context, stage string, auth *Auth) {
+	profile := routingProfileFromContext(ctx)
+	if profile == nil || !profile.fromKey || auth == nil {
+		return
+	}
+	index := auth.Index
+	if index == "" {
+		index = auth.Clone().EnsureIndex()
+	}
+	logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"routing_key":   profile.keyHash,
+		"routing_stage": stage,
+		"provider":      strings.ToLower(strings.TrimSpace(auth.Provider)),
+		"auth_index":    index,
+	}).Info("Routing profile selection")
+}

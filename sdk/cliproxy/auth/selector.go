@@ -502,7 +502,7 @@ type prevalidatedAuthCandidatesKey struct{}
 // reserve applies across every tier before manual preference or tier narrowing.
 func getSelectorAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	reserve := !quotaReserveSkipped(ctx)
-	if ctx == nil || ctx.Value(preferredAccountsContextKey{}) == nil {
+	if len(routingProfileFromContext(ctx).preferredAccounts()) == 0 {
 		return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false, reserve)
 	}
 	available, errAvailable := getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true, reserve)
