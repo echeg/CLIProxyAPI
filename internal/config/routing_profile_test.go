@@ -314,3 +314,13 @@ routing:
 		t.Fatalf("reload: %v %+v", errReload, loaded)
 	}
 }
+
+func TestRoutingProfileEffectiveSelection(t *testing.T) {
+	if got := (RoutingProfile{}).EffectiveSelection(); got != DefaultSelection() {
+		t.Fatalf("empty profile selection = %+v, want the default", got)
+	}
+	explicit := SelectionConfig{Primary: SelectionMostRemaining, Tiebreak: SelectionWeightedRoundRobin}
+	if got := (RoutingProfile{Selection: explicit}).EffectiveSelection(); got != explicit {
+		t.Fatalf("explicit profile selection = %+v, want %+v", got, explicit)
+	}
+}
