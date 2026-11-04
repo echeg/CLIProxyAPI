@@ -462,3 +462,63 @@ func TestSessionAffinityPipelineBindingOutranksLaterPreference(t *testing.T) {
 		t.Fatalf("new session Pick() = %v, %v; want the preferred auth-b", fresh, errFresh)
 	}
 }
+
+// Explicit identities such as prompt_cache_key are chosen by the client and can
+// repeat across keys. A binding made under one key profile must not route another
+// key profile, while keys on the shared profile keep sharing bindings.
+func TestSessionAffinityExplicitBindingsAreScopedPerKeyProfile(t *testing.T) {
+	selector := stickyProfileSelector(t, time.Hour, internalconfig.SelectionConfig{Primary: internalconfig.SelectionReserves, Tiebreak: internalconfig.SelectionRoundRobin})
+	authA := &Auth{ID: "auth-a", Provider: "codex", Index: "idx-a"}
+	authB := &Auth{ID: "auth-b", Provider: "codex", Index: "idx-b"}
+	auths := []*Auth{authA, authB}
+	keyA := withRoutingProfile(context.Background(), &routingProfile{keyHash: "key-a", fromKey: true, sticky: true, preferred: map[string]string{"codex": "idx-a"}})
+	keyB := withRoutingProfile(context.Background(), &routingProfile{keyHash: "key-b", fromKey: true, sticky: true, preferred: map[string]string{"codex": "idx-b"}})
+	pick := func(ctx context.Context) (*Auth, cliproxyexecutor.Options) {
+		t.Helper()
+		opts := stickyProfileOptions("explicit", "shared-session")
+		auth, errPick := selector.Pick(ctx, "codex", stickyProfileModel, opts, auths)
+		if errPick != nil {
+			t.Fatal(errPick)
+		}
+		return auth, opts
+	}
+
+	if got, _ := pick(keyA); got.ID != authA.ID {
+		t.Fatalf("key A Pick() = %s, want its preferred auth-a", got.ID)
+	}
+	gotB, optsB := pick(keyB)
+	if gotB.ID != authB.ID {
+		t.Fatalf("key B Pick() = %s, want its preferred auth-b, not key A's binding", gotB.ID)
+	}
+	if got, _ := pick(keyA); got.ID != authA.ID {
+		t.Fatalf("key A rebinding = %s, want auth-a", got.ID)
+	}
+
+	// A failed result for key B releases only key B's binding.
+	selector.OnResult(Result{AuthID: authB.ID, Provider: "codex", Model: stickyProfileModel, Options: optsB,
+		Error: &Error{Code: "rate_limited", HTTPStatus: http.StatusTooManyRequests}})
+	if _, ok := selector.cache.Get(sessionBindingKey("codex", cliproxysession.BoundSessionIdentity("shared-session"), canonicalModelKey(stickyProfileModel), "key:key-b")); ok {
+		t.Fatal("key B failure kept key B's binding")
+	}
+	if got, _ := pick(keyA); got.ID != authA.ID {
+		t.Fatalf("key A after key B failure = %s, want auth-a", got.ID)
+	}
+
+	// Two keys on the shared profile share one binding, as before.
+	sharedOne := withRoutingProfile(context.Background(), &routingProfile{keyHash: "shared-1", sticky: true})
+	sharedTwo := withRoutingProfile(context.Background(), &routingProfile{keyHash: "shared-2", sticky: true})
+	opts := stickyProfileOptions("explicit", "shared-profile-session")
+	first, errFirst := selector.Pick(sharedOne, "codex", stickyProfileModel, opts, auths)
+	if errFirst != nil {
+		t.Fatal(errFirst)
+	}
+	if _, scoped := opts.Metadata[cliproxyexecutor.SessionAffinityScopeMetadataKey]; scoped {
+		t.Fatal("shared-profile request carries a binding scope")
+	}
+	for range 3 {
+		second, errSecond := selector.Pick(sharedTwo, "codex", stickyProfileModel, stickyProfileOptions("explicit", "shared-profile-session"), auths)
+		if errSecond != nil || second.ID != first.ID {
+			t.Fatalf("shared-profile key Pick() = %v, %v; want the shared binding %s", second, errSecond, first.ID)
+		}
+	}
+}

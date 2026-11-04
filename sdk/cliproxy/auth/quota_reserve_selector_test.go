@@ -661,21 +661,21 @@ func TestQuotaReserveBoundCandidateFollowsPickLookupOrder(t *testing.T) {
 	key := func(sessionID string) string {
 		return "codex::" + cliproxysession.BoundSessionIdentity(sessionID) + "::" + canonicalModelKey(model)
 	}
-	if bound := selector.boundCandidate("codex", model, opts, auths); bound != nil {
+	if bound := selector.boundCandidate(context.Background(), "codex", model, opts, auths); bound != nil {
 		t.Fatalf("unbound session resolved to %s", bound.ID)
 	}
 	selector.cache.Set(key("session:claw-p-1"), parent.ID)
-	if bound := selector.boundCandidate("codex", model, opts, auths); bound != parent {
+	if bound := selector.boundCandidate(context.Background(), "codex", model, opts, auths); bound != parent {
 		t.Fatalf("fork without own binding resolved to %v, want parent binding", bound)
 	}
 	// Pick reselects when the fork's own binding is not a candidate, so the parent binding
 	// no longer applies.
 	selector.cache.Set(key("session:claw-c-1"), "excluded-auth")
-	if bound := selector.boundCandidate("codex", model, opts, auths); bound != nil {
+	if bound := selector.boundCandidate(context.Background(), "codex", model, opts, auths); bound != nil {
 		t.Fatalf("fork bound outside candidates resolved to %s", bound.ID)
 	}
 	selector.cache.Set(key("session:claw-c-1"), child.ID)
-	if bound := selector.boundCandidate("codex", model, opts, auths); bound != child {
+	if bound := selector.boundCandidate(context.Background(), "codex", model, opts, auths); bound != child {
 		t.Fatalf("fork binding resolved to %v, want %s", bound, child.ID)
 	}
 }

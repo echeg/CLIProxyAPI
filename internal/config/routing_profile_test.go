@@ -324,3 +324,86 @@ func TestRoutingProfileEffectiveSelection(t *testing.T) {
 		t.Fatalf("explicit profile selection = %+v, want %+v", got, explicit)
 	}
 }
+
+// An empty profile is an explicit override of the shared settings, and a profile
+// never inherits fields, so saving must keep empty entries and drop cleared fields.
+func TestSaveConfigKeepsEmptyKeyProfilesAndDropsClearedFields(t *testing.T) {
+	save := func(t *testing.T, raw string, edit func(*Config)) *Config {
+		t.Helper()
+		path := t.TempDir() + "/config.yaml"
+		if errWrite := os.WriteFile(path, []byte(raw), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		cfg, errLoad := LoadConfig(path)
+		if errLoad != nil {
+			t.Fatal(errLoad)
+		}
+		edit(cfg)
+		if errSave := SaveConfigPreserveComments(path, cfg, true); errSave != nil {
+			t.Fatal(errSave)
+		}
+		loaded, errReload := LoadConfig(path)
+		if errReload != nil {
+			t.Fatal(errReload)
+		}
+		return loaded
+	}
+	const withProfiles = `config-version: 8
+access:
+  api-keys: ["key-a", "old"]
+routing:
+  session-affinity: true
+  key-profiles:
+    key-a:
+      session-affinity: true
+      selection: {primary: priority, tiebreak: fill-first}
+    old: {}
+`
+
+	t.Run("rotated empty profile", func(t *testing.T) {
+		loaded := save(t, withProfiles, func(cfg *Config) {
+			cfg.APIKeys = []string{"key-a", "new"}
+			cfg.Routing.KeyProfiles["new"] = cfg.Routing.KeyProfiles["old"]
+			delete(cfg.Routing.KeyProfiles, "old")
+		})
+		if profile := loaded.Routing.KeyProfiles["new"]; profile == nil || !reflect.DeepEqual(*profile, RoutingProfile{}) {
+			t.Fatalf("rotated profile = %+v, want an empty override", profile)
+		}
+		if _, ok := loaded.Routing.KeyProfiles["old"]; ok {
+			t.Fatal("old key profile kept")
+		}
+	})
+
+	t.Run("profile cleared to empty", func(t *testing.T) {
+		loaded := save(t, withProfiles, func(cfg *Config) {
+			cfg.Routing.KeyProfiles["key-a"] = &RoutingProfile{}
+		})
+		if profile := loaded.Routing.KeyProfiles["key-a"]; profile == nil || !reflect.DeepEqual(*profile, RoutingProfile{}) {
+			t.Fatalf("cleared profile = %+v, want empty", profile)
+		}
+	})
+
+	t.Run("one field cleared", func(t *testing.T) {
+		loaded := save(t, withProfiles, func(cfg *Config) {
+			cfg.Routing.KeyProfiles["key-a"].Selection.Tiebreak = ""
+		})
+		want := RoutingProfile{SessionAffinity: true, Selection: SelectionConfig{Primary: SelectionPriority}}
+		if profile := loaded.Routing.KeyProfiles["key-a"]; profile == nil || !reflect.DeepEqual(*profile, want) {
+			t.Fatalf("profile = %+v, want %+v", profile, want)
+		}
+	})
+
+	for name, raw := range map[string]string{
+		"no key-profiles": "config-version: 8\naccess:\n  api-keys: [\"key-a\"]\nrouting:\n  strategy: fill-first\n",
+		"no routing":      "config-version: 8\naccess:\n  api-keys: [\"key-a\"]\n",
+	} {
+		t.Run("empty profile added with "+name, func(t *testing.T) {
+			loaded := save(t, raw, func(cfg *Config) {
+				cfg.Routing.KeyProfiles = map[string]*RoutingProfile{"key-a": {}}
+			})
+			if profile := loaded.Routing.KeyProfiles["key-a"]; profile == nil || !reflect.DeepEqual(*profile, RoutingProfile{}) {
+				t.Fatalf("added profile = %+v, want an empty override", profile)
+			}
+		})
+	}
+}

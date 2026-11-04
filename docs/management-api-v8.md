@@ -292,7 +292,10 @@ another key binds sessions. Turning affinity on or off for every profile at once
 for example when the last sticky key profile switches off, rebuilds the selector
 and drops every existing binding. Edits that keep some profile sticky keep the
 bindings. A cold selection for a sticky key runs the full pipeline, including the
-key's preferred account.
+key's preferred account. Bindings of a key with its own profile are kept apart
+from every other key, so a session identity that two clients happen to share,
+such as a fixed `prompt_cache_key`, binds separately for each of them. Keys on
+the shared profile share bindings as before.
 
 #### Reading profiles
 

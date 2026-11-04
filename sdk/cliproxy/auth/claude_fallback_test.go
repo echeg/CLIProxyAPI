@@ -511,3 +511,39 @@ func TestClaudeFallbackKeepsPrimaryErrorWhenCodexUnavailable(t *testing.T) {
 		})
 	}
 }
+
+// A Claude error that matches a stop rule ends the request; the fallback must not
+// turn it into a Codex call, and the client sees the original error.
+func TestClaudeFallbackHonorsRequestScopedStop(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, action := range []string{RequestScopedActionStop, RequestScopedActionStopAndCooldown} {
+		for _, path := range []string{"execute", "count", "stream"} {
+			t.Run(action+"/"+path, func(t *testing.T) {
+				primaryErr := &Error{HTTPStatus: http.StatusTooManyRequests, Message: "account_suspended"}
+				m, calls, _, _ := fallbackTestManager(t, "auto", primaryErr)
+				m.SetConfig(&internalconfig.Config{
+					Routing: internalconfig.RoutingConfig{ClaudeFallback: internalconfig.ClaudeFallbackConfig{Enabled: true, Mode: "auto", Mappings: []internalconfig.ClaudeFallbackMapping{{From: "claude-opus-*", To: "gpt-6-astra"}}}},
+					OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+						"claude": {{Status: http.StatusTooManyRequests, Match: []string{"account_suspended"}, Action: action}},
+					},
+				})
+				req := cliproxyexecutor.Request{Model: "claude-opus-5"}
+				var err error
+				switch path {
+				case "execute":
+					_, err = m.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+				case "count":
+					_, err = m.ExecuteCount(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+				case "stream":
+					_, err = m.ExecuteStream(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{Stream: true})
+				}
+				if !reflect.DeepEqual(*calls, []string{"claude"}) {
+					t.Fatalf("calls=%v, want only the stopped Claude attempt; err=%v", *calls, err)
+				}
+				if err != primaryErr {
+					t.Fatalf("err = %T/%v, want the original Claude error", err, err)
+				}
+			})
+		}
+	}
+}

@@ -95,6 +95,16 @@ func unwrapExecutionBoundaryError(err error) error {
 	return unwrapUpstreamExecutionAttempt(err)
 }
 
+// unwrapExecutionBoundaryKeepingStop removes the internal markers like
+// unwrapExecutionBoundaryError but keeps a request-stop marker, so the Claude
+// fallback wrapper can honor a stop rule before it strips the marker.
+func unwrapExecutionBoundaryKeepingStop(err error) error {
+	if !isRequestStopError(err) {
+		return unwrapExecutionBoundaryError(err)
+	}
+	return wrapRequestStopError(unwrapExecutionBoundaryError(err))
+}
+
 func preferredExecutionAttemptError(fallback, upstream error) error {
 	if errors.Is(fallback, context.Canceled) || errors.Is(fallback, context.DeadlineExceeded) {
 		return fallback
@@ -144,7 +154,7 @@ func (m *Manager) execute(ctx context.Context, providers []string, req cliproxye
 			return resp, nil
 		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
-			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
+			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryKeepingStop(errExec)
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
 			preferredUpstreamErr = errExec
@@ -207,7 +217,7 @@ func (m *Manager) executeCount(ctx context.Context, providers []string, req clip
 			return resp, nil
 		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
-			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
+			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryKeepingStop(errExec)
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
 			preferredUpstreamErr = errExec
@@ -285,7 +295,7 @@ func (m *Manager) executeStream(ctx context.Context, providers []string, req cli
 		retryRoundPending = false
 		retryRoundWaited = false
 		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
-			return nil, unwrapExecutionBoundaryError(errStream)
+			return nil, unwrapExecutionBoundaryKeepingStop(errStream)
 		}
 		lastErr = errStream
 		if m.hasClaudeFallbackAfterError(ctx, normalized, req, opts, errStream) {

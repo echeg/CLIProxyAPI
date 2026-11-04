@@ -88,6 +88,9 @@ const (
 	// session affinity off, so SessionAffinitySelector.OnResult neither refreshes nor
 	// deletes bindings for it.
 	SessionAffinityDisabledMetadataKey = "session_affinity_disabled"
+	// SessionAffinityScopeMetadataKey carries the binding namespace of a client key
+	// with its own routing profile, so OnResult touches the bindings Pick used.
+	SessionAffinityScopeMetadataKey = "session_affinity_scope"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

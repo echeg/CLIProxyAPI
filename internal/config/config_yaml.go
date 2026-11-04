@@ -378,6 +378,11 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 
+	// An empty key profile is an explicit override of the shared routing settings.
+	if hasKeyProfileEntries(path, node) {
+		return false
+	}
+
 	// First check if it's a zero value
 	if isZeroValueNode(node) {
 		return true
@@ -439,7 +444,7 @@ func pruneKnownDefaultsInNewNode(path []string, node *yaml.Node) {
 
 			pruneKnownDefaultsInNewNode(childPath, valueNode)
 			if (valueNode.Kind == yaml.MappingNode || valueNode.Kind == yaml.SequenceNode) &&
-				len(valueNode.Content) == 0 {
+				len(valueNode.Content) == 0 && !isKeyProfileEntryPath(childPath) {
 				continue
 			}
 
@@ -814,6 +819,11 @@ func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {
 // known credential sequence paths to prevent stale deleted keys from persisting while leaving
 // all other mappings and root sections unaffected.
 func shouldPruneNestedMappingKeys(path []string) bool {
+	// Key profile fields are all omitempty and a profile never inherits from the
+	// shared settings, so a field missing from the generated profile was cleared.
+	if isKeyProfileSubtreePath(path) {
+		return true
+	}
 	if len(path) < 2 {
 		return false
 	}
@@ -827,6 +837,37 @@ func shouldPruneNestedMappingKeys(path []string) bool {
 	default:
 		return false
 	}
+}
+
+// isKeyProfileSubtreePath reports whether path is a routing.key-profiles entry or
+// lies inside one.
+func isKeyProfileSubtreePath(path []string) bool {
+	return len(path) >= 3 && path[0] == "routing" && path[1] == "key-profiles"
+}
+
+// isKeyProfileEntryPath reports whether path is a single routing.key-profiles entry.
+func isKeyProfileEntryPath(path []string) bool {
+	return len(path) == 3 && isKeyProfileSubtreePath(path)
+}
+
+// hasKeyProfileEntries reports whether node, found at path, is or contains a
+// routing.key-profiles entry. Such an entry is kept even when every field is a
+// zero value.
+func hasKeyProfileEntries(path []string, node *yaml.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch {
+	case isKeyProfileEntryPath(path):
+		return true
+	case len(path) == 2 && path[0] == "routing" && path[1] == "key-profiles":
+		return node.Kind == yaml.MappingNode && len(node.Content) > 0
+	case len(path) == 1 && path[0] == "routing" && node.Kind == yaml.MappingNode:
+		if idx := findMapKeyIndex(node, "key-profiles"); idx >= 0 && idx+1 < len(node.Content) {
+			return hasKeyProfileEntries(appendPath(path, "key-profiles"), node.Content[idx+1])
+		}
+	}
+	return false
 }
 
 // normalizeCollectionNodeStyles forces YAML collections to use block notation, keeping

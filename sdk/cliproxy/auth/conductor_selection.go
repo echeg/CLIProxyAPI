@@ -662,7 +662,7 @@ func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Select
 	allAuths, errAcross := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, reserve && !sessionAffinity)
 	if errAcross != nil {
 		if sessionAffinity && reserve && anyQuotaReserveConfigured(auths) {
-			bound := affinitySelector.boundCandidate(provider, routeModel, opts, auths)
+			bound := affinitySelector.boundCandidate(ctx, provider, routeModel, opts, auths)
 			_, errAcross = m.availableAuthsForRouteModelWithPriorityMode(withoutQuotaReserveFor(auths, bound), provider, routeModel, now, true, true)
 		}
 		return nil, nil, nil, errAcross

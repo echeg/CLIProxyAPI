@@ -76,7 +76,11 @@ func executeWithClaudeFallback[T any](m *Manager, ctx context.Context, providers
 	var primaryErr error
 	if mode != "always" || target == "" {
 		result, errPrimary := execute(ctx, providers, req, opts)
-		if target == "" || !shouldFallbackClaude(errPrimary) || (ctx != nil && ctx.Err() != nil) {
+		// The private paths keep the request-stop marker so a matched stop rule
+		// blocks the fallback; strip it once the decision is made.
+		fallback := target != "" && shouldFallbackClaude(errPrimary)
+		errPrimary = unwrapRequestStopError(errPrimary)
+		if !fallback || (ctx != nil && ctx.Err() != nil) {
 			return result, errPrimary
 		}
 		primaryErr = errPrimary
@@ -97,6 +101,7 @@ func executeWithClaudeFallback[T any](m *Manager, ctx context.Context, providers
 	// The leg keeps the request's routing profile, so the key's Codex preference and
 	// selection apply; its selections are logged under the fallback stage.
 	result, errFallback := execute(withRoutingFallbackLeg(withRequiredAuthKind(ctx, AuthKindOAuth)), []string{"codex"}, req, opts)
+	errFallback = unwrapRequestStopError(errFallback)
 	if primaryErr != nil && isFallbackSelectionError(errFallback) {
 		// Codex had no usable credential, so the Claude failure (with its status and
 		// Retry-After) is the more useful answer for the client.

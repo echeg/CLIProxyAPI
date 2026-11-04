@@ -1054,6 +1054,9 @@ type SessionAffinitySelector struct {
 	cache            *SessionCache
 	matcher          *cliproxysession.MerklePrefixMatcher
 	subagentAffinity bool
+	// bindingScopes records every key scope Pick has bound under, so LookupAffinity
+	// can observe scoped bindings; it holds at most one entry per key profile.
+	bindingScopes sync.Map
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -1126,12 +1129,20 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	// A routing profile with session affinity off neither reads nor writes bindings;
 	// the marker keeps OnResult from touching bindings of the same session either.
-	if profile := routingProfileFromContext(ctx); profile != nil && !profile.sticky {
+	profile := routingProfileFromContext(ctx)
+	if profile != nil && !profile.sticky {
 		opts.Metadata[cliproxyexecutor.SessionAffinityDisabledMetadataKey] = true
 		entry.Debugf("session-affinity: disabled by routing profile, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.pickWithoutSession(ctx, provider, model, opts, auths)
 	}
 	delete(opts.Metadata, cliproxyexecutor.SessionAffinityDisabledMetadataKey)
+	scope := sessionBindingScope(profile)
+	if scope != "" {
+		opts.Metadata[cliproxyexecutor.SessionAffinityScopeMetadataKey] = scope
+		s.bindingScopes.Store(scope, struct{}{})
+	} else {
+		delete(opts.Metadata, cliproxyexecutor.SessionAffinityScopeMetadataKey)
+	}
 
 	// Explicit harness identities are absolute authority. The LCP matcher is only
 	// consulted when no header, body, or execution-session identity is present.
@@ -1184,7 +1195,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	modelKey := canonicalModelKey(model)
-	cacheKey := provider + "::" + primaryID + "::" + modelKey
+	cacheKey := sessionBindingKey(provider, primaryID, modelKey, scope)
 	isFork := false
 	if opts.Metadata != nil {
 		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
@@ -1194,7 +1205,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
+		fallbackKey = sessionBindingKey(provider, fallbackID, modelKey, scope)
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
@@ -1272,6 +1283,28 @@ func (s *SessionAffinitySelector) availabilityCandidates(ctx context.Context, pr
 		return fallback.weightedCandidates(ctx, provider, auths)
 	}
 	return auths
+}
+
+// sessionBindingScope namespaces the bindings of a client key with its own routing
+// profile. Explicit identities such as prompt_cache_key or user are chosen by the
+// client and can repeat across callers, so a binding made under one key's
+// preference must not route another key. Keys on the shared profile share one
+// routing configuration and keep sharing bindings.
+func sessionBindingScope(profile *routingProfile) string {
+	if profile == nil || !profile.fromKey || profile.keyHash == "" {
+		return ""
+	}
+	return "key:" + profile.keyHash
+}
+
+// sessionBindingKey builds a session cache key. The scope is a suffix so the key
+// still starts with provider and session, which alias compaction relies on.
+func sessionBindingKey(provider, sessionID, modelKey, scope string) string {
+	key := provider + "::" + sessionID + "::" + modelKey
+	if scope != "" {
+		key += "::" + scope
+	}
+	return key
 }
 
 // pickWithoutSession serves a request that reads and writes no binding: one without a
@@ -1557,7 +1590,7 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // boundCandidate returns the credential among auths that Pick would resolve the request to
 // through an existing binding once that credential becomes available, or nil. It mirrors
 // Pick's lookup order without selecting or creating a binding.
-func (s *SessionAffinitySelector) boundCandidate(provider, model string, opts cliproxyexecutor.Options, auths []*Auth) *Auth {
+func (s *SessionAffinitySelector) boundCandidate(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) *Auth {
 	if s == nil {
 		return nil
 	}
@@ -1596,9 +1629,10 @@ func (s *SessionAffinitySelector) boundCandidate(provider, model string, opts cl
 	}
 	primaryID = cliproxysession.BoundSessionIdentity(primaryID)
 	modelKey := canonicalModelKey(model)
+	scope := sessionBindingScope(routingProfileFromContext(ctx))
 	// Pick reselects immediately when the primary binding points outside the candidates, so
 	// the fallback binding is consulted only on a primary cache miss.
-	if authID, ok := s.cache.Get(provider + "::" + primaryID + "::" + modelKey); ok {
+	if authID, ok := s.cache.Get(sessionBindingKey(provider, primaryID, modelKey, scope)); ok {
 		return candidate(authID)
 	}
 	if fallbackID == "" {
@@ -1612,7 +1646,7 @@ func (s *SessionAffinitySelector) boundCandidate(provider, model string, opts cl
 	if !isFork && isSubagentSession(primaryID, fallbackID) && !s.subagentAffinity {
 		return nil
 	}
-	authID, ok := s.cache.Get(provider + "::" + fallbackID + "::" + modelKey)
+	authID, ok := s.cache.Get(sessionBindingKey(provider, fallbackID, modelKey, scope))
 	if !ok {
 		return nil
 	}
@@ -1668,16 +1702,25 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 		}
 	}
 
+	// Bindings of key profiles live under their key scope; observe them as well.
+	scopes := []string{""}
+	s.bindingScopes.Range(func(scope, _ any) bool {
+		scopes = append(scopes, scope.(string))
+		return true
+	})
+
 	foundAuths := make(map[string]struct{})
 	for _, candProvider := range providers {
 		for _, cand := range candidates {
 			bounded := cliproxysession.BoundSessionIdentity(cand)
-			key := candProvider + "::" + bounded + "::" + modelKey
-			if authID, ok := s.cache.Get(key); ok && authID != "" {
-				if authFilter != nil && !authFilter(authID) {
-					continue
+			for _, scope := range scopes {
+				key := sessionBindingKey(candProvider, bounded, modelKey, scope)
+				if authID, ok := s.cache.Get(key); ok && authID != "" {
+					if authFilter != nil && !authFilter(authID) {
+						continue
+					}
+					foundAuths[authID] = struct{}{}
 				}
-				foundAuths[authID] = struct{}{}
 			}
 		}
 	}
@@ -1802,10 +1845,11 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackID = cliproxysession.BoundSessionIdentity(fallbackID)
 	}
 
-	cacheKey := ns + "::" + primaryID + "::" + nsModel
+	scope := sessionMetadataString(res.Options.Metadata, cliproxyexecutor.SessionAffinityScopeMetadataKey)
+	cacheKey := sessionBindingKey(ns, primaryID, nsModel, scope)
 	var fallbackKey string
 	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) {
-		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
+		fallbackKey = sessionBindingKey(ns, fallbackID, nsModel, scope)
 	}
 	if res.Success {
 		s.cache.Touch(cacheKey, res.AuthID)
