@@ -96,7 +96,28 @@ func executeWithClaudeFallback[T any](m *Manager, ctx context.Context, providers
 	// requested-model metadata. The Codex executor translates using req.Model.
 	// The leg keeps the request's routing profile, so the key's Codex preference and
 	// selection apply; its selections are logged under the fallback stage.
-	return execute(withRoutingFallbackLeg(withRequiredAuthKind(ctx, AuthKindOAuth)), []string{"codex"}, req, opts)
+	result, errFallback := execute(withRoutingFallbackLeg(withRequiredAuthKind(ctx, AuthKindOAuth)), []string{"codex"}, req, opts)
+	if primaryErr != nil && isFallbackSelectionError(errFallback) {
+		// Codex had no usable credential, so the Claude failure (with its status and
+		// Retry-After) is the more useful answer for the client.
+		var zero T
+		return zero, primaryErr
+	}
+	return result, errFallback
+}
+
+// isFallbackSelectionError reports whether the Codex leg failed before reaching an
+// upstream because no credential could be selected.
+func isFallbackSelectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) {
+		return true
+	}
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && (authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable")
 }
 
 // Execute resolves the request's routing profile before the fallback wrapper so

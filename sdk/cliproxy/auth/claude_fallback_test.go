@@ -475,3 +475,39 @@ func TestClaudeFallbackStopsWhenCallerCancels(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeFallbackKeepsPrimaryErrorWhenCodexUnavailable(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			primaryErr := &Error{HTTPStatus: http.StatusTooManyRequests, Message: "claude quota"}
+			m, calls, _, _ := fallbackTestManager(t, "auto", primaryErr)
+			// The Codex credential no longer serves the mapped model, so the leg cannot select one.
+			registry.GetGlobalRegistry().UnregisterClient(t.Name() + "c")
+			req := cliproxyexecutor.Request{Model: "claude-opus-5"}
+			var err error
+			switch path {
+			case "execute":
+				_, err = m.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+			case "count":
+				_, err = m.ExecuteCount(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+			case "stream":
+				var result *cliproxyexecutor.StreamResult
+				result, err = m.ExecuteStream(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{Stream: true})
+				if err == nil && result != nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							err = chunk.Err
+						}
+					}
+				}
+			}
+			if !reflect.DeepEqual(*calls, []string{"claude", "claude"}) {
+				t.Fatalf("calls=%v; err=%v", *calls, err)
+			}
+			if statusCodeFromError(err) != http.StatusTooManyRequests {
+				t.Fatalf("err=%v (status %d), want the Claude 429", err, statusCodeFromError(err))
+			}
+		})
+	}
+}
