@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 type claudeFallbackExecutor struct {
@@ -273,5 +276,118 @@ func TestClaudeFallbackContextProfileOverridesSharedConfig(t *testing.T) {
 	}
 	if !reflect.DeepEqual(*calls, []string{"codex"}) {
 		t.Fatalf("calls=%v, want [codex]", *calls)
+	}
+}
+
+// TestClaudeFallbackLegUsesKeyProfile runs the Codex leg through the pipeline:
+// the key's Codex preference wins, a key without a preference applies its own
+// selection, and a key without a profile uses the shared selection and logs nothing.
+func TestClaudeFallbackLegUsesKeyProfile(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	hook := logtest.NewLocal(log.StandardLogger())
+	t.Cleanup(hook.Reset)
+
+	const keyPreferred, keySelection, keyShared = "sk-fallback-preferred", "sk-fallback-selection", "sk-fallback-shared"
+	m := NewManager(nil, nil, nil)
+	m.SetSelector(NewPipelineSelector(m.SharedSelection))
+	m.SetRetryConfig(0, 0, 0)
+
+	var codexCalls []string
+	m.RegisterExecutor(&claudeFallbackExecutor{provider: "claude", run: func(*Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusTooManyRequests}
+	}})
+	m.RegisterExecutor(&claudeFallbackExecutor{provider: "codex", run: func(a *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+		if req.Model != "gpt-6-sol" {
+			t.Errorf("fallback model %q, want gpt-6-sol", req.Model)
+		}
+		codexCalls = append(codexCalls, a.ID)
+		return cliproxyexecutor.Response{}, nil
+	}})
+	indexes := map[string]string{}
+	for _, spec := range []struct{ id, provider, priority, model string }{
+		{"claude-1", "claude", "0", "claude-opus-5"},
+		{"claude-2", "claude", "0", "claude-opus-5"},
+		{"codex-a", "codex", "0", "gpt-6-sol"},
+		{"codex-b", "codex", "10", "gpt-6-sol"},
+		{"codex-c", "codex", "0", "gpt-6-sol"},
+	} {
+		id := t.Name() + "-" + spec.id
+		registry.GetGlobalRegistry().RegisterClient(id, spec.provider, []*registry.ModelInfo{{ID: spec.model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+		registered, errRegister := m.Register(WithSkipPersist(context.Background()), &Auth{ID: id, Provider: spec.provider, Status: StatusActive,
+			Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth, "priority": spec.priority}})
+		if errRegister != nil {
+			t.Fatal(errRegister)
+		}
+		indexes[id] = registered.Index
+	}
+	codexID := func(suffix string) string { return t.Name() + "-" + suffix }
+
+	fallback := internalconfig.ClaudeFallbackConfig{Enabled: true, Mode: "auto", Mappings: []internalconfig.ClaudeFallbackMapping{{From: "claude-opus-*", To: "gpt-6-sol"}}}
+	keySelectionConfig := internalconfig.SelectionConfig{Primary: "priority", Tiebreak: "fill-first"}
+	m.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{APIKeys: []string{keyPreferred, keySelection, keyShared}},
+		Routing: internalconfig.RoutingConfig{
+			Selection:      internalconfig.SelectionConfig{Primary: "fill-first"},
+			ClaudeFallback: fallback,
+			KeyProfiles: map[string]*internalconfig.RoutingProfile{
+				keyPreferred: {PreferredAccounts: map[string]string{"codex": indexes[codexID("codex-c")]}, Selection: keySelectionConfig, ClaudeFallback: fallback},
+				keySelection: {Selection: keySelectionConfig, ClaudeFallback: fallback},
+			},
+		},
+	})
+
+	for _, tc := range []struct {
+		key, wantCodex, wantStage string
+	}{
+		// The preference beats the key's priority narrowing (codex-b has priority 10).
+		{keyPreferred, "codex-c", routingStagePreferred},
+		// The key's {priority, fill-first} selects the higher tier.
+		{keySelection, "codex-b", routingStagePipeline},
+		// The shared {fill-first} selects the lowest ID and logs nothing.
+		{keyShared, "codex-a", ""},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			hook.Reset()
+			codexCalls = nil
+			if _, err := m.Execute(ginContextWithKey(tc.key), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, cliproxyexecutor.Options{}); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(codexCalls, []string{codexID(tc.wantCodex)}) {
+				t.Fatalf("codex calls = %v, want [%s]", codexCalls, codexID(tc.wantCodex))
+			}
+			var codexEntries []*log.Entry
+			for _, entry := range hook.AllEntries() {
+				if entry.Message != "Routing profile selection" {
+					continue
+				}
+				if line, _ := entry.String(); strings.Contains(line, tc.key) {
+					t.Fatalf("log line leaked the raw key: %s", line)
+				}
+				if entry.Data["routing_key"] != internalconfig.KeyHashPrefix(tc.key) {
+					t.Fatalf("routing_key = %v, want the hash prefix", entry.Data["routing_key"])
+				}
+				if entry.Data["provider"] == "codex" {
+					codexEntries = append(codexEntries, entry)
+				} else if entry.Data["routing_stage"] != routingStagePipeline || entry.Data["fallback_stage"] != nil {
+					t.Fatalf("claude leg log fields = %v", entry.Data)
+				}
+			}
+			if tc.wantStage == "" {
+				for _, entry := range hook.AllEntries() {
+					if entry.Message == "Routing profile selection" {
+						t.Fatalf("shared profile logged a selection: %v", entry.Data)
+					}
+				}
+				return
+			}
+			if len(codexEntries) != 1 {
+				t.Fatalf("codex selection log entries = %d, want 1", len(codexEntries))
+			}
+			got := codexEntries[0].Data
+			if got["routing_stage"] != routingStageFallback || got["fallback_stage"] != tc.wantStage || got["auth_index"] != indexes[codexID(tc.wantCodex)] {
+				t.Fatalf("codex leg log fields = %v", got)
+			}
+		})
 	}
 }

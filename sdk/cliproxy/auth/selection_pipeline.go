@@ -92,6 +92,7 @@ func (s *PipelineSelector) Pick(ctx context.Context, provider, model string, opt
 		candidates = available
 	}
 	if preferred := preferredAvailableAuth(ctx, provider, candidates); preferred != nil {
+		logRoutingProfileSelection(ctx, routingStagePreferred, preferred)
 		return preferred, nil
 	}
 	slots := activeSlots(s.selection(ctx))
@@ -106,14 +107,20 @@ func (s *PipelineSelector) Pick(ctx context.Context, provider, model string, opt
 			return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
 		}
 	}
+	picker := config.SelectionRoundRobin
 	group := candidates
 	for _, slot := range slots {
 		if config.IsPickerSlot(slot) {
-			return s.pick(ctx, slot, provider, model, opts, group)
+			picker = slot
+			break
 		}
 		group = s.narrow(ctx, slot, group, model, now)
 	}
-	return s.pick(ctx, config.SelectionRoundRobin, provider, model, opts, group)
+	selected, errPick := s.pick(ctx, picker, provider, model, opts, group)
+	if errPick == nil {
+		logRoutingProfileSelection(ctx, routingStagePipeline, selected)
+	}
+	return selected, errPick
 }
 
 // narrow applies one narrowing slot. A selection that skips the quota reserve, such

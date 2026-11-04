@@ -94,7 +94,9 @@ func executeWithClaudeFallback[T any](m *Manager, ctx context.Context, providers
 	req.Model = target
 	// Keep the original payload, client protocol, session, tool history, and
 	// requested-model metadata. The Codex executor translates using req.Model.
-	return execute(withRequiredAuthKind(ctx, AuthKindOAuth), []string{"codex"}, req, opts)
+	// The leg keeps the request's routing profile, so the key's Codex preference and
+	// selection apply; its selections are logged under the fallback stage.
+	return execute(withRoutingFallbackLeg(withRequiredAuthKind(ctx, AuthKindOAuth)), []string{"codex"}, req, opts)
 }
 
 // Execute resolves the request's routing profile before the fallback wrapper so

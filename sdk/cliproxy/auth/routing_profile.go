@@ -144,8 +144,29 @@ const (
 	routingStageFallback  = "fallback"
 )
 
+// routingFallbackLegKey marks the context of the Codex leg of a Claude -> Codex
+// fallback, so selections made there report the fallback stage.
+type routingFallbackLegKey struct{}
+
+func withRoutingFallbackLeg(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, routingFallbackLegKey{}, true)
+}
+
+func routingFallbackLeg(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	leg, _ := ctx.Value(routingFallbackLegKey{}).(bool)
+	return leg
+}
+
 // logRoutingProfileSelection reports a selection driven by a key profile. It logs
-// only the key hash prefix and never the raw client key.
+// only the key hash prefix and never the raw client key. A selection inside the
+// Codex fallback leg reports the fallback stage and keeps the stage that chose the
+// credential in fallback_stage.
 func logRoutingProfileSelection(ctx context.Context, stage string, auth *Auth) {
 	profile := routingProfileFromContext(ctx)
 	if profile == nil || !profile.fromKey || auth == nil {
@@ -155,10 +176,15 @@ func logRoutingProfileSelection(ctx context.Context, stage string, auth *Auth) {
 	if index == "" {
 		index = auth.Clone().EnsureIndex()
 	}
-	logEntryWithRequestID(ctx).WithFields(log.Fields{
+	fields := log.Fields{
 		"routing_key":   profile.keyHash,
 		"routing_stage": stage,
 		"provider":      strings.ToLower(strings.TrimSpace(auth.Provider)),
 		"auth_index":    index,
-	}).Info("Routing profile selection")
+	}
+	if routingFallbackLeg(ctx) && stage != routingStageFallback {
+		fields["routing_stage"] = routingStageFallback
+		fields["fallback_stage"] = stage
+	}
+	logEntryWithRequestID(ctx).WithFields(fields).Info("Routing profile selection")
 }

@@ -186,10 +186,11 @@
 - ⚠️ deviation: the cold path removes hard-reserved credentials from the already validated across-tier set (`withoutHardReservedAuths`) instead of rerunning `availableForPipeline` on the raw candidates, because manager-supplied candidates are prevalidated against each credential's upstream model and must not be rechecked against the route alias; when only hard-reserved credentials remain it returns the same reserve error as `newSelectionAuths`
 
 ### Task 6: Fallback leg integration and selection logging
-- [ ] in `executeWithClaudeFallback` (`claude_fallback.go:69-95`) log the `fallback` stage through `logRoutingProfileSelection` when the Codex leg starts, and confirm the Codex leg inherits the context profile (no re-resolution with a different key)
-- [ ] emit the `preferred` and `pipeline` stage logs from `PipelineSelector.Pick` for requests whose profile has `fromKey`
-- [ ] write tests in the `conductor_selection` and `claude_fallback` test files: the fallback leg selects the key's preferred Codex credential and uses the key's selection; a request without a profile logs nothing; log fields carry the hash prefix only
-- [ ] run `gofmt`, the compile check, and `go test ./sdk/cliproxy/...` - must pass before task 7
+- [x] in `executeWithClaudeFallback` (`claude_fallback.go:69-95`) log the `fallback` stage through `logRoutingProfileSelection` when the Codex leg starts, and confirm the Codex leg inherits the context profile (no re-resolution with a different key)
+- [x] emit the `preferred` and `pipeline` stage logs from `PipelineSelector.Pick` for requests whose profile has `fromKey`
+- [x] write tests in the `conductor_selection` and `claude_fallback` test files: the fallback leg selects the key's preferred Codex credential and uses the key's selection; a request without a profile logs nothing; log fields carry the hash prefix only
+- [x] run `gofmt`, the compile check, and `go test ./sdk/cliproxy/...` - must pass before task 7
+- ➕ the Codex leg context carries a fallback-leg marker (`withRoutingFallbackLeg`); every selection inside the leg logs `routing_stage=fallback` with the credential that was chosen, and the stage that decided it in `fallback_stage` (`preferred`, `pipeline`, or `sticky`), so each selection still gets one line with an `auth_index`; the leg keeps the outer profile pointer through `ensureRoutingProfile`, already pinned by `TestExecuteUsesKeyProfileForFallback`; tests are `TestClaudeFallbackLegUsesKeyProfile` (claude_fallback_test.go) and `conductor_selection_profile_test.go`
 
 ### Task 7: Integration test with two keys through one pool
 - [ ] add `test/key_routing_profiles_test.go` following `test/claude_codex_fallback_test.go`: build the request context with `gin.CreateTestContext`, `c.Set("userApiKey", key)`, and `context.WithValue(ctx, "gin", c)`; build the selector with `coreauth.NewPipelineSelector` wrapped by `coreauth.NewSessionAffinitySelectorWithConfig`; use a per-auth fake Claude executor that returns 200 or 429 by `auth.ID`
@@ -260,7 +261,7 @@
   - `PATCH /v8/management/config` with `{"routing": {"selection": {...}}}` or `{"routing": {"key-profiles": {"<key>": {...} | null}}}`; unknown key -> 400 `unknown_api_key`; invalid slot -> 422 `invalid_config`
   - `PATCH /v8/management/api-keys {"old","new"}` moves the profile; `PUT`, index patches, and `DELETE` drop profiles of keys no longer listed
   - the saver prunes `routing.key-profiles` to the keys present in the generated config
-- **Log line**: `Routing profile selection` with `routing_key=<12 hex>`, `routing_stage`, `provider`, `auth_index`.
+- **Log line**: `Routing profile selection` with `routing_key=<12 hex>`, `routing_stage`, `provider`, `auth_index`; inside the Codex fallback leg `routing_stage=fallback` plus `fallback_stage=<deciding stage>`.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
