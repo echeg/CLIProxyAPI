@@ -324,3 +324,84 @@ func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 		t.Fatalf("codex keys len = %d, want 2", got)
 	}
 }
+
+func TestAPIKeyMutationsReconcileKeyProfiles(t *testing.T) {
+	type step struct {
+		method, url, body string
+		gone              []string // keys whose profile must be absent from runtime and file
+		present           []string // keys whose profile must stay or appear
+	}
+	cases := []struct {
+		name string
+		step step
+	}{
+		{"rotation moves", step{http.MethodPatch, "/api-keys", `{"old":"key-a","new":"key-a2"}`, []string{"key-a"}, []string{"key-a2", "key-b"}}},
+		{"append moves nothing", step{http.MethodPatch, "/api-keys", `{"old":"missing","new":"key-n"}`, []string{"key-n"}, []string{"key-a", "key-b"}}},
+		{"index patch to a new value rotates", step{http.MethodPatch, "/api-keys", `{"index":0,"value":"key-a3"}`, []string{"key-a"}, []string{"key-a3", "key-b"}}},
+		{"index patch to a listed value drops", step{http.MethodPatch, "/api-keys", `{"index":0,"value":"key-c"}`, []string{"key-a"}, []string{"key-b"}}},
+		{"index delete drops", step{http.MethodDelete, "/api-keys?index=1", "", []string{"key-b"}, []string{"key-a"}}},
+		{"value delete drops", step{http.MethodDelete, "/api-keys?value=key-a", "", []string{"key-a"}, []string{"key-b"}}},
+		{"put dropping a key drops", step{http.MethodPut, "/api-keys", `["key-b","key-c"]`, []string{"key-a"}, []string{"key-b"}}},
+		{"put replacing every key drops all", step{http.MethodPut, "/api-keys", `["x","y"]`, []string{"key-a", "key-b"}, nil}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, path := newRoutingProfilesTestHandler(t, routingProfilesTestConfig)
+			router := gin.New()
+			router.Use(func(c *gin.Context) { c.Set(ConfigV8ContextKey, true) })
+			router.PUT("/api-keys", h.PutAPIKeys)
+			router.PATCH("/api-keys", h.PatchAPIKeys)
+			router.DELETE("/api-keys", h.DeleteAPIKeys)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(tc.step.method, tc.step.url, strings.NewReader(tc.step.body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			saved, _ := savedKeyProfiles(t, path)
+			loaded, errLoad := config.LoadConfig(path)
+			if errLoad != nil {
+				t.Fatal(errLoad)
+			}
+			for _, key := range tc.step.gone {
+				if _, ok := h.cfg.Routing.KeyProfiles[key]; ok {
+					t.Fatalf("runtime kept the profile of %s", key)
+				}
+				if _, ok := saved[key]; ok {
+					t.Fatalf("file kept the profile of %s: %v", key, saved)
+				}
+			}
+			for _, key := range tc.step.present {
+				if h.cfg.Routing.KeyProfiles[key] == nil || saved[key] == nil || loaded.Routing.KeyProfiles[key] == nil {
+					t.Fatalf("profile of %s missing: runtime=%v file=%v", key, h.cfg.Routing.KeyProfiles, saved)
+				}
+			}
+			if len(tc.step.present) == 0 && h.cfg.Routing.KeyProfiles != nil {
+				t.Fatalf("runtime profiles = %v", h.cfg.Routing.KeyProfiles)
+			}
+		})
+	}
+}
+
+func TestAPIKeyRotationCarriesProfileContents(t *testing.T) {
+	h, path := newRoutingProfilesTestHandler(t, routingProfilesTestConfig)
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set(ConfigV8ContextKey, true) })
+	router.PATCH("/api-keys", h.PatchAPIKeys)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api-keys", strings.NewReader(`{"old":"key-b","new":"key-b2"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	saved, _ := os.ReadFile(path)
+	if strings.Contains(string(saved), "key-b:") || strings.Contains(string(saved), `"key-b"`) {
+		t.Fatalf("old key still on disk:\n%s", saved)
+	}
+	loaded, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	moved := loaded.Routing.KeyProfiles["key-b2"]
+	if moved == nil || moved.PreferredAccounts["codex"] != "codex-9" || !moved.ClaudeFallback.Enabled || moved.ClaudeFallback.Mode != "always" {
+		t.Fatalf("moved profile = %+v", moved)
+	}
+}

@@ -740,3 +740,122 @@ plugins:
 		request(http.MethodDelete, path, http.StatusNotFound, "")
 	}
 }
+
+// savedKeyProfiles decodes routing.key-profiles from the file on disk.
+func savedKeyProfiles(t *testing.T, path string) (map[string]any, bool) {
+	t.Helper()
+	data, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	var doc struct {
+		Routing map[string]any `yaml:"routing"`
+	}
+	if errDecode := yaml.Unmarshal(data, &doc); errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	profiles, ok := doc.Routing["key-profiles"].(map[string]any)
+	return profiles, ok
+}
+
+func TestConfigV8RoutingProfilesWrite(t *testing.T) {
+	h, path := newRoutingProfilesTestHandler(t, routingProfilesTestConfig)
+	router := gin.New()
+	router.PATCH("/v8/management/config", h.ConfigV8)
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+	request := func(method, url, body string, status int) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(method, url, strings.NewReader(body)))
+		if rec.Code != status {
+			t.Fatalf("%s %s: status=%d body=%s", method, url, rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	request(http.MethodPatch, "/v8/management/config", `{"routing":{"selection":{"primary":"most-remaining","tiebreak":"weighted-round-robin"},"key-profiles":{"key-c":{"session-affinity":true,"preferred-accounts":{"claude":"claude-7"},"selection":{"primary":"earliest-reset"}}}}}`, http.StatusOK)
+	loaded, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	if loaded.Routing.Selection != (config.SelectionConfig{Primary: "most-remaining", Tiebreak: "weighted-round-robin"}) {
+		t.Fatalf("selection = %+v", loaded.Routing.Selection)
+	}
+	keyC := loaded.Routing.KeyProfiles["key-c"]
+	if keyC == nil || !keyC.SessionAffinity || keyC.PreferredAccounts["claude"] != "claude-7" || keyC.Selection.Primary != "earliest-reset" || len(loaded.Routing.KeyProfiles) != 3 {
+		t.Fatalf("key profiles = %+v", loaded.Routing.KeyProfiles)
+	}
+	if h.cfg.Routing.KeyProfiles["key-c"] == nil {
+		t.Fatal("runtime config lacks the new profile")
+	}
+
+	// null deletes the profile from the runtime config and from the file.
+	request(http.MethodPatch, "/v8/management/config", `{"routing":{"key-profiles":{"key-a":null}}}`, http.StatusOK)
+	if _, ok := h.cfg.Routing.KeyProfiles["key-a"]; ok {
+		t.Fatal("runtime config kept the nulled profile")
+	}
+	profiles, _ := savedKeyProfiles(t, path)
+	if _, ok := profiles["key-a"]; ok || profiles["key-b"] == nil || profiles["key-c"] == nil {
+		t.Fatalf("saved key-profiles = %v", profiles)
+	}
+
+	// An unknown key is rejected before parsing; the body never echoes the key.
+	before, _ := os.ReadFile(path)
+	body := request(http.MethodPatch, "/v8/management/config", `{"routing":{"key-profiles":{"secret-unknown-key":{"session-affinity":true},"other-unknown":{}}}}`, http.StatusBadRequest)
+	if strings.Contains(body, "secret-unknown-key") || !strings.Contains(body, `"error":"unknown_api_key"`) || !strings.Contains(body, `"count":2`) {
+		t.Fatalf("body = %s", body)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("rejected write changed the file")
+	}
+	// A null entry for an unknown key only deletes, so it is accepted.
+	request(http.MethodPatch, "/v8/management/config", `{"routing":{"key-profiles":{"never-listed":null}}}`, http.StatusOK)
+
+	// Invalid slot values fail inside ParseConfigBytes and keep the 422 contract.
+	before, _ = os.ReadFile(path)
+	request(http.MethodPatch, "/v8/management/config", `{"routing":{"key-profiles":{"key-b":{"selection":{"primary":"random"}}}}}`, http.StatusUnprocessableEntity)
+	request(http.MethodPut, "/v8/management/config/routing/selection", `{"primary":"fastest"}`, http.StatusUnprocessableEntity)
+	after, _ = os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("invalid write changed the file")
+	}
+
+	// Removing a key through the config tree drops its profile instead of failing.
+	request(http.MethodPatch, "/v8/management/config", `{"access":{"api-keys":["key-a","key-c"]}}`, http.StatusOK)
+	profiles, _ = savedKeyProfiles(t, path)
+	if _, ok := profiles["key-b"]; ok || profiles["key-c"] == nil {
+		t.Fatalf("saved key-profiles = %v", profiles)
+	}
+	request(http.MethodPatch, "/v8/management/config", `{"routing":{"key-profiles":{"key-c":null}}}`, http.StatusOK)
+	if profiles, ok := savedKeyProfiles(t, path); ok {
+		t.Fatalf("empty key-profiles node kept: %v", profiles)
+	}
+}
+
+// A profile for a key missing from access.api-keys that is already on disk (for
+// example after a hand edit) must not block unrelated writes; the saver prunes it.
+func TestConfigV8StaleKeyProfileDoesNotBlockWrites(t *testing.T) {
+	raw := routingProfilesTestConfig + "    stale-key:\n      session-affinity: true\n"
+	h, path := newRoutingProfilesTestHandler(t, raw)
+	router := gin.New()
+	router.PATCH("/v8/management/config", h.ConfigV8)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(`{"routing":{"strategy":"round-robin"}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	profiles, _ := savedKeyProfiles(t, path)
+	if _, ok := profiles["stale-key"]; ok || len(profiles) != 2 {
+		t.Fatalf("saved key-profiles = %v", profiles)
+	}
+	// Editing the stale profile is a new write for an unknown key.
+	rec = httptest.NewRecorder()
+	h2, _ := newRoutingProfilesTestHandler(t, raw)
+	router = gin.New()
+	router.PATCH("/v8/management/config", h2.ConfigV8)
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(`{"routing":{"key-profiles":{"stale-key":{"session-affinity":false}}}}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

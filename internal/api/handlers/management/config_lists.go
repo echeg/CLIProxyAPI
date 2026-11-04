@@ -47,8 +47,9 @@ func rejectInvalidFingerprintProfile(c *gin.Context, field, profile string) bool
 	return false
 }
 
-// Generic helpers for list[string]
-func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
+// Generic helpers for list[string]. Callers must hold h.mu: the helpers save
+// through persistLocked so the mutation, its hook, and the save are atomic.
+func (h *Handler) putStringListLocked(c *gin.Context, set func([]string), after func()) {
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -69,10 +70,10 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 	if after != nil {
 		after()
 	}
-	h.persist(c)
+	h.persistLocked(c)
 }
 
-func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()) {
+func (h *Handler) patchStringListLocked(c *gin.Context, target *[]string, after func()) {
 	var body struct {
 		Old   *string `json:"old"`
 		New   *string `json:"new"`
@@ -88,7 +89,7 @@ func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()
 		if after != nil {
 			after()
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	if body.Old != nil && body.New != nil {
@@ -98,7 +99,7 @@ func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()
 				if after != nil {
 					after()
 				}
-				h.persist(c)
+				h.persistLocked(c)
 				return
 			}
 		}
@@ -106,13 +107,13 @@ func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()
 		if after != nil {
 			after()
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	c.JSON(400, gin.H{"error": "missing fields"})
 }
 
-func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after func()) {
+func (h *Handler) deleteFromStringListLocked(c *gin.Context, target *[]string, after func()) {
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
@@ -121,7 +122,7 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 			if after != nil {
 				after()
 			}
-			h.persist(c)
+			h.persistLocked(c)
 			return
 		}
 	}
@@ -136,7 +137,7 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 		if after != nil {
 			after()
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	c.JSON(400, gin.H{"error": "missing index or value"})
@@ -144,16 +145,38 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+
+// The api-keys handlers hold h.mu across the list mutation, the key-profile
+// reconciliation, and the save, so routing.key-profiles never names a key that
+// left access.api-keys.
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	before := append([]string(nil), h.cfg.APIKeys...)
+	h.putStringListLocked(c, func(v []string) {
 		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	}, h.reconcileAPIKeyProfilesLocked(before))
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	before := append([]string(nil), h.cfg.APIKeys...)
+	h.patchStringListLocked(c, &h.cfg.APIKeys, h.reconcileAPIKeyProfilesLocked(before))
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	before := append([]string(nil), h.cfg.APIKeys...)
+	h.deleteFromStringListLocked(c, &h.cfg.APIKeys, h.reconcileAPIKeyProfilesLocked(before))
+}
+
+func (h *Handler) reconcileAPIKeyProfilesLocked(before []string) func() {
+	return func() {
+		reconcileKeyProfiles(before, h.cfg.APIKeys, h.cfg.Routing.KeyProfiles)
+		if len(h.cfg.Routing.KeyProfiles) == 0 {
+			h.cfg.Routing.KeyProfiles = nil
+		}
+	}
 }
 
 // gemini-api-key: []GeminiKey

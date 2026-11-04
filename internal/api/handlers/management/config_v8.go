@@ -139,6 +139,12 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			return
 		}
 	}
+	// Strict here only: load paths stay lenient and drop such profiles with a warning.
+	// The body carries a count, never a key.
+	if unknown := countUnknownKeyProfiles(root, before); unknown > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown_api_key", "count": unknown})
+		return
+	}
 	data, err = yaml.Marshal(&doc)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})

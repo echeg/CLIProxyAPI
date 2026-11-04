@@ -67,6 +67,9 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-request-scoped-errors")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-settings")
+	// Deleted, rotated, and nulled client keys must never stay on disk; an empty
+	// generated map drops the node because key-profiles is omitempty.
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "routing", "key-profiles")
 	replacePluginConfigsSubtree(original.Content[0], generated.Content[0])
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -262,5 +263,54 @@ func TestRoutingConfigStickyAnywhere(t *testing.T) {
 		if got := tt.routing.StickyAnywhere(); got != tt.want {
 			t.Fatalf("%s: StickyAnywhere() = %t, want %t", tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestSaveConfigPrunesRemovedKeyProfiles(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	raw := `config-version: 8
+access:
+  api-keys: ["key-a", "key-b"]
+routing:
+  # keep this comment
+  strategy: fill-first
+  key-profiles:
+    key-a:
+      selection: {primary: priority}
+    key-b:
+      session-affinity: true
+`
+	if errWrite := os.WriteFile(path, []byte(raw), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	if len(cfg.Routing.KeyProfiles) != 2 {
+		t.Fatalf("profiles = %v", cfg.Routing.KeyProfiles)
+	}
+
+	cfg.APIKeys = []string{"key-b"}
+	delete(cfg.Routing.KeyProfiles, "key-a")
+	if errSave := SaveConfigPreserveComments(path, cfg, true); errSave != nil {
+		t.Fatal(errSave)
+	}
+	saved, _ := os.ReadFile(path)
+	if strings.Contains(string(saved), "key-a") || !strings.Contains(string(saved), "key-b:") || !strings.Contains(string(saved), "# keep this comment") {
+		t.Fatalf("pruning failed:\n%s", saved)
+	}
+
+	cfg.Routing.KeyProfiles = nil
+	if errSave := SaveConfigPreserveComments(path, cfg, true); errSave != nil {
+		t.Fatal(errSave)
+	}
+	saved, _ = os.ReadFile(path)
+	if strings.Contains(string(saved), "key-profiles") || !strings.Contains(string(saved), "strategy: fill-first") {
+		t.Fatalf("empty key-profiles node kept:\n%s", saved)
+	}
+	loaded, errReload := LoadConfig(path)
+	if errReload != nil || len(loaded.Routing.KeyProfiles) != 0 || loaded.Routing.Strategy != "fill-first" {
+		t.Fatalf("reload: %v %+v", errReload, loaded)
 	}
 }
