@@ -39,6 +39,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `internal/home/` — CLIProxyAPIHome control plane integration (bootstrap, RESP communication, dispatch coordination)
 - `internal/tui/` — Bubbletea terminal UI (`--tui`, `--standalone`)
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
+- `sdk/cliproxy/auth/` — Credential selection. New selections run through `PipelineSelector` (`selection_pipeline.go`): hard-only availability -> the profile's preferred account -> `selection {primary, tiebreak}` narrowers/pickers -> round-robin for leftover ties. The per-key `routingProfile` (`routing_profile.go`) is resolved once in the public `Execute*` and carried in the context through retries and the Claude -> Codex leg. Do not add implicit priority or reserve layers outside the pipeline; legacy selectors run inside it only as pickers.
 - `test/` — Cross-module integration tests
 
 ## Code Conventions

@@ -15,7 +15,6 @@ import (
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 const stickyProfileModel = "sticky-profile-model"
@@ -351,8 +350,7 @@ func TestSessionAffinityColdSelectionReachesPipelineAcrossTiers(t *testing.T) {
 }
 
 func TestSessionAffinityStickyStageLog(t *testing.T) {
-	hook := logtest.NewGlobal()
-	defer hook.Reset()
+	hook := newStandardLogHook(t)
 	previous := log.GetLevel()
 	log.SetLevel(log.InfoLevel)
 	defer log.SetLevel(previous)
@@ -391,5 +389,76 @@ func TestSessionAffinityStickyStageLog(t *testing.T) {
 				t.Fatalf("sticky log found = %t, want %t", found, tt.wantLog)
 			}
 		})
+	}
+}
+
+// A binding to a credential whose weight drops to zero is not served again while
+// weighted-round-robin is an active pipeline slot, as with the legacy weighted
+// fallback; under any other selection the binding is kept.
+func TestSessionAffinityPipelineWeightedBindingRebindsAfterWeightBecomesZero(t *testing.T) {
+	cases := []struct {
+		name      string
+		selection internalconfig.SelectionConfig
+		want      string
+	}{
+		{name: "weighted tiebreak", selection: internalconfig.SelectionConfig{Primary: internalconfig.SelectionReserves, Tiebreak: internalconfig.SelectionWeightedRoundRobin}, want: "auth-b"},
+		{name: "weighted primary", selection: internalconfig.SelectionConfig{Primary: internalconfig.SelectionWeightedRoundRobin}, want: "auth-b"},
+		{name: "round-robin keeps binding", selection: internalconfig.SelectionConfig{Primary: internalconfig.SelectionReserves, Tiebreak: internalconfig.SelectionRoundRobin}, want: "auth-a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			selector := stickyProfileSelector(t, time.Hour, tc.selection)
+			authA := &Auth{ID: "auth-a", Provider: "codex", Attributes: map[string]string{AttributeWeight: "1"}}
+			authB := &Auth{ID: "auth-b", Provider: "codex", Attributes: map[string]string{AttributeWeight: "1"}}
+			auths := []*Auth{authA, authB}
+			opts := stickyProfileOptions("explicit", "weight-change")
+			first, errFirst := selector.Pick(context.Background(), "codex", stickyProfileModel, opts, auths)
+			if errFirst != nil || first.ID != authA.ID {
+				t.Fatalf("first Pick() = %v, %v; want auth-a", first, errFirst)
+			}
+			authA.Attributes[AttributeWeight] = "0"
+			second, errSecond := selector.Pick(context.Background(), "codex", stickyProfileModel, stickyProfileOptions("explicit", "weight-change"), auths)
+			if errSecond != nil || second.ID != tc.want {
+				t.Fatalf("Pick() after weight update = %v, %v; want %s", second, errSecond, tc.want)
+			}
+		})
+	}
+}
+
+// An explicit preference wins over a zero weight, so a zero-weight preferred
+// credential stays selectable and keeps its binding under a weighted slot.
+func TestSessionAffinityPipelineWeightedKeepsZeroWeightPreferredBinding(t *testing.T) {
+	selector := stickyProfileSelector(t, time.Hour, internalconfig.SelectionConfig{Primary: internalconfig.SelectionReserves, Tiebreak: internalconfig.SelectionWeightedRoundRobin})
+	preferred := &Auth{ID: "auth-a", Provider: "codex", Index: "idx-a", Attributes: map[string]string{AttributeWeight: "0"}}
+	other := &Auth{ID: "auth-b", Provider: "codex", Index: "idx-b", Attributes: map[string]string{AttributeWeight: "5"}}
+	ctx := withRoutingProfile(context.Background(), &routingProfile{fromKey: true, sticky: true, preferred: map[string]string{"codex": "idx-a"},
+		selection: internalconfig.SelectionConfig{Primary: internalconfig.SelectionReserves, Tiebreak: internalconfig.SelectionWeightedRoundRobin}})
+	for i := 0; i < 2; i++ {
+		picked, errPick := selector.Pick(ctx, "codex", stickyProfileModel, stickyProfileOptions("explicit", "preferred-zero"), []*Auth{preferred, other})
+		if errPick != nil || picked.ID != preferred.ID {
+			t.Fatalf("Pick() #%d = %v, %v; want the zero-weight preferred auth-a", i, picked, errPick)
+		}
+	}
+}
+
+// An established binding outranks a preference set later: the session keeps its
+// credential, and only a new session takes the preferred one.
+func TestSessionAffinityPipelineBindingOutranksLaterPreference(t *testing.T) {
+	selector := stickyProfileSelector(t, time.Hour, internalconfig.SelectionConfig{Primary: internalconfig.SelectionReserves, Tiebreak: internalconfig.SelectionRoundRobin})
+	authA := &Auth{ID: "auth-a", Provider: "codex", Index: "idx-a"}
+	authB := &Auth{ID: "auth-b", Provider: "codex", Index: "idx-b"}
+	auths := []*Auth{authA, authB}
+	first, errFirst := selector.Pick(stickyProfileContext("k", true), "codex", stickyProfileModel, stickyProfileOptions("explicit", "bound"), auths)
+	if errFirst != nil || first.ID != authA.ID {
+		t.Fatalf("first Pick() = %v, %v; want auth-a", first, errFirst)
+	}
+	ctx := withRoutingProfile(context.Background(), &routingProfile{keyHash: "k", fromKey: true, sticky: true, preferred: map[string]string{"codex": "idx-b"}})
+	bound, errBound := selector.Pick(ctx, "codex", stickyProfileModel, stickyProfileOptions("explicit", "bound"), auths)
+	if errBound != nil || bound.ID != authA.ID {
+		t.Fatalf("bound session Pick() = %v, %v; want the bound auth-a", bound, errBound)
+	}
+	fresh, errFresh := selector.Pick(ctx, "codex", stickyProfileModel, stickyProfileOptions("explicit", "fresh"), auths)
+	if errFresh != nil || fresh.ID != authB.ID {
+		t.Fatalf("new session Pick() = %v, %v; want the preferred auth-b", fresh, errFresh)
 	}
 }

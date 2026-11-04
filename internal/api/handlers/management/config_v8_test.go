@@ -859,3 +859,51 @@ func TestConfigV8StaleKeyProfileDoesNotBlockWrites(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// DELETE writes its tree without the pruning saver, so it must drop the profiles
+// of keys it removes itself; otherwise the raw keys stay in the file.
+func TestConfigV8DeleteDropsKeyProfilesOfRemovedKeys(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		keep []string
+	}{
+		{name: "api-keys list", url: "/v8/management/config/access/api-keys"},
+		{name: "one stale profile", url: "/v8/management/config/routing/strategy", keep: []string{"key-a", "key-b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := routingProfilesTestConfig + "    stale-key:\n      session-affinity: true\n"
+			h, path := newRoutingProfilesTestHandler(t, raw)
+			router := gin.New()
+			router.DELETE("/v8/management/config/*path", h.ConfigV8)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, tc.url, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			data, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if strings.Contains(string(data), "stale-key") {
+				t.Fatalf("saved config kept a removed key:\n%s", data)
+			}
+			profiles, ok := savedKeyProfiles(t, path)
+			if len(tc.keep) == 0 {
+				if ok {
+					t.Fatalf("empty key-profiles node kept: %v", profiles)
+				}
+				return
+			}
+			if len(profiles) != len(tc.keep) {
+				t.Fatalf("saved key-profiles = %v, want %v", profiles, tc.keep)
+			}
+			for _, key := range tc.keep {
+				if profiles[key] == nil {
+					t.Fatalf("saved key-profiles = %v, missing %s", profiles, key)
+				}
+			}
+		})
+	}
+}

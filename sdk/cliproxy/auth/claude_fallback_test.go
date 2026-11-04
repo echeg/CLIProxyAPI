@@ -15,7 +15,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 type claudeFallbackExecutor struct {
@@ -284,8 +283,7 @@ func TestClaudeFallbackContextProfileOverridesSharedConfig(t *testing.T) {
 // selection, and a key without a profile uses the shared selection and logs nothing.
 func TestClaudeFallbackLegUsesKeyProfile(t *testing.T) {
 	withQuotaCooldownEnabled(t)
-	hook := logtest.NewLocal(log.StandardLogger())
-	t.Cleanup(hook.Reset)
+	hook := newStandardLogHook(t)
 
 	const keyPreferred, keySelection, keyShared = "sk-fallback-preferred", "sk-fallback-selection", "sk-fallback-shared"
 	m := NewManager(nil, nil, nil)
@@ -389,5 +387,91 @@ func TestClaudeFallbackLegUsesKeyProfile(t *testing.T) {
 				t.Fatalf("codex leg log fields = %v", got)
 			}
 		})
+	}
+}
+
+// A request that requires a non-OAuth credential kind, or that lists no Claude
+// provider, never falls back.
+func TestClaudeFallbackTargetGuards(t *testing.T) {
+	m, _, _, _ := fallbackTestManager(t, "off", nil)
+	req := cliproxyexecutor.Request{Model: "claude-opus-5"}
+	for _, tc := range []struct {
+		name      string
+		ctx       context.Context
+		providers []string
+		want      string
+	}{
+		{name: "oauth required", ctx: withRequiredAuthKind(fallbackProfileContext("auto", "gpt-6-sol"), AuthKindOAuth), providers: []string{"claude"}, want: "gpt-6-sol"},
+		{name: "api key required", ctx: withRequiredAuthKind(fallbackProfileContext("auto", "gpt-6-sol"), AuthKindAPIKey), providers: []string{"claude"}},
+		{name: "no claude provider", ctx: fallbackProfileContext("always", "gpt-6-sol"), providers: []string{"codex"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, target := m.claudeFallbackTarget(tc.ctx, tc.providers, req, cliproxyexecutor.Options{}); target != tc.want {
+				t.Fatalf("target = %q, want %q", target, tc.want)
+			}
+		})
+	}
+}
+
+// With retries enabled, a fallback-eligible Claude failure goes to Codex after one
+// Claude round instead of retrying Claude first.
+func TestClaudeFallbackSkipsClaudeRetries(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			m, calls, _, _ := fallbackTestManager(t, "auto", &Error{HTTPStatus: 503})
+			m.SetRetryConfig(3, time.Minute, 0)
+			// Without the short-circuit the manager waits out Claude cooldowns of up to
+			// a minute; the deadline turns that regression into a fast failure.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			req := cliproxyexecutor.Request{Model: "claude-opus-5"}
+			var err error
+			switch path {
+			case "execute":
+				_, err = m.Execute(ctx, []string{"claude"}, req, cliproxyexecutor.Options{})
+			case "count":
+				_, err = m.ExecuteCount(ctx, []string{"claude"}, req, cliproxyexecutor.Options{})
+			case "stream":
+				var result *cliproxyexecutor.StreamResult
+				result, err = m.ExecuteStream(ctx, []string{"claude"}, req, cliproxyexecutor.Options{Stream: true})
+				if err == nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							err = chunk.Err
+						}
+					}
+				}
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if want := []string{"claude", "claude", "codex"}; !reflect.DeepEqual(*calls, want) {
+				t.Fatalf("calls = %v, want %v", *calls, want)
+			}
+		})
+	}
+}
+
+// A caller that goes away during the Claude attempt gets its context error and
+// triggers no Codex call.
+func TestClaudeFallbackStopsWhenCallerCancels(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, calls, primary, _ := fallbackTestManager(t, "auto", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	primary.run = func(a *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+		*calls = append(*calls, a.Provider)
+		cancel()
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: 429}
+	}
+	_, err := m.Execute(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, cliproxyexecutor.Options{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	for _, provider := range *calls {
+		if provider == "codex" {
+			t.Fatalf("calls = %v, want no Codex call", *calls)
+		}
 	}
 }

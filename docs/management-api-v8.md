@@ -150,6 +150,39 @@ disables these local management endpoints. CLIProxyAPIHome needs corresponding
 selector, quota observation, and configuration support before using this strategy
 in a cluster.
 
+### Claude -> Codex subscription fallback
+
+`routing.claude-fallback` sends selected Claude models to a Codex subscription:
+
+```yaml
+routing:
+  claude-fallback:
+    enabled: true
+    mode: auto          # auto (default) or always
+    mappings:
+      - from: "claude-opus-*"
+        to: "gpt-6-astra"
+```
+
+- A `from` that matches the model exactly wins; otherwise the longest matching
+  trailing-`*` prefix wins. Unmapped models stay on Claude. A thinking suffix
+  such as `(high)` is kept on the target model.
+- `auto` tries Claude first and switches to Codex after a failed Claude round
+  instead of waiting out Claude cooldowns. It reacts to 401, 403, 408, 429, and
+  5xx responses, to no available Claude credential, and to transient connection
+  failures. It never reacts to invalid requests or a canceled client request.
+- `always` sends mapped models straight to Codex.
+- The Codex leg uses Codex OAuth credentials only. Pinned requests and requests
+  that require a non-OAuth credential are never rerouted.
+
+`GET /v8/management/routing/claude-fallback` returns
+`{"supported": bool, "settings": {...}, "models": {"claude": [...], "codex": [...]}}`
+with `Cache-Control: no-store`. `models` lists the model IDs of enabled Claude
+credentials and Codex OAuth credentials. `supported` is `false` in Home mode and
+with a scheduler plugin. Write the settings through
+`PATCH /v8/management/config`. A key profile can carry its own
+`claude-fallback` block (see below).
+
 ### Per-key routing profiles and selection pipeline
 
 Every client key in `access.api-keys` can have its own routing profile. A profile
@@ -322,10 +355,11 @@ selection and a key profile, send `PATCH /v8/management/config`:
 ```
 
 PATCH merges objects, so other key profiles and the fields a profile body omits
-stay unchanged. To replace one profile completely, use
-`PUT /v8/management/config/routing/key-profiles/<key>` with the full profile; a
-key that contains `/` cannot be a path segment, so send `null` for it and then
-the new profile in two PATCH requests. To delete a profile, patch it to
+stay unchanged. To replace one profile completely, send `null` for it and then
+the new profile in two PATCH requests. Keep client keys in the request body:
+a key used as a path segment, as in
+`PUT /v8/management/config/routing/key-profiles/<key>`, is written to the request
+log. To delete a profile, patch it to
 `null`; the key then uses the shared profile and the entry is removed from the
 file:
 
@@ -514,6 +548,7 @@ retain the corresponding business operation's fields.
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
 | `/routing/activity` | GET | Get each credential's latest actual selection time. |
 | `/routing/profiles` | GET | Get the shared and per-key routing profiles and the selection slot values. |
+| `/routing/claude-fallback` | GET | Get the shared Claude -> Codex fallback settings, support status, and available Claude/Codex model IDs. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
 | `/observability/logs/errors` | GET | List error-log files. |
 | `/observability/logs/errors/<name>` | GET | Download an error-log file. |

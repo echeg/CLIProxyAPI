@@ -356,7 +356,8 @@ type RoutingConfig struct {
 	// ClaudeFallback routes configured Claude models to Codex subscriptions.
 	ClaudeFallback ClaudeFallbackConfig `yaml:"claude-fallback,omitempty" json:"claude-fallback,omitempty"`
 
-	// Strategy selects the credential selection strategy.
+	// Strategy is the legacy credential selection strategy. It is used only to derive
+	// the effective selection {reserves, <strategy>} when Selection is empty.
 	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "earliest-reset".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
@@ -370,10 +371,12 @@ type RoutingConfig struct {
 	KeyProfiles map[string]*RoutingProfile `yaml:"key-profiles,omitempty" json:"key-profiles,omitempty"`
 
 	// PreferredAccounts maps codex/claude to a credential auth_index for new bindings.
-	// Existing session bindings take precedence; unavailable preferences fall back to Strategy.
+	// Existing session bindings take precedence; unavailable or hard-reserved preferences
+	// fall back to the effective selection. Soft reserve levels do not block a preference.
 	PreferredAccounts map[string]string `yaml:"preferred-accounts,omitempty" json:"preferred-accounts,omitempty"`
 
-	// SessionAffinity enables universal session-sticky routing for all clients.
+	// SessionAffinity enables session-sticky routing for client keys that use the shared
+	// profile; a key profile's own SessionAffinity replaces it for that key.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
 	// execution or derived session identity, and the existing message-content hash fallback.

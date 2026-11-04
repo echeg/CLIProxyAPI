@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -186,21 +188,19 @@ func (r *RoutingConfig) Normalize(apiKeys []string) error {
 // SharedProfile builds the profile used by keys without their own profile from
 // the global routing fields. The returned value shares no mutable state with r.
 func (r RoutingConfig) SharedProfile() RoutingProfile {
-	profile := RoutingProfile{
-		SessionAffinity: r.SessionAffinity,
-		Selection:       r.EffectiveSelection(),
-		ClaudeFallback:  r.ClaudeFallback,
-	}
-	if len(r.PreferredAccounts) > 0 {
-		profile.PreferredAccounts = make(map[string]string, len(r.PreferredAccounts))
-		for provider, index := range r.PreferredAccounts {
-			profile.PreferredAccounts[provider] = index
-		}
-	}
-	if r.ClaudeFallback.Mappings != nil {
-		profile.ClaudeFallback.Mappings = append([]ClaudeFallbackMapping(nil), r.ClaudeFallback.Mappings...)
-	}
-	return profile
+	return RoutingProfile{
+		SessionAffinity:   r.SessionAffinity,
+		PreferredAccounts: r.PreferredAccounts,
+		Selection:         r.EffectiveSelection(),
+		ClaudeFallback:    r.ClaudeFallback,
+	}.Clone()
+}
+
+// Clone returns a copy of p that shares no mutable state with it.
+func (p RoutingProfile) Clone() RoutingProfile {
+	p.PreferredAccounts = maps.Clone(p.PreferredAccounts)
+	p.ClaudeFallback.Mappings = slices.Clone(p.ClaudeFallback.Mappings)
+	return p
 }
 
 // StickyAnywhere reports whether the shared profile or any key profile enables

@@ -211,22 +211,35 @@ func TestExecuteUsesKeyProfileForFallback(t *testing.T) {
 	}
 }
 
+// newStandardLogHook attaches a capture hook to the standard logger and restores
+// the logger's previous hooks when the test ends.
+func newStandardLogHook(t *testing.T) *logtest.Hook {
+	t.Helper()
+	logger := log.StandardLogger()
+	saved := make(log.LevelHooks)
+	for level, hooks := range logger.Hooks {
+		saved[level] = append([]log.Hook(nil), hooks...)
+	}
+	hook := logtest.NewLocal(logger)
+	t.Cleanup(func() { logger.ReplaceHooks(saved) })
+	return hook
+}
+
 func TestLogRoutingProfileSelection(t *testing.T) {
-	hook := logtest.NewLocal(log.StandardLogger())
-	t.Cleanup(hook.Reset)
+	hook := newStandardLogHook(t)
 	auth := &Auth{ID: "claude-1", Provider: "Claude", Index: "idx-1"}
 
 	logRoutingProfileSelection(context.Background(), "pipeline", auth)
 	logRoutingProfileSelection(withRoutingProfile(context.Background(), &routingProfile{keyHash: "shared"}), "pipeline", auth)
-	if len(hook.AllEntries()) != 0 {
-		t.Fatalf("logged without a key profile: %d entries", len(hook.AllEntries()))
+	if entries := routingSelectionEntries(t, hook); len(entries) != 0 {
+		t.Fatalf("logged without a key profile: %d entries", len(entries))
 	}
 
 	m := NewManager(nil, &RoundRobinSelector{}, nil)
 	m.SetConfig(routingProfileTestConfig())
 	ctx := m.ensureRoutingProfile(ginContextWithKey(routingTestKeyA))
 	logRoutingProfileSelection(ctx, "preferred", auth)
-	entries := hook.AllEntries()
+	entries := routingSelectionEntries(t, hook)
 	if len(entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(entries))
 	}

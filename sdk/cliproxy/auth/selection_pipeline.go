@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -77,6 +78,24 @@ func activeSlots(selection config.SelectionConfig) []string {
 	return []string{selection.Primary, selection.Tiebreak}
 }
 
+// weightedCandidates drops zero-weight credentials when weighted-round-robin is an
+// active slot for the request, except the preferred credential, which Pick takes
+// regardless of weight. The session affinity layer uses it so a binding to a
+// credential whose weight became zero is not served again.
+func (s *PipelineSelector) weightedCandidates(ctx context.Context, provider string, auths []*Auth) []*Auth {
+	if !slices.Contains(activeSlots(s.selection(ctx)), config.SelectionWeightedRoundRobin) {
+		return auths
+	}
+	preferred := preferredAvailableAuth(ctx, provider, auths)
+	kept := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == preferred || authWeight(auth) > 0 {
+			kept = append(kept, auth)
+		}
+	}
+	return kept
+}
+
 // Pick selects one credential for a new selection.
 func (s *PipelineSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	if ctx == nil {
@@ -100,8 +119,9 @@ func (s *PipelineSelector) Pick(ctx context.Context, provider, model string, opt
 		if slot != config.SelectionWeightedRoundRobin {
 			continue
 		}
-		// Zero-weight credentials are never chosen under weighted round-robin, so
-		// they must not win a narrowing step either, as with the legacy selector.
+		// Zero-weight credentials are never chosen by weighted round-robin, so they
+		// must not win a narrowing step either. An explicit preference was already
+		// taken above and wins over a zero weight.
 		candidates = positiveWeightAuths(candidates)
 		if len(candidates) == 0 {
 			return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}

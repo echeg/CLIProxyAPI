@@ -705,12 +705,7 @@ func (m *Manager) availableAuthsForPipeline(auths []*Auth, provider, routeModel 
 		return nil, nil, nil, errAvailable
 	}
 	if reserve {
-		kept := make([]*Auth, 0, len(allAuths))
-		for _, candidate := range allAuths {
-			if _, held := hardQuotaReserveUntil(candidate, now); !held {
-				kept = append(kept, candidate)
-			}
-		}
+		kept, _, _ := splitHardReserved(allAuths, now)
 		if len(kept) == 0 {
 			if _, errReserve := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, true); errReserve != nil {
 				return nil, nil, nil, errReserve

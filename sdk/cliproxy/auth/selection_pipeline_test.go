@@ -223,6 +223,18 @@ func TestPipelineSelectorPreferredShortcut(t *testing.T) {
 	if got := pipelinePick(t, selector, ctx, auths); got != "b" {
 		t.Fatalf("picked %s with disabled preference, want b", got)
 	}
+	// An explicit preference wins over a zero weight under a weighted slot, while
+	// without it the zero-weight b is never picked there.
+	weighted := newTestPipelineSelector(fixedSelection(config.SelectionReserves, config.SelectionWeightedRoundRobin))
+	zeroCtx := withRoutingProfile(context.Background(), &routingProfile{preferred: map[string]string{"codex": "idx-b"}})
+	if got := pipelinePick(t, weighted, zeroCtx, pipelineFixture()); got != "b" {
+		t.Fatalf("picked %s, want the zero-weight preferred b", got)
+	}
+	for range 3 {
+		if got := pipelinePick(t, weighted, context.Background(), pipelineFixture()); got == "b" {
+			t.Fatal("picked the zero-weight b without a preference")
+		}
+	}
 }
 
 func TestPipelineSelectorCandidates(t *testing.T) {

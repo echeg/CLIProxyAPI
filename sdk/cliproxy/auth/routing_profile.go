@@ -172,15 +172,11 @@ func logRoutingProfileSelection(ctx context.Context, stage string, auth *Auth) {
 	if profile == nil || !profile.fromKey || auth == nil {
 		return
 	}
-	index := auth.Index
-	if index == "" {
-		index = auth.Clone().EnsureIndex()
-	}
 	fields := log.Fields{
 		"routing_key":   profile.keyHash,
 		"routing_stage": stage,
 		"provider":      strings.ToLower(strings.TrimSpace(auth.Provider)),
-		"auth_index":    index,
+		"auth_index":    candidatePreferenceIndex(auth),
 	}
 	if routingFallbackLeg(ctx) && stage != routingStageFallback {
 		fields["routing_stage"] = routingStageFallback

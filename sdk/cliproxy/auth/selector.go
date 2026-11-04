@@ -531,6 +531,24 @@ func newSelectionAuths(ctx context.Context, available []*Auth, provider, model s
 	return preferredOrHighestPriorityAuths(ctx, selectable), nil
 }
 
+// splitHardReserved removes credentials under an active hard reserve. It returns the
+// remaining credentials, how many were held, and the earliest future recovery.
+func splitHardReserved(auths []*Auth, now time.Time) (kept []*Auth, held int, recoverAt time.Time) {
+	kept = make([]*Auth, 0, len(auths))
+	for _, candidate := range auths {
+		until, reserved := hardQuotaReserveUntil(candidate, now)
+		if !reserved {
+			kept = append(kept, candidate)
+			continue
+		}
+		held++
+		if until.After(now) && (recoverAt.IsZero() || until.Before(recoverAt)) {
+			recoverAt = until
+		}
+	}
+	return kept, held, recoverAt
+}
+
 // withoutHardReservedAuths reduces an across-priority availability set to the pipeline
 // candidate set: credentials under an active hard reserve are removed, soft levels and
 // tiers are kept. A selection that skips the quota reserve keeps every credential. When
@@ -540,18 +558,7 @@ func withoutHardReservedAuths(ctx context.Context, available []*Auth, provider, 
 	if quotaReserveSkipped(ctx) {
 		return available, nil
 	}
-	kept := make([]*Auth, 0, len(available))
-	var recoverAt time.Time
-	for _, candidate := range available {
-		until, held := hardQuotaReserveUntil(candidate, now)
-		if !held {
-			kept = append(kept, candidate)
-			continue
-		}
-		if until.After(now) && (recoverAt.IsZero() || until.Before(recoverAt)) {
-			recoverAt = until
-		}
-	}
+	kept, _, recoverAt := splitHardReserved(available, now)
 	if len(kept) == 0 && len(available) > 0 {
 		return nil, quotaReserveExhaustedError(ctx, provider, model, recoverAt, now)
 	}
@@ -572,17 +579,10 @@ func availableForPipeline(ctx context.Context, auths []*Auth, provider, model st
 	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now, reserve)
 	if reserve {
 		for priority, bucket := range availableByPriority {
-			kept := make([]*Auth, 0, len(bucket))
-			for _, candidate := range bucket {
-				until, held := hardQuotaReserveUntil(candidate, now)
-				if !held {
-					kept = append(kept, candidate)
-					continue
-				}
-				cooldownCount++
-				if until.After(now) && (earliest.IsZero() || until.Before(earliest)) {
-					earliest = until
-				}
+			kept, held, recoverAt := splitHardReserved(bucket, now)
+			cooldownCount += held
+			if !recoverAt.IsZero() && (earliest.IsZero() || recoverAt.Before(earliest)) {
+				earliest = recoverAt
 			}
 			if len(kept) == 0 {
 				delete(availableByPriority, priority)
@@ -1173,7 +1173,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return s.pickWithoutSession(ctx, provider, model, opts, auths)
 	}
 	now := time.Now()
-	availabilityCandidates := s.availabilityCandidates(auths)
+	availabilityCandidates := s.availabilityCandidates(ctx, provider, auths)
 
 	// A single availability pass serves both lookups: the bound credential is validated against
 	// every priority tier without the quota reserve, so bound sessions live on, while new
@@ -1262,10 +1262,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 }
 
 // availabilityCandidates drops zero-weight credentials for a weighted fallback, which
-// never serves them.
-func (s *SessionAffinitySelector) availabilityCandidates(auths []*Auth) []*Auth {
-	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
+// never serves them, so a binding to such a credential is not served either. A
+// pipeline fallback drops them only when weighted-round-robin is an active slot.
+func (s *SessionAffinitySelector) availabilityCandidates(ctx context.Context, provider string, auths []*Auth) []*Auth {
+	switch fallback := s.fallback.(type) {
+	case *WeightedRoundRobinSelector:
 		return positiveWeightAuths(auths)
+	case *PipelineSelector:
+		return fallback.weightedCandidates(ctx, provider, auths)
 	}
 	return auths
 }
@@ -1274,7 +1278,7 @@ func (s *SessionAffinitySelector) availabilityCandidates(auths []*Auth) []*Auth 
 // session identity, or one whose routing profile turns session affinity off.
 func (s *SessionAffinitySelector) pickWithoutSession(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	now := time.Now()
-	availabilityCandidates := s.availabilityCandidates(auths)
+	availabilityCandidates := s.availabilityCandidates(ctx, provider, auths)
 	if _, pipeline := s.fallback.(*PipelineSelector); !pipeline {
 		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
 		if errAvailable != nil {
@@ -1332,7 +1336,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		opts.Metadata[cliproxyexecutor.LCPEnvironmentDigestMetadataKey] = envDigest
 	}
 
-	availabilityCandidates := s.availabilityCandidates(auths)
+	availabilityCandidates := s.availabilityCandidates(ctx, provider, auths)
 	now := time.Now()
 	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if errAvailable != nil {

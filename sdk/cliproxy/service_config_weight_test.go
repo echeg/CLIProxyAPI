@@ -134,3 +134,30 @@ func TestSelectionOnlyHotReloadKeepsPipelineSelectorAndCursor(t *testing.T) {
 		})
 	}
 }
+
+// Build wires the pipeline to the manager's runtime config, so the configured
+// selection applies from the first request without a later reload.
+func TestBuilderBuildSelectorUsesConfiguredSelection(t *testing.T) {
+	cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{Selection: internalconfig.SelectionConfig{Primary: internalconfig.SelectionFillFirst}}}
+	service, errBuild := NewBuilder().WithConfig(cfg).WithConfigPath(t.TempDir() + "/config.yaml").Build()
+	if errBuild != nil {
+		t.Fatal(errBuild)
+	}
+	selector, ok := service.coreManager.Selector().(*coreauth.PipelineSelector)
+	if !ok {
+		t.Fatalf("selector = %T, want *auth.PipelineSelector", service.coreManager.Selector())
+	}
+	auths := []*coreauth.Auth{
+		{ID: "a", Provider: "codex", Status: coreauth.StatusActive},
+		{ID: "b", Provider: "codex", Status: coreauth.StatusActive},
+	}
+	for i := 0; i < 3; i++ {
+		got, errPick := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+		if errPick != nil {
+			t.Fatal(errPick)
+		}
+		if got.ID != "a" {
+			t.Fatalf("pick %d = %s, want fill-first a", i, got.ID)
+		}
+	}
+}

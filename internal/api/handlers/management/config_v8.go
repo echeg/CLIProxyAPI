@@ -81,6 +81,9 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
 			return
 		}
+		// DELETE bypasses the comment-preserving saver that prunes key profiles,
+		// so a deleted key must not leave its raw value behind in the file.
+		pruneUnknownKeyProfiles(root)
 	} else {
 		body, errRead := io.ReadAll(c.Request.Body)
 		if errRead != nil {

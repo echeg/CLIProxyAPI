@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -59,16 +60,20 @@ func (e *perAuthExecutor) takeCalls() ([]string, []string) {
 	return calls, models
 }
 
-// keyRequestContext mirrors the request context built by the HTTP layer: the access
-// middleware stores the client key as userApiKey on the gin context, and the handler
-// stores the gin context under "gin".
-func keyRequestContext(key string) context.Context {
+// keyRequestContext builds the request context the way the HTTP layer does: the
+// access middleware stores the client key as userApiKey on the gin context, and the
+// real handler context builder carries that gin context to the auth manager.
+func keyRequestContext(t *testing.T, key string) context.Context {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	if key != "" {
 		c.Set("userApiKey", key)
 	}
-	return context.WithValue(context.Background(), "gin", c)
+	ctx, cancel := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil).GetContextWithCancel(nil, c, context.Background())
+	t.Cleanup(func() { cancel() })
+	return ctx
 }
 
 func TestKeyRoutingProfilesShareOnePool(t *testing.T) {
@@ -80,8 +85,12 @@ func TestKeyRoutingProfilesShareOnePool(t *testing.T) {
 		mapped    = "gpt-6-sol"
 		session   = "integration-session"
 	)
+	savedHooks := make(log.LevelHooks)
+	for level, hooks := range log.StandardLogger().Hooks {
+		savedHooks[level] = append([]log.Hook(nil), hooks...)
+	}
 	hook := logtest.NewLocal(log.StandardLogger())
-	t.Cleanup(hook.Reset)
+	t.Cleanup(func() { log.StandardLogger().ReplaceHooks(savedHooks) })
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetRetryConfig(0, 0, 0)
@@ -146,7 +155,7 @@ func TestKeyRoutingProfilesShareOnePool(t *testing.T) {
 	execute := func(t *testing.T, key string) {
 		t.Helper()
 		opts := coreexecutor.Options{Headers: http.Header{"X-Session-Id": []string{session + "-" + key}}}
-		if _, errExecute := manager.Execute(keyRequestContext(key), []string{"claude"}, coreexecutor.Request{Model: model}, opts); errExecute != nil {
+		if _, errExecute := manager.Execute(keyRequestContext(t, key), []string{"claude"}, coreexecutor.Request{Model: model}, opts); errExecute != nil {
 			t.Fatalf("Execute(%s) error = %v", key, errExecute)
 		}
 	}

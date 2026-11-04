@@ -33,10 +33,11 @@ func (h *Handler) GetRoutingProfiles(c *gin.Context) {
 			continue
 		}
 		seen[key] = true
-		view := routingKeyProfileView{Key: key, Profile: *profile}
+		view := routingKeyProfileView{Key: key, Profile: profile.Clone()}
 		view.Profile.Selection = profile.EffectiveSelection()
-		view.Profile.PreferredAccounts = copyStringMap(profile.PreferredAccounts)
-		view.Profile.ClaudeFallback.Mappings = append([]config.ClaudeFallbackMapping{}, profile.ClaudeFallback.Mappings...)
+		if view.Profile.ClaudeFallback.Mappings == nil {
+			view.Profile.ClaudeFallback.Mappings = []config.ClaudeFallbackMapping{}
+		}
 		keys = append(keys, view)
 	}
 	h.mu.Unlock()
@@ -53,17 +54,6 @@ func (h *Handler) GetRoutingProfiles(c *gin.Context) {
 			"pickers":   config.SelectionPickerSlots,
 		},
 	})
-}
-
-func copyStringMap(src map[string]string) map[string]string {
-	if len(src) == 0 {
-		return nil
-	}
-	dst := make(map[string]string, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
 }
 
 // reconcileKeyProfiles keeps routing.key-profiles in step with an api-keys list
@@ -116,12 +106,7 @@ func countUnknownKeyProfiles(root, before *yaml.Node) int {
 	if profiles == nil || profiles.Kind != yaml.MappingNode {
 		return 0
 	}
-	known := make(map[string]bool)
-	if keys := configV8Node(root, []string{"access", "api-keys"}); keys != nil && keys.Kind == yaml.SequenceNode {
-		for _, key := range keys.Content {
-			known[key.Value] = true
-		}
-	}
+	known := knownAPIKeys(root)
 	previous := configV8Node(before, []string{"routing", "key-profiles"})
 	count := 0
 	for i := 0; i+1 < len(profiles.Content); i += 2 {
@@ -135,6 +120,37 @@ func countUnknownKeyProfiles(root, before *yaml.Node) int {
 		count++
 	}
 	return count
+}
+
+// pruneUnknownKeyProfiles removes routing.key-profiles entries whose key is absent
+// from access.api-keys, and the key-profiles node itself when it ends up empty.
+func pruneUnknownKeyProfiles(root *yaml.Node) {
+	profiles := configV8Node(root, []string{"routing", "key-profiles"})
+	if profiles == nil || profiles.Kind != yaml.MappingNode {
+		return
+	}
+	known := knownAPIKeys(root)
+	kept := profiles.Content[:0]
+	for i := 0; i+1 < len(profiles.Content); i += 2 {
+		if known[profiles.Content[i].Value] {
+			kept = append(kept, profiles.Content[i], profiles.Content[i+1])
+		}
+	}
+	profiles.Content = kept
+	if len(profiles.Content) == 0 {
+		deleteConfigV8Path(root, []string{"routing", "key-profiles"})
+	}
+}
+
+// knownAPIKeys returns the access.api-keys entries of a v8 document as a set.
+func knownAPIKeys(root *yaml.Node) map[string]bool {
+	known := make(map[string]bool)
+	if keys := configV8Node(root, []string{"access", "api-keys"}); keys != nil && keys.Kind == yaml.SequenceNode {
+		for _, key := range keys.Content {
+			known[key.Value] = true
+		}
+	}
+	return known
 }
 
 func sameYAMLValue(a, b *yaml.Node) bool {

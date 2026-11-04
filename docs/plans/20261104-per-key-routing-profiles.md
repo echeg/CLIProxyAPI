@@ -268,8 +268,8 @@
 - **API**:
   - `GET /v8/management/routing/profiles` -> `{supported, shared, keys, selection_options}`
   - `PATCH /v8/management/config` with `{"routing": {"selection": {...}}}` or `{"routing": {"key-profiles": {"<key>": {...} | null}}}`; unknown key -> 400 `unknown_api_key`; invalid slot -> 422 `invalid_config`
-  - `PATCH /v8/management/api-keys {"old","new"}` moves the profile; `PUT`, index patches, and `DELETE` drop profiles of keys no longer listed
-  - the saver prunes `routing.key-profiles` to the keys present in the generated config
+  - `PATCH /v0/management/api-keys {"old","new"}` moves the profile; `PUT`, index patches, and `DELETE` drop profiles of keys no longer listed (these handlers are registered only under `/v0/management`, see the ⚠️ note in Task 10)
+  - the saver prunes `routing.key-profiles` to the keys present in the generated config; a v8 config `DELETE`, which bypasses the saver, prunes profiles of keys no longer in `access.api-keys` itself
 - **Log line**: `Routing profile selection` with `routing_key=<12 hex>`, `routing_stage`, `provider`, `auth_index`; inside the Codex fallback leg `routing_stage=fallback` plus `fallback_stage=<deciding stage>`.
 
 ## Post-Completion

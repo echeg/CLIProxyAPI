@@ -51,8 +51,7 @@ func TestPipelineSelectionLogsProfileStages(t *testing.T) {
 		{name: "affinity cold path", wrap: true, selection: internalconfig.SelectionConfig{Primary: "reserves"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			hook := logtest.NewLocal(log.StandardLogger())
-			t.Cleanup(hook.Reset)
+			hook := newStandardLogHook(t)
 			var selector Selector = NewPipelineSelector(nil)
 			if tc.wrap {
 				selector = NewSessionAffinitySelector(selector)
@@ -118,8 +117,7 @@ func TestPipelineSelectionLogsProfileStages(t *testing.T) {
 }
 
 func TestPipelineSelectionLogsNothingOnError(t *testing.T) {
-	hook := logtest.NewLocal(log.StandardLogger())
-	t.Cleanup(hook.Reset)
+	hook := newStandardLogHook(t)
 	ctx := withRoutingProfile(context.Background(), &routingProfile{keyHash: "abc123def456", fromKey: true,
 		selection: internalconfig.SelectionConfig{Primary: "weighted-round-robin"}})
 	auths := []*Auth{{ID: "zero-weight", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"weight": "0"}}}
