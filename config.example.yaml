@@ -158,6 +158,37 @@ routing:
         to: "gpt-6-sol"
       - from: "claude-fable-*"
         to: "gpt-6-astra"
+  # Explicit pool strategy for new selections: primary, then tiebreak.
+  # Narrowing criteria keep the best group of candidates:
+  #   priority (highest manual priority), reserves (lowest quota reserve level),
+  #   earliest-reset (subscription quota that resets first), most-remaining
+  #   (highest remaining subscription quota).
+  # Pickers choose one credential: round-robin, weighted-round-robin, fill-first.
+  # A picker as primary makes tiebreak inactive. Remaining ties use round-robin.
+  # Without selection, the legacy derivation applies: {primary: reserves,
+  # tiebreak: <strategy above, default round-robin>}. The manual Priority tier
+  # applies only when priority is chosen as a slot.
+  # selection:
+  #   primary: reserves
+  #   tiebreak: round-robin
+  # Per client key routing profiles, keyed by an exact entry of access.api-keys.
+  # A key profile is a full copy: it replaces session-affinity, preferred-accounts,
+  # selection and claude-fallback for that key, and nothing is inherited from the
+  # shared fields above (an empty selection means {reserves, round-robin}). Keys
+  # without a profile use the shared fields. On load, profiles for keys missing from
+  # access.api-keys are dropped with a warning; the v8 management config write
+  # rejects them with 400.
+  # key-profiles:
+  #   "your-api-key-1":
+  #     session-affinity: true
+  #     preferred-accounts: {claude: "auth-index", codex: "auth-index"}
+  #     selection: {primary: priority, tiebreak: round-robin}
+  #     claude-fallback:
+  #       enabled: true
+  #       mode: auto
+  #       mappings:
+  #         - from: "claude-opus-*"
+  #           to: "gpt-6-astra"
   # Codex/Claude OAuth credentials can keep part of their subscription quota for tools
   # outside the proxy. Add a top-level "quota_reserve" next to "priority" in the auth JSON:
   #   "quota_reserve": {"percent": 25, "mode": "soft"}

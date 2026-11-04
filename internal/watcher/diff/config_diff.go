@@ -188,6 +188,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Routing.ClaudeFallback, newCfg.Routing.ClaudeFallback) {
 		changes = append(changes, "routing.claude-fallback: updated")
 	}
+	if oldCfg.Routing.Selection != newCfg.Routing.Selection {
+		changes = append(changes, fmt.Sprintf("routing.selection: %s -> %s", formatSelection(oldCfg.Routing.Selection), formatSelection(newCfg.Routing.Selection)))
+	}
+	// Key profiles are keyed by raw client API keys: report counts only.
+	if len(oldCfg.Routing.KeyProfiles) != len(newCfg.Routing.KeyProfiles) {
+		changes = append(changes, fmt.Sprintf("routing.key-profiles count: %d -> %d", len(oldCfg.Routing.KeyProfiles), len(newCfg.Routing.KeyProfiles)))
+	} else if !reflect.DeepEqual(oldCfg.Routing.KeyProfiles, newCfg.Routing.KeyProfiles) {
+		changes = append(changes, "routing.key-profiles: updated (redacted)")
+	}
 	if !reflect.DeepEqual(oldCfg.Payload, newCfg.Payload) {
 		changes = appendPayloadConfigChanges(changes, oldCfg.Payload, newCfg.Payload)
 	}
@@ -631,6 +640,17 @@ func equalStringMap(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func formatSelection(selection config.SelectionConfig) string {
+	switch {
+	case selection.Primary == "":
+		return "<derived>"
+	case selection.Tiebreak == "":
+		return selection.Primary
+	default:
+		return selection.Primary + "," + selection.Tiebreak
+	}
 }
 
 func displayOptionalValue(raw string) string {

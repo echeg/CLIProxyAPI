@@ -360,6 +360,15 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "earliest-reset".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	// Selection is the explicit pool strategy {primary, tiebreak}. When Primary is
+	// empty the effective selection is derived from Strategy (see EffectiveSelection).
+	Selection SelectionConfig `yaml:"selection,omitempty" json:"selection,omitempty"`
+
+	// KeyProfiles maps a client API key (an entry of access.api-keys) to its own
+	// routing profile. A key profile replaces the shared profile entirely.
+	// Pointer values keep a YAML null entry distinguishable from an empty profile.
+	KeyProfiles map[string]*RoutingProfile `yaml:"key-profiles,omitempty" json:"key-profiles,omitempty"`
+
 	// PreferredAccounts maps codex/claude to a credential auth_index for new bindings.
 	// Existing session bindings take precedence; unavailable preferences fall back to Strategy.
 	PreferredAccounts map[string]string `yaml:"preferred-accounts,omitempty" json:"preferred-accounts,omitempty"`

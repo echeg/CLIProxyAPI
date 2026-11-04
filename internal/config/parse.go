@@ -61,6 +61,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if errValidate := cfg.Routing.ClaudeFallback.Normalize(); errValidate != nil {
 		return nil, errValidate
 	}
+	if errValidate := cfg.Routing.Normalize(cfg.APIKeys); errValidate != nil {
+		return nil, errValidate
+	}
 	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
 		return nil, errValidate
 	}
