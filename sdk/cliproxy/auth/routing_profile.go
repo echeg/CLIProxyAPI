@@ -90,7 +90,7 @@ func (m *Manager) resolveRoutingProfile(ctx context.Context) *routingProfile {
 		cfg = &config.Config{}
 	}
 	if m.hasPluginScheduler() {
-		return newRoutingProfile(cfg.Routing.SharedProfile(), "", false)
+		return newSharedRoutingProfile(cfg.Routing, "")
 	}
 	key := clientAPIKeyFromContext(ctx)
 	keyHash := ""
@@ -100,7 +100,17 @@ func (m *Manager) resolveRoutingProfile(ctx context.Context) *routingProfile {
 			return newRoutingProfile(*profile, keyHash, true)
 		}
 	}
-	return newRoutingProfile(cfg.Routing.SharedProfile(), keyHash, false)
+	return newSharedRoutingProfile(cfg.Routing, keyHash)
+}
+
+// newSharedRoutingProfile builds the shared profile. It turns session affinity off
+// only when key profiles alone enable it, which is when the configured affinity
+// wrapper exists for them; a wrapper installed directly by an SDK embedder keeps
+// serving requests without a key profile as before.
+func newSharedRoutingProfile(routing config.RoutingConfig, keyHash string) *routingProfile {
+	profile := newRoutingProfile(routing.SharedProfile(), keyHash, false)
+	profile.sticky = routing.SessionAffinity || !routing.StickyAnywhere()
+	return profile
 }
 
 // SharedSelection returns the effective shared selection of the manager's current
@@ -125,6 +135,14 @@ func (m *Manager) ensureRoutingProfile(ctx context.Context) context.Context {
 	}
 	return withRoutingProfile(ctx, m.resolveRoutingProfile(ctx))
 }
+
+// Routing profile stages reported by logRoutingProfileSelection.
+const (
+	routingStageSticky    = "sticky"
+	routingStagePreferred = "preferred"
+	routingStagePipeline  = "pipeline"
+	routingStageFallback  = "fallback"
+)
 
 // logRoutingProfileSelection reports a selection driven by a key profile. It logs
 // only the key hash prefix and never the raw client key.

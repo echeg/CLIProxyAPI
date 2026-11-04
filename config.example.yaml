@@ -207,6 +207,13 @@ routing:
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # applies to cold bindings, requests without a session, and post-failover rebinding
   # when no available preferred account is configured.
+  # The session affinity layer exists while this flag or any key profile's
+  # session-affinity is true; each request then follows its own profile's flag, and a
+  # key with session-affinity: false neither reads nor writes bindings. The TTL and
+  # subagent settings below apply to every key. Turning session affinity on or off
+  # everywhere (for example the last sticky key profile switching off) rebuilds the
+  # selector and drops every existing binding; selection, preferred-accounts, and
+  # per-key edits that keep some profile sticky keep the bindings.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
@@ -215,7 +222,7 @@ routing:
   # maximizing Prompt/KV Cache reuse and minimizing TTFT.
   # When false, subagents are distributed across the credential pool via the fallback selector
   # for maximum parallel concurrency.
-  # Ignored when routing.session-affinity is false.
+  # Ignored when no profile enables session affinity.
   session-affinity-subagents: true
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).

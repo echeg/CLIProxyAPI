@@ -122,7 +122,8 @@ func setPreferredAccount(manager *Manager, provider, index string) {
 
 // preferredAccountContext carries a request profile that prefers index for provider.
 func preferredAccountContext(provider, index string) context.Context {
-	profile := &routingProfile{}
+	// Sticky keeps session affinity on for the tests that wrap the selector with it.
+	profile := &routingProfile{sticky: true}
 	if index != "" {
 		profile.preferred = map[string]string{provider: index}
 	}

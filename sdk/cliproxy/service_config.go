@@ -26,11 +26,14 @@ type configCommit struct {
 }
 
 // routingRuntimeState holds the routing settings that require a new selector. The
-// selection slots and strategy are not part of it: the pipeline reads them from the
-// runtime config at Pick time, so a selection change keeps the selector and its
-// round-robin cursors and session bindings.
+// selection slots, strategy, and preferences are not part of it: the pipeline reads
+// them at Pick time, so their changes keep the selector and its round-robin cursors
+// and session bindings. stickyAnywhere decides whether the session affinity wrapper
+// exists; toggling it rebuilds the selector and resets every binding.
 type routingRuntimeState struct {
-	sessionAffinity          bool
+	// stickyAnywhere is true when the shared profile or any key profile enables
+	// session affinity. Each request still follows its own profile's flag.
+	stickyAnywhere           bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
 }
@@ -44,7 +47,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		return state
 	}
 
-	state.sessionAffinity = cfg.Routing.SessionAffinity
+	state.stickyAnywhere = cfg.Routing.StickyAnywhere()
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
@@ -53,18 +56,18 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 			state.sessionAffinityTTL = parsed
 		}
 	}
-	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {
+	if state.stickyAnywhere && cfg.Routing.SessionAffinitySubagents != nil {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
 	return state
 }
 
 // newRoutingSelector builds the selection pipeline, wrapped by session affinity when
-// enabled. shared supplies the shared selection at Pick time for requests that carry
-// no routing profile.
+// any profile enables it. shared supplies the shared selection at Pick time for
+// requests that carry no routing profile.
 func newRoutingSelector(state routingRuntimeState, shared func() internalconfig.SelectionConfig) coreauth.Selector {
 	var selector coreauth.Selector = coreauth.NewPipelineSelector(shared)
-	if state.sessionAffinity {
+	if state.stickyAnywhere {
 		subagents := state.sessionAffinitySubagents
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
 			Fallback:         selector,

@@ -22,7 +22,7 @@ func TestEarliestResetRoutingConfigWithAffinity(t *testing.T) {
 		t.Fatal(errUnmarshal)
 	}
 	state := normalizedRoutingRuntimeState(&cfg)
-	if !state.sessionAffinity || state.sessionAffinityTTL != 24*time.Hour {
+	if !state.stickyAnywhere || state.sessionAffinityTTL != 24*time.Hour {
 		t.Fatalf("unexpected routing state: %+v", state)
 	}
 	wantSelection := internalconfig.SelectionConfig{Primary: internalconfig.SelectionReserves, Tiebreak: internalconfig.SelectionEarliestReset}

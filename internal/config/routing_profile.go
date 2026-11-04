@@ -202,3 +202,17 @@ func (r RoutingConfig) SharedProfile() RoutingProfile {
 	}
 	return profile
 }
+
+// StickyAnywhere reports whether the shared profile or any key profile enables
+// session affinity, which is when the session affinity selector is built.
+func (r RoutingConfig) StickyAnywhere() bool {
+	if r.SessionAffinity {
+		return true
+	}
+	for _, profile := range r.KeyProfiles {
+		if profile != nil && profile.SessionAffinity {
+			return true
+		}
+	}
+	return false
+}

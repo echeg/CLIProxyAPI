@@ -247,3 +247,20 @@ func TestKeyHashPrefix(t *testing.T) {
 		t.Fatalf("hash prefix = %q", got)
 	}
 }
+
+func TestRoutingConfigStickyAnywhere(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		routing RoutingConfig
+		want    bool
+	}{
+		{name: "empty", routing: RoutingConfig{}, want: false},
+		{name: "shared", routing: RoutingConfig{SessionAffinity: true}, want: true},
+		{name: "key", routing: RoutingConfig{KeyProfiles: map[string]*RoutingProfile{"k": {SessionAffinity: true}}}, want: true},
+		{name: "key off and nil", routing: RoutingConfig{KeyProfiles: map[string]*RoutingProfile{"k": {}, "nil": nil}}, want: false},
+	} {
+		if got := tt.routing.StickyAnywhere(); got != tt.want {
+			t.Fatalf("%s: StickyAnywhere() = %t, want %t", tt.name, got, tt.want)
+		}
+	}
+}

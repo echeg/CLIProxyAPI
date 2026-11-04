@@ -531,6 +531,33 @@ func newSelectionAuths(ctx context.Context, available []*Auth, provider, model s
 	return preferredOrHighestPriorityAuths(ctx, selectable), nil
 }
 
+// withoutHardReservedAuths reduces an across-priority availability set to the pipeline
+// candidate set: credentials under an active hard reserve are removed, soft levels and
+// tiers are kept. A selection that skips the quota reserve keeps every credential. When
+// only hard-reserved credentials remain it reports the reserve error, whose Retry-After
+// points at the earliest recovery.
+func withoutHardReservedAuths(ctx context.Context, available []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	if quotaReserveSkipped(ctx) {
+		return available, nil
+	}
+	kept := make([]*Auth, 0, len(available))
+	var recoverAt time.Time
+	for _, candidate := range available {
+		until, held := hardQuotaReserveUntil(candidate, now)
+		if !held {
+			kept = append(kept, candidate)
+			continue
+		}
+		if until.After(now) && (recoverAt.IsZero() || until.Before(recoverAt)) {
+			recoverAt = until
+		}
+	}
+	if len(kept) == 0 && len(available) > 0 {
+		return nil, quotaReserveExhaustedError(ctx, provider, model, recoverAt, now)
+	}
+	return kept, nil
+}
+
 // availableForPipeline returns the pipeline candidate set for a new selection: every
 // priority tier, with blocked credentials and credentials under an active hard reserve
 // removed, no soft reserve filter and no tier narrowing, sorted by ID. A selection that
@@ -1081,6 +1108,11 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // genuine bound-credential failover. The fallback receives the available preferred account
 // or, when no preference can be used, the highest available priority tier.
 //
+// A request whose routing profile turns session affinity off skips the LCP matcher,
+// every cache lookup, and every binding, and is marked so OnResult leaves bindings
+// alone. With a pipeline fallback, new selections receive every available tier with
+// only hard-reserved credentials removed, so the pipeline's own stages decide.
+//
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
@@ -1091,6 +1123,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+
+	// A routing profile with session affinity off neither reads nor writes bindings;
+	// the marker keeps OnResult from touching bindings of the same session either.
+	if profile := routingProfileFromContext(ctx); profile != nil && !profile.sticky {
+		opts.Metadata[cliproxyexecutor.SessionAffinityDisabledMetadataKey] = true
+		entry.Debugf("session-affinity: disabled by routing profile, falling back to default selector | provider=%s model=%s", provider, model)
+		return s.pickWithoutSession(ctx, provider, model, opts, auths)
+	}
+	delete(opts.Metadata, cliproxyexecutor.SessionAffinityDisabledMetadataKey)
 
 	// Explicit harness identities are absolute authority. The LCP matcher is only
 	// consulted when no header, body, or execution-session identity is present.
@@ -1127,19 +1168,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = primaryID
 		}
 	}
-	now := time.Now()
-	availabilityCandidates := auths
-	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
-		availabilityCandidates = positiveWeightAuths(auths)
-	}
 	if primaryID == "" {
-		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
-		if errAvailable != nil {
-			return nil, errAvailable
-		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.pickWithoutSession(ctx, provider, model, opts, auths)
 	}
+	now := time.Now()
+	availabilityCandidates := s.availabilityCandidates(auths)
 
 	// A single availability pass serves both lookups: the bound credential is validated against
 	// every priority tier without the quota reserve, so bound sessions live on, while new
@@ -1175,15 +1209,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if auth.ID == cachedAuthID {
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				logRoutingProfileSelection(ctx, routingStageSticky, auth)
 				return auth, nil
 			}
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
-		fallbackAuths, errFallback := newSelectionAuths(ctx, available, provider, model, now)
-		if errFallback != nil {
-			return nil, errFallback
-		}
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		auth, err := s.pickNewSelection(ctx, provider, model, opts, available, now)
 		if err != nil {
 			return nil, err
 		}
@@ -1206,6 +1237,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						} else {
 							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
+						logRoutingProfileSelection(ctx, routingStageSticky, auth)
 						return auth, nil
 					}
 				}
@@ -1213,11 +1245,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	fallbackAuths, errFallback := newSelectionAuths(ctx, available, provider, model, now)
-	if errFallback != nil {
-		return nil, errFallback
-	}
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	auth, err := s.pickNewSelection(ctx, provider, model, opts, available, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1231,6 +1259,54 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	}
 	return auth, nil
+}
+
+// availabilityCandidates drops zero-weight credentials for a weighted fallback, which
+// never serves them.
+func (s *SessionAffinitySelector) availabilityCandidates(auths []*Auth) []*Auth {
+	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
+		return positiveWeightAuths(auths)
+	}
+	return auths
+}
+
+// pickWithoutSession serves a request that reads and writes no binding: one without a
+// session identity, or one whose routing profile turns session affinity off.
+func (s *SessionAffinitySelector) pickWithoutSession(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	now := time.Now()
+	availabilityCandidates := s.availabilityCandidates(auths)
+	if _, pipeline := s.fallback.(*PipelineSelector); !pipeline {
+		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
+		if errAvailable != nil {
+			return nil, errAvailable
+		}
+		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	}
+	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
+	if errAvailable != nil {
+		return nil, errAvailable
+	}
+	return s.pickNewSelection(ctx, provider, model, opts, available, now)
+}
+
+// pickNewSelection hands a new selection to the fallback selector. available is the
+// across-priority set that validates bindings. A pipeline fallback receives it with
+// only hard-reserved credentials removed, marked as pre-filtered, so its own preference,
+// slots, and soft levels decide; any other fallback receives the reserve-filtered
+// preferred account or highest tier, as before.
+func (s *SessionAffinitySelector) pickNewSelection(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, available []*Auth, now time.Time) (*Auth, error) {
+	if _, pipeline := s.fallback.(*PipelineSelector); pipeline {
+		candidates, errCandidates := withoutHardReservedAuths(ctx, available, provider, model, now)
+		if errCandidates != nil {
+			return nil, errCandidates
+		}
+		return s.fallback.Pick(withPipelineCandidates(ctx), provider, model, opts, candidates)
+	}
+	fallbackAuths, errFallback := newSelectionAuths(ctx, available, provider, model, now)
+	if errFallback != nil {
+		return nil, errFallback
+	}
+	return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 }
 
 func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry) (*Auth, bool, error) {
@@ -1256,10 +1332,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		opts.Metadata[cliproxyexecutor.LCPEnvironmentDigestMetadataKey] = envDigest
 	}
 
-	availabilityCandidates := auths
-	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
-		availabilityCandidates = positiveWeightAuths(auths)
-	}
+	availabilityCandidates := s.availabilityCandidates(auths)
 	now := time.Now()
 	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if errAvailable != nil {
@@ -1305,15 +1378,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
+			logRoutingProfileSelection(ctx, routingStageSticky, auth)
 			return auth, true, nil
 		}
 	}
 
-	fallbackAuths, errFallback := newSelectionAuths(ctx, available, provider, model, now)
-	if errFallback != nil {
-		return nil, true, errFallback
-	}
-	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	auth, errPick := s.pickNewSelection(ctx, provider, model, opts, available, now)
 	if errPick != nil {
 		return nil, true, errPick
 	}
@@ -1648,6 +1718,11 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 // OnResult handles session affinity binding or release based on execution outcome.
 func (s *SessionAffinitySelector) OnResult(res Result) {
 	if s == nil || res.AuthID == "" {
+		return
+	}
+	if disabled, _ := res.Options.Metadata[cliproxyexecutor.SessionAffinityDisabledMetadataKey].(bool); disabled {
+		// The request's routing profile turns session affinity off: no touch, no
+		// delete, and no LCP update.
 		return
 	}
 

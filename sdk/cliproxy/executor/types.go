@@ -84,6 +84,10 @@ const (
 	SessionAffinityProviderMetadataKey = "session_affinity_provider"
 	// SessionAffinityModelMetadataKey carries the model used during session affinity selection.
 	SessionAffinityModelMetadataKey = "session_affinity_model"
+	// SessionAffinityDisabledMetadataKey marks a request whose routing profile turns
+	// session affinity off, so SessionAffinitySelector.OnResult neither refreshes nor
+	// deletes bindings for it.
+	SessionAffinityDisabledMetadataKey = "session_affinity_disabled"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
