@@ -630,6 +630,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Selector, auths []*Auth, provider, routeModel string, opts cliproxyexecutor.Options, now time.Time, reserve bool) (priorityAuths, selectorAuths []*Auth, newSelectionErr error, err error) {
 	affinitySelector, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
+	if _, pipeline := selector.(*PipelineSelector); pipeline {
+		return m.availableAuthsForPipeline(auths, provider, routeModel, now, reserve, schedulerAcross)
+	}
 	weighted := selector
 	if sessionAffinity {
 		weighted = affinitySelector.fallback
@@ -689,6 +692,44 @@ func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Select
 	return priorityAuths, selectorAuths, newSelectionErr, nil
 }
 
+// availableAuthsForPipeline hands the pipeline selector its candidate set: every
+// priority tier, blocked credentials and (unless reserve is unset) credentials under
+// an active hard reserve removed, with no soft reserve filter and no tier narrowing.
+// Priority-scoped consumers such as the plugin scheduler keep the legacy view: the
+// soft reserve filter applied and, unless the scheduler wants every tier, only the
+// highest priority tier. When nothing remains, the error is the one the reserve-aware
+// availability pass reports, so Retry-After includes hard-reserve recovery.
+func (m *Manager) availableAuthsForPipeline(auths []*Auth, provider, routeModel string, now time.Time, reserve, schedulerAcross bool) (priorityAuths, selectorAuths []*Auth, newSelectionErr error, err error) {
+	allAuths, errAvailable := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, false)
+	if errAvailable != nil {
+		return nil, nil, nil, errAvailable
+	}
+	if reserve {
+		kept := make([]*Auth, 0, len(allAuths))
+		for _, candidate := range allAuths {
+			if _, held := hardQuotaReserveUntil(candidate, now); !held {
+				kept = append(kept, candidate)
+			}
+		}
+		if len(kept) == 0 {
+			if _, errReserve := m.availableAuthsForRouteModelWithPriorityMode(auths, provider, routeModel, now, true, true); errReserve != nil {
+				return nil, nil, nil, errReserve
+			}
+			return nil, nil, nil, newAuthUnavailableError(time.Time{}, now)
+		}
+		allAuths = kept
+	}
+	selectorAuths = cloneAuthSlice(allAuths)
+	priorityAuths = selectorAuths
+	if reserve {
+		priorityAuths, _, _ = quotaReserveFilter(selectorAuths, now)
+	}
+	if !schedulerAcross {
+		priorityAuths = highestPriorityAuths(priorityAuths)
+	}
+	return priorityAuths, selectorAuths, nil, nil
+}
+
 func selectionArgForSelector(selector Selector, routeModel string) string {
 	if isBuiltInSelector(selector) {
 		return ""
@@ -700,13 +741,17 @@ func selectorContextForAvailableAuths(ctx context.Context, selector Selector, ro
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
 	if !isBuiltInSelector(selector) {
 		switch selector.(type) {
-		case *SessionAffinitySelector, *EarliestResetSelector:
+		case *SessionAffinitySelector, *EarliestResetSelector, *PipelineSelector:
 		default:
 			return ctx
 		}
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if _, pipeline := selector.(*PipelineSelector); pipeline {
+		// availableAuthsForSelector already reduced the candidates to the pipeline set.
+		ctx = withPipelineCandidates(ctx)
 	}
 	return context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
 }

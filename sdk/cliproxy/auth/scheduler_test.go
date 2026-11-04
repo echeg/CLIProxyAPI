@@ -2108,6 +2108,12 @@ func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	if manager.scheduler.strategy != schedulerStrategyFillFirst {
 		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyFillFirst)
 	}
+
+	// The pipeline is not a built-in selector, so the scheduler never picks for it.
+	manager.SetSelector(NewPipelineSelector(nil))
+	if manager.scheduler.strategy != schedulerStrategyCustom {
+		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyCustom)
+	}
 }
 
 func TestManager_SchedulerTracksRegisterAndUpdate(t *testing.T) {

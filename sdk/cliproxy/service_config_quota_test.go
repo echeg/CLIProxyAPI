@@ -22,10 +22,14 @@ func TestEarliestResetRoutingConfigWithAffinity(t *testing.T) {
 		t.Fatal(errUnmarshal)
 	}
 	state := normalizedRoutingRuntimeState(&cfg)
-	if state.strategy != "earliest-reset" || state.sessionAffinityTTL != 24*time.Hour {
+	if !state.sessionAffinity || state.sessionAffinityTTL != 24*time.Hour {
 		t.Fatalf("unexpected routing state: %+v", state)
 	}
-	selector := newRoutingSelector(state)
+	wantSelection := internalconfig.SelectionConfig{Primary: internalconfig.SelectionReserves, Tiebreak: internalconfig.SelectionEarliestReset}
+	if got := cfg.Routing.EffectiveSelection(); got != wantSelection {
+		t.Fatalf("EffectiveSelection() = %+v, want %+v", got, wantSelection)
+	}
+	selector := newRoutingSelector(state, cfg.Routing.EffectiveSelection)
 	affinity, ok := selector.(*coreauth.SessionAffinitySelector)
 	if !ok {
 		t.Fatalf("selector = %T, want session affinity", selector)
@@ -66,8 +70,8 @@ func TestEarliestResetRoutingConfigWithAffinity(t *testing.T) {
 	pick("new-thread", later.ID)
 
 	cfg.Routing.SessionAffinity = false
-	if _, ok := newRoutingSelector(normalizedRoutingRuntimeState(&cfg)).(*coreauth.EarliestResetSelector); !ok {
-		t.Fatal("earliest-reset without affinity did not construct the quota selector")
+	if _, ok := newRoutingSelector(normalizedRoutingRuntimeState(&cfg), cfg.Routing.EffectiveSelection).(*coreauth.PipelineSelector); !ok {
+		t.Fatal("earliest-reset without affinity did not construct the pipeline selector")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
@@ -67,6 +68,14 @@ func reserveSpecAuth(id string, spec reserveSpec, observedAt time.Time) *Auth {
 func reserveTestManager(t *testing.T, selector Selector, specs []reserveSpec) (*Manager, []*Auth, string) {
 	t.Helper()
 	manager := NewManager(nil, selector, nil)
+	inner := selector
+	if affinity, ok := inner.(*SessionAffinitySelector); ok {
+		inner = affinity.fallback
+	}
+	if pipeline, ok := inner.(*PipelineSelector); ok && pipeline.sharedSelection != nil {
+		// The request's shared profile is resolved from the runtime config.
+		manager.SetConfig(&config.Config{Routing: config.RoutingConfig{Selection: pipeline.sharedSelection()}})
+	}
 	manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
 	const model = "quota-reserve-model"
 	observedAt := time.Now().Add(-time.Minute)
@@ -97,13 +106,39 @@ func reservePick(manager *Manager, model, session string, mixed bool) (*Auth, er
 	return selected, errPick
 }
 
+// reserveSelectors lists the legacy selectors and the pipeline under the selection
+// each legacy strategy derives, {reserves, <strategy>}, which must keep the same
+// reserve behavior.
 func reserveSelectors() []func() Selector {
 	return []func() Selector{
 		func() Selector { return &RoundRobinSelector{} },
 		func() Selector { return &WeightedRoundRobinSelector{} },
 		func() Selector { return &FillFirstSelector{} },
 		func() Selector { return &EarliestResetSelector{} },
+		pipelineLegacySelector("round-robin"),
+		pipelineLegacySelector("weighted-round-robin"),
+		pipelineLegacySelector("fill-first"),
+		pipelineLegacySelector("earliest-reset"),
 	}
+}
+
+// pipelineLegacySelector returns a pipeline whose shared selection is the one derived
+// from the legacy routing strategy; reserveTestManager mirrors it into the manager
+// config so the request's shared profile carries the same slots.
+func pipelineLegacySelector(strategy string) func() Selector {
+	return func() Selector {
+		selection := (&config.RoutingConfig{Strategy: strategy}).EffectiveSelection()
+		return NewPipelineSelector(func() config.SelectionConfig { return selection })
+	}
+}
+
+// selectorName names a selector in subtests, including the pipeline's selection.
+func selectorName(selector Selector) string {
+	if pipeline, ok := selector.(*PipelineSelector); ok {
+		selection := pipeline.selection(context.Background())
+		return fmt.Sprintf("pipeline{%s,%s}", selection.Primary, selection.Tiebreak)
+	}
+	return fmt.Sprintf("%T", selector)
 }
 
 func TestQuotaReserveFilter(t *testing.T) {
@@ -153,7 +188,7 @@ func authIDs(auths []*Auth) []string {
 func TestQuotaReserveSelectionAcrossStrategies(t *testing.T) {
 	for _, newSelector := range reserveSelectors() {
 		for _, mixed := range []bool{false, true} {
-			name := fmt.Sprintf("%T/mixed=%t", newSelector(), mixed)
+			name := fmt.Sprintf("%s/mixed=%t", selectorName(newSelector()), mixed)
 			t.Run(name+"/hard excluded across tiers", func(t *testing.T) {
 				manager, accounts, model := reserveTestManager(t, newSelector(), []reserveSpec{
 					{priority: "10", mode: QuotaReserveModeHard, used: 90},
@@ -377,7 +412,7 @@ func TestQuotaReserveSelectorDirectAvailability(t *testing.T) {
 	free := reserveSpecAuth("b-free", reserveSpec{priority: "0"}, observed)
 	for _, newSelector := range reserveSelectors() {
 		selector := newSelector()
-		t.Run(fmt.Sprintf("%T", selector), func(t *testing.T) {
+		t.Run(selectorName(selector), func(t *testing.T) {
 			selected, errPick := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, []*Auth{reserved, free})
 			if errPick != nil || selected.ID != free.ID {
 				t.Fatalf("selected %v, %v; want %s", selected, errPick, free.ID)
@@ -398,7 +433,7 @@ func TestQuotaReservePinnedAuthIgnoresReserve(t *testing.T) {
 			if sessionSelector, ok := selector.(*SessionAffinitySelector); ok {
 				t.Cleanup(sessionSelector.Stop)
 			}
-			t.Run(fmt.Sprintf("%T/mixed=%t", selector, mixed), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/mixed=%t", selectorName(selector), mixed), func(t *testing.T) {
 				manager, accounts, model := reserveTestManager(t, selector, []reserveSpec{
 					{mode: QuotaReserveModeHard, used: 90},
 					{},

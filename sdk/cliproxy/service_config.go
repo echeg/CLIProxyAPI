@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -24,8 +25,11 @@ type configCommit struct {
 	sequence uint64
 }
 
+// routingRuntimeState holds the routing settings that require a new selector. The
+// selection slots and strategy are not part of it: the pipeline reads them from the
+// runtime config at Pick time, so a selection change keeps the selector and its
+// round-robin cursors and session bindings.
 type routingRuntimeState struct {
-	strategy                 string
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
@@ -33,7 +37,6 @@ type routingRuntimeState struct {
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
-		strategy:                 "round-robin",
 		sessionAffinityTTL:       time.Hour,
 		sessionAffinitySubagents: true,
 	}
@@ -41,14 +44,6 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		return state
 	}
 
-	switch strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy)) {
-	case "weighted-round-robin", "weightedroundrobin", "wrr":
-		state.strategy = "weighted-round-robin"
-	case "fill-first", "fillfirst", "ff":
-		state.strategy = "fill-first"
-	case "earliest-reset":
-		state.strategy = "earliest-reset"
-	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
@@ -64,18 +59,11 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	return state
 }
 
-func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
-	var selector coreauth.Selector
-	switch state.strategy {
-	case "weighted-round-robin":
-		selector = &coreauth.WeightedRoundRobinSelector{}
-	case "fill-first":
-		selector = &coreauth.FillFirstSelector{}
-	case "earliest-reset":
-		selector = &coreauth.EarliestResetSelector{}
-	default:
-		selector = &coreauth.RoundRobinSelector{}
-	}
+// newRoutingSelector builds the selection pipeline, wrapped by session affinity when
+// enabled. shared supplies the shared selection at Pick time for requests that carry
+// no routing profile.
+func newRoutingSelector(state routingRuntimeState, shared func() internalconfig.SelectionConfig) coreauth.Selector {
+	var selector coreauth.Selector = coreauth.NewPipelineSelector(shared)
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
@@ -219,7 +207,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.coreManager.SetSelector(newRoutingSelector(routingState, s.coreManager.SharedSelection))
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)

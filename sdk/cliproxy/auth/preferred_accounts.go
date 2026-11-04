@@ -7,7 +7,7 @@ import (
 
 func supportsPreferredAccounts(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *EarliestResetSelector, *SessionAffinitySelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *EarliestResetSelector, *SessionAffinitySelector, *PipelineSelector:
 		return true
 	default:
 		return false

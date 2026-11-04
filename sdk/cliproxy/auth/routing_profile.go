@@ -103,6 +103,17 @@ func (m *Manager) resolveRoutingProfile(ctx context.Context) *routingProfile {
 	return newRoutingProfile(cfg.Routing.SharedProfile(), keyHash, false)
 }
 
+// SharedSelection returns the effective shared selection of the manager's current
+// runtime config. The pipeline selector reads it at Pick time, so a selection change
+// applies without a new selector.
+func (m *Manager) SharedSelection() config.SelectionConfig {
+	cfg := m.runtimeConfigSnapshot()
+	if cfg == nil {
+		return config.DefaultSelection()
+	}
+	return cfg.Routing.EffectiveSelection()
+}
+
 // ensureRoutingProfile injects the resolved profile unless the context already
 // carries one, so nested and internal calls keep the profile of the outer request.
 func (m *Manager) ensureRoutingProfile(ctx context.Context) context.Context {

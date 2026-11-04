@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -356,6 +357,40 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 		if got.ID == "c" {
 			t.Fatalf("Pick() #%d unexpectedly selected lower priority auth", i)
 		}
+	}
+}
+
+// TestPipelineSelectorPick_PriorityBuckets expresses the legacy priority buckets
+// through the pipeline: the tier applies only through an explicit priority slot.
+func TestPipelineSelectorPick_PriorityBuckets(t *testing.T) {
+	t.Parallel()
+
+	auths := []*Auth{
+		{ID: "c", Attributes: map[string]string{"priority": "0"}},
+		{ID: "a", Attributes: map[string]string{"priority": "10"}},
+		{ID: "b", Attributes: map[string]string{"priority": "10"}},
+	}
+	for _, tt := range []struct {
+		name      string
+		selection config.SelectionConfig
+		want      []string
+	}{
+		{name: "explicit priority", selection: config.SelectionConfig{Primary: config.SelectionPriority, Tiebreak: config.SelectionRoundRobin}, want: []string{"a", "b", "a", "b"}},
+		{name: "derived legacy selection spans tiers", selection: config.DefaultSelection(), want: []string{"a", "b", "c", "a"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			selection := tt.selection
+			selector := NewPipelineSelector(func() config.SelectionConfig { return selection })
+			for i, id := range tt.want {
+				got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
+				if err != nil {
+					t.Fatalf("Pick() #%d error = %v", i, err)
+				}
+				if got == nil || got.ID != id {
+					t.Fatalf("Pick() #%d auth = %v, want %q", i, got, id)
+				}
+			}
+		})
 	}
 }
 

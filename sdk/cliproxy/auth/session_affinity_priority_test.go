@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -33,86 +34,102 @@ func TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery(t *t
 			},
 		},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			ctx := context.Background()
-			provider := "affinity-priority-" + testCase.providerSuffix
-			model := "affinity-priority-model"
-			highID := provider + "-high"
-			lowID := provider + "-low"
+		for _, fallback := range []struct {
+			name string
+			// selection is the shared selection for a pipeline fallback; the pipeline
+			// applies the priority tier only through an explicit priority slot.
+			selection *config.SelectionConfig
+		}{
+			{name: "round-robin"},
+			{name: "pipeline", selection: &config.SelectionConfig{Primary: config.SelectionPriority, Tiebreak: config.SelectionRoundRobin}},
+		} {
+			t.Run(testCase.name+"/"+fallback.name, func(t *testing.T) {
+				ctx := context.Background()
+				provider := "affinity-priority-" + testCase.providerSuffix + "-" + fallback.name
+				model := "affinity-priority-model"
+				highID := provider + "-high"
+				lowID := provider + "-low"
 
-			manager := NewManager(nil, nil, nil)
-			affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-				Fallback: &RoundRobinSelector{},
-				TTL:      time.Hour,
-			})
-			defer affinity.Stop()
-			manager.SetSelector(affinity)
-			manager.RegisterExecutor(schedulerTestExecutor{provider: provider})
-
-			for _, auth := range []*Auth{
-				{ID: highID, Provider: provider, Status: StatusActive, Attributes: map[string]string{"priority": "1"}},
-				{ID: lowID, Provider: provider, Status: StatusActive, Attributes: map[string]string{"priority": "0"}},
-			} {
-				if _, errRegister := manager.Register(WithSkipPersist(ctx), auth); errRegister != nil {
-					t.Fatalf("Register(%s): %v", auth.ID, errRegister)
+				manager := NewManager(nil, nil, nil)
+				var fallbackSelector Selector = &RoundRobinSelector{}
+				if fallback.selection != nil {
+					selection := *fallback.selection
+					fallbackSelector = NewPipelineSelector(func() config.SelectionConfig { return selection })
+					manager.SetConfig(&config.Config{Routing: config.RoutingConfig{Selection: selection}})
 				}
-				registry.GetGlobalRegistry().RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: model}})
-				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
-			}
+				affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+					Fallback: fallbackSelector,
+					TTL:      time.Hour,
+				})
+				defer affinity.Stop()
+				manager.SetSelector(affinity)
+				manager.RegisterExecutor(schedulerTestExecutor{provider: provider})
 
-			opts := cliproxyexecutor.Options{Metadata: map[string]any{
-				cliproxyexecutor.DerivedSessionIDMetadataKey: "stable-session",
-			}}
-			pick := func(pickOpts cliproxyexecutor.Options) *Auth {
-				t.Helper()
-				auth, errPick := testCase.pick(manager, ctx, provider, model, pickOpts)
-				if errPick != nil {
-					t.Fatalf("pick: %v", errPick)
+				for _, auth := range []*Auth{
+					{ID: highID, Provider: provider, Status: StatusActive, Attributes: map[string]string{"priority": "1"}},
+					{ID: lowID, Provider: provider, Status: StatusActive, Attributes: map[string]string{"priority": "0"}},
+				} {
+					if _, errRegister := manager.Register(WithSkipPersist(ctx), auth); errRegister != nil {
+						t.Fatalf("Register(%s): %v", auth.ID, errRegister)
+					}
+					registry.GetGlobalRegistry().RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: model}})
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 				}
-				if auth == nil {
-					t.Fatal("pick returned nil auth")
+
+				opts := cliproxyexecutor.Options{Metadata: map[string]any{
+					cliproxyexecutor.DerivedSessionIDMetadataKey: "stable-session",
+				}}
+				pick := func(pickOpts cliproxyexecutor.Options) *Auth {
+					t.Helper()
+					auth, errPick := testCase.pick(manager, ctx, provider, model, pickOpts)
+					if errPick != nil {
+						t.Fatalf("pick: %v", errPick)
+					}
+					if auth == nil {
+						t.Fatal("pick returned nil auth")
+					}
+					return auth
 				}
-				return auth
-			}
 
-			if got := pick(opts); got.ID != highID {
-				t.Fatalf("cold binding = %q, want high priority %q", got.ID, highID)
-			}
+				if got := pick(opts); got.ID != highID {
+					t.Fatalf("cold binding = %q, want high priority %q", got.ID, highID)
+				}
 
-			manager.MarkResult(ctx, Result{
-				AuthID:   highID,
-				Provider: provider,
-				Model:    model,
-				Success:  false,
-				Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+				manager.MarkResult(ctx, Result{
+					AuthID:   highID,
+					Provider: provider,
+					Model:    model,
+					Success:  false,
+					Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+				})
+				if got := pick(opts); got.ID != lowID {
+					t.Fatalf("failover binding = %q, want %q", got.ID, lowID)
+				}
+
+				expireSessionAffinityPriorityModelCooldown(t, manager, highID, model)
+				if got := pick(opts); got.ID != lowID {
+					t.Fatalf("binding after higher-priority recovery = %q, want sticky %q", got.ID, lowID)
+				}
+
+				newSessionOpts := cliproxyexecutor.Options{Metadata: map[string]any{
+					cliproxyexecutor.DerivedSessionIDMetadataKey: "new-session",
+				}}
+				if got := pick(newSessionOpts); got.ID != highID {
+					t.Fatalf("cold binding for new session = %q, want high priority %q", got.ID, highID)
+				}
+
+				manager.MarkResult(ctx, Result{
+					AuthID:   lowID,
+					Provider: provider,
+					Model:    model,
+					Success:  false,
+					Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+				})
+				if got := pick(opts); got.ID != highID {
+					t.Fatalf("binding after bound auth became unavailable = %q, want %q", got.ID, highID)
+				}
 			})
-			if got := pick(opts); got.ID != lowID {
-				t.Fatalf("failover binding = %q, want %q", got.ID, lowID)
-			}
-
-			expireSessionAffinityPriorityModelCooldown(t, manager, highID, model)
-			if got := pick(opts); got.ID != lowID {
-				t.Fatalf("binding after higher-priority recovery = %q, want sticky %q", got.ID, lowID)
-			}
-
-			newSessionOpts := cliproxyexecutor.Options{Metadata: map[string]any{
-				cliproxyexecutor.DerivedSessionIDMetadataKey: "new-session",
-			}}
-			if got := pick(newSessionOpts); got.ID != highID {
-				t.Fatalf("cold binding for new session = %q, want high priority %q", got.ID, highID)
-			}
-
-			manager.MarkResult(ctx, Result{
-				AuthID:   lowID,
-				Provider: provider,
-				Model:    model,
-				Success:  false,
-				Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
-			})
-			if got := pick(opts); got.ID != highID {
-				t.Fatalf("binding after bound auth became unavailable = %q, want %q", got.ID, highID)
-			}
-		})
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -205,6 +206,9 @@ func TestQuotaReserveStagesAcrossStrategies(t *testing.T) {
 				name  string
 				specs []reserveSpec
 				want  int
+				// tier marks a case that relies on the priority tier: the pipeline no
+				// longer applies it implicitly, so it runs there as {reserves, priority}.
+				tier bool
 			}{
 				{name: "normal before soft1", specs: []reserveSpec{
 					{priority: "10", mode: "soft", steps: []int{15, 5}, used: 80},
@@ -225,14 +229,20 @@ func TestQuotaReserveStagesAcrossStrategies(t *testing.T) {
 				{name: "priority within same stage", specs: []reserveSpec{
 					{priority: "0", mode: "soft", steps: []int{15, 5}, used: 90},
 					{priority: "10", mode: "soft", steps: []int{15, 5}, used: 90},
-				}, want: 1},
+				}, want: 1, tier: true},
 				{name: "legacy soft remains level1", specs: []reserveSpec{
 					{mode: "soft", steps: []int{15, 5}, used: 90},
 					{mode: "soft", used: 99},
 				}, want: 1},
 			} {
-				t.Run(fmt.Sprintf("%T/mixed=%t/%s", newSelector(), mixed, tt.name), func(t *testing.T) {
-					manager, accounts, model := reserveTestManager(t, newSelector(), tt.specs)
+				selector := newSelector()
+				if _, pipeline := selector.(*PipelineSelector); pipeline && tt.tier {
+					selector = NewPipelineSelector(func() config.SelectionConfig {
+						return config.SelectionConfig{Primary: config.SelectionReserves, Tiebreak: config.SelectionPriority}
+					})
+				}
+				t.Run(fmt.Sprintf("%s/mixed=%t/%s", selectorName(selector), mixed, tt.name), func(t *testing.T) {
+					manager, accounts, model := reserveTestManager(t, selector, tt.specs)
 					for range 3 {
 						selected, errPick := reservePick(manager, model, "", mixed)
 						if errPick != nil || selected == nil || selected.ID != accounts[tt.want].ID {
@@ -248,7 +258,7 @@ func TestQuotaReserveStagesAcrossStrategies(t *testing.T) {
 func TestQuotaReserveStagesKeepBoundAndPinnedSessions(t *testing.T) {
 	for _, newSelector := range reserveSelectors() {
 		for _, mixed := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%T/mixed=%t", newSelector(), mixed), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/mixed=%t", selectorName(newSelector()), mixed), func(t *testing.T) {
 				selector := NewSessionAffinitySelector(newSelector())
 				t.Cleanup(selector.Stop)
 				manager, accounts, model := reserveTestManager(t, selector, []reserveSpec{

@@ -2881,10 +2881,23 @@ func TestServiceApplyConfigRuntimePreservesSelectorForUnchangedRouting(t *testin
 		t.Fatalf("stale same-routing selector = %p, want original %p", got, initialSelector)
 	}
 
-	changed := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+	// The strategy only derives the pipeline selection, which is read at Pick time.
+	strategyOnly := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
 		Strategy:           "round-robin",
 		SessionAffinity:    true,
 		SessionAffinityTTL: "1h",
+	}})
+	if !service.applyConfigRuntime(context.Background(), strategyOnly, false) {
+		t.Fatal("strategy-only config runtime apply failed")
+	}
+	if got := manager.Selector(); got != initialSelector {
+		t.Fatalf("strategy-only selector = %p, want original %p", got, initialSelector)
+	}
+
+	changed := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:           "round-robin",
+		SessionAffinity:    true,
+		SessionAffinityTTL: "2h",
 	}})
 	if !service.applyConfigRuntime(context.Background(), changed, false) {
 		t.Fatal("changed-routing config runtime apply failed")
@@ -2903,7 +2916,7 @@ func TestServiceApplyConfigRuntimePreservesSelectorForUnchangedRouting(t *testin
 		Routing: internalconfig.RoutingConfig{
 			Strategy:           "round-robin",
 			SessionAffinity:    true,
-			SessionAffinityTTL: "1h",
+			SessionAffinityTTL: "2h",
 		},
 		UsageStatisticsEnabled: false,
 	})
