@@ -76,12 +76,18 @@ send `PATCH /v8/management/config/routing` with:
 }
 ```
 
-The selector first applies availability, model eligibility, quota reserves (see
-below), and manual credential priority. Within the highest available priority tier it chooses the earliest
-future reset of a shared subscription window with remaining quota: Codex primary
-and secondary windows, or Claude five-hour and seven-day windows. Equal reset
-times use stable credential ordering. Unknown, malformed, exhausted, and expired
-observations do not provide a ranking; when no candidate has a usable reset, the
+Without an explicit `routing.selection`, `strategy` only feeds the derived
+selection `{primary: reserves, tiebreak: <strategy>}` (see
+[Per-key routing profiles and selection pipeline](#per-key-routing-profiles-and-selection-pipeline)).
+For `earliest-reset` the selector first applies availability, model eligibility,
+and quota reserves (see below) across every credential priority tier. It then
+chooses the earliest future reset of a shared subscription window with remaining
+quota: Codex primary and secondary windows, or Claude five-hour and seven-day
+windows. Manual credential priority applies only when `priority` is one of the
+selection slots, for example `{primary: priority, tiebreak: earliest-reset}`.
+Equal reset times rotate round-robin. Unknown, malformed, exhausted, and expired
+observations do not provide a ranking; credentials without a usable reset are
+skipped only while another candidate has one, and when no candidate has one the
 selector uses round-robin. Other providers use the same round-robin fallback.
 Model-specific additional limits, code-review limits, and paid overage do not
 influence this strategy. Existing quota cooldowns still govern availability.
@@ -89,8 +95,10 @@ influence this strategy. Existing quota cooldowns still govern availability.
 Established sessions keep their credential even when another account gains an
 earlier reset or higher manual priority. An unavailable, disabled, or removed
 credential triggers failover. The affinity TTL measures inactivity and refreshes
-on access; bindings are held in memory and are lost on restart or changes to the
-strategy or affinity settings. Stable client session IDs give the most reliable affinity;
+on access; bindings are held in memory and are lost on restart, when session
+affinity is switched on or off for every profile at once, or when
+`session-affinity-ttl` or `session-affinity-subagents` changes. Strategy,
+selection, and preference changes keep them. Stable client session IDs give the most reliable affinity;
 content-based inference remains available for clients without them. Affinity
 preserves the account choice but cannot guarantee an upstream cache hit.
 
@@ -107,13 +115,16 @@ To prefer a particular subscription for new threads, use its `auth_index` from
 ```
 
 Send this body to `PATCH /v8/management/config/routing`. A usable preferred
-account takes precedence over automatic ordering and numeric credential priority.
-Existing session bindings remain intact when preferences change or are cleared.
-Unavailable, disabled, removed, or model-ineligible preferred accounts, and
-preferred accounts below their quota reserve, fall back to the configured strategy. With affinity disabled, preferences apply to each
-request. To restore automatic selection for one provider, patch its value to
-`null`; to clear both, patch `preferred-accounts` to `null`. Other providers are
-not supported by this setting. Home and plugin schedulers remain authoritative.
+account takes precedence over automatic ordering, numeric credential priority,
+and soft quota reserve levels: it is taken even at soft levels 1-3. Existing
+session bindings remain intact when preferences change or are cleared.
+Unavailable, disabled, removed, model-ineligible, or hard-reserved preferred
+accounts fall back to the configured selection. With affinity disabled,
+preferences apply to each request. To restore automatic selection for one
+provider, patch its value to `null`; to clear both, patch `preferred-accounts` to
+`null`. Other providers are not supported by this setting. These fields form the
+shared profile; a client key can replace them with its own profile. Home and
+plugin schedulers remain authoritative.
 
 `GET /v8/management/routing/activity` returns
 `{"accounts":[{"auth_index":"...","provider":"codex","last_selected_at":"2026-10-02T12:00:00Z"}]}`.
@@ -138,6 +149,242 @@ standalone CLIProxyAPI. Home mode uses a separate control-plane selector and
 disables these local management endpoints. CLIProxyAPIHome needs corresponding
 selector, quota observation, and configuration support before using this strategy
 in a cluster.
+
+### Per-key routing profiles and selection pipeline
+
+Every client key in `access.api-keys` can have its own routing profile. A profile
+has four stages, applied in this order to each request:
+
+1. **Sticky session** (`session-affinity`): a session already bound to a
+   credential keeps it while it stays usable.
+2. **Preferred subscription** (`preferred-accounts`): for a new selection, the
+   preferred `claude` or `codex` credential is taken when it is usable.
+3. **Pool strategy** (`selection`): `primary`, then `tiebreak`, choose among the
+   remaining credentials.
+4. **Claude -> Codex fallback** (`claude-fallback`): the Codex leg of a failed or
+   redirected Claude request runs stages 1-3 again with the same key's Codex
+   preference and selection.
+
+A key without a profile uses the shared profile: the global
+`routing.session-affinity`, `routing.preferred-accounts`, `routing.selection`, and
+`routing.claude-fallback` fields. A key with a profile uses it completely. Nothing
+is inherited from the shared fields: an omitted block means off or empty, and an
+omitted `selection` means `{primary: reserves, tiebreak: round-robin}`.
+
+```yaml
+routing:
+  session-affinity: true
+  session-affinity-ttl: 24h
+  preferred-accounts: {claude: "claude-account-index", codex: "codex-account-index"}
+  selection: {primary: reserves, tiebreak: earliest-reset}
+  claude-fallback: {enabled: true, mode: auto, mappings: [{from: "claude-opus-*", to: "gpt-6-astra"}]}
+  key-profiles:
+    "client-key-a":
+      session-affinity: false
+      preferred-accounts: {claude: "another-claude-index"}
+      selection: {primary: priority, tiebreak: round-robin}
+      claude-fallback: {enabled: true, mode: auto, mappings: [{from: "claude-*", to: "gpt-6-sol"}]}
+```
+
+`key-profiles` is keyed by the exact client key. `session-affinity-ttl` and
+`session-affinity-subagents` stay global and apply to every key.
+
+#### Selection slots
+
+`primary` and `tiebreak` accept the same values. Narrowing criteria keep the best
+group of candidates; pickers choose one credential.
+
+| Value | Kind | Keeps or chooses |
+| --- | --- | --- |
+| `priority` | narrowing | The highest manual credential `priority`. |
+| `reserves` | narrowing | The lowest soft quota reserve level (see [Quota reserve](#quota-reserve-for-shared-subscriptions)). |
+| `earliest-reset` | narrowing | The earliest future reset of a subscription window with remaining quota. |
+| `most-remaining` | narrowing | The highest remaining percentage, taking each credential's most constrained window. |
+| `round-robin` | picker | Rotates through the group. |
+| `weighted-round-robin` | picker | Rotates by credential `weight`; credentials with weight 0 are never chosen. |
+| `fill-first` | picker | Uses the first credential until it becomes unavailable. |
+
+`earliest-reset` and `most-remaining` skip credentials without usable quota data
+only while another candidate has data; otherwise every candidate stays. A picker
+as `primary` makes `tiebreak` inactive. When both slots narrow, or `tiebreak` is
+empty, round-robin chooses among the remaining ties. A `tiebreak` without a
+`primary` is invalid.
+
+A new selection runs this pipeline per provider:
+
+```text
+available = every priority tier; not disabled, cooling down, model-ineligible,
+            or under an active hard quota reserve
+if the profile's preferred credential for the provider is available: use it
+group = available
+for slot in [primary, tiebreak]:
+    narrowing slot: keep the best group
+    picker slot:    choose one credential from the group and stop
+otherwise round-robin chooses from the group
+```
+
+The preferred credential is checked before any soft reserve level, so a key keeps
+consuming its assigned subscription at soft levels 1-3. Only a hard reserve,
+cooldown, disabled status, model ineligibility, or removal moves it to the pool.
+Soft levels rank only the remaining pool and only when `reserves` is one of the
+slots. Manual credential priority applies only when `priority` is one of the slots.
+Executions pinned to a credential, such as Codex websocket continuations, keep
+their credential and ignore preferences, reserves, and selection.
+
+#### Legacy configuration
+
+Without `routing.selection`, the shared selection is derived from `strategy`:
+`{primary: reserves, tiebreak: <strategy>}`, where `strategy` is `round-robin`
+(the default), `weighted-round-robin`, `fill-first`, or `earliest-reset`. A
+configuration without `selection` and `key-profiles` keeps its previous behavior
+with three differences:
+
+- The manual Priority tier no longer applies implicitly; choose `priority` as a
+  slot to keep it, for example `{primary: reserves, tiebreak: priority}` keeps
+  the old reserves-then-priority narrowing before round-robin.
+- Under `earliest-reset`, equal reset times rotate round-robin instead of always
+  choosing the lowest credential ID.
+- A shared preferred account is taken at soft reserve levels 1-3 instead of
+  counting as unavailable.
+
+Changing `strategy`, `selection`, or preferences takes effect on the next request
+and keeps the round-robin position and session bindings.
+
+#### Session affinity per key
+
+The session affinity layer exists while the shared `session-affinity` or any key
+profile's `session-affinity` is true. Each request then follows its own profile.
+A key with `session-affinity: false` neither reads nor writes bindings, even when
+another key binds sessions. Turning affinity on or off for every profile at once,
+for example when the last sticky key profile switches off, rebuilds the selector
+and drops every existing binding. Edits that keep some profile sticky keep the
+bindings. A cold selection for a sticky key runs the full pipeline, including the
+key's preferred account.
+
+#### Reading profiles
+
+`GET /v8/management/routing/profiles` returns the shared profile, every key
+profile in `access.api-keys` order, and the accepted slot values. The response
+contains raw client keys and is sent with `Cache-Control: no-store`.
+
+```json
+{
+  "supported": true,
+  "shared": {
+    "session-affinity": true,
+    "preferred-accounts": {"claude": "claude-account-index"},
+    "selection": {"primary": "reserves", "tiebreak": "earliest-reset"},
+    "claude-fallback": {"enabled": true, "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]}
+  },
+  "keys": [
+    {
+      "key": "client-key-a",
+      "profile": {
+        "session-affinity": false,
+        "preferred-accounts": {"claude": "another-claude-index"},
+        "selection": {"primary": "priority", "tiebreak": "round-robin"},
+        "claude-fallback": {"enabled": true, "mode": "auto", "mappings": [{"from": "claude-*", "to": "gpt-6-sol"}]}
+      }
+    }
+  ],
+  "selection_options": {
+    "narrowing": ["priority", "reserves", "earliest-reset", "most-remaining"],
+    "pickers": ["round-robin", "weighted-round-robin", "fill-first"]
+  }
+}
+```
+
+`shared.selection` and each key's `selection` are effective values: a derived
+legacy selection or the key default is shown instead of an empty object.
+`preferred-accounts` is omitted when empty. `supported` is `false` in Home mode
+and with a scheduler plugin. Take `auth_index` values from
+`GET /v8/management/credentials` and fallback target models from
+`GET /v8/management/routing/claude-fallback`.
+
+#### Writing profiles
+
+Profiles are written through the configuration endpoints. To set the shared
+selection and a key profile, send `PATCH /v8/management/config`:
+
+```json
+{
+  "routing": {
+    "selection": {"primary": "most-remaining", "tiebreak": "weighted-round-robin"},
+    "key-profiles": {
+      "client-key-a": {
+        "session-affinity": true,
+        "preferred-accounts": {"claude": "claude-account-index"},
+        "selection": {"primary": "earliest-reset"}
+      }
+    }
+  }
+}
+```
+
+PATCH merges objects, so other key profiles and the fields a profile body omits
+stay unchanged. To replace one profile completely, use
+`PUT /v8/management/config/routing/key-profiles/<key>` with the full profile; a
+key that contains `/` cannot be a path segment, so send `null` for it and then
+the new profile in two PATCH requests. To delete a profile, patch it to
+`null`; the key then uses the shared profile and the entry is removed from the
+file:
+
+```json
+{"routing": {"key-profiles": {"client-key-a": null}}}
+```
+
+To return to the derived legacy selection, patch `routing.selection` to `null`.
+
+- A profile for a key missing from `access.api-keys` returns `400`
+  `{"error": "unknown_api_key", "count": N}`. The body never contains the key, and
+  the file is not changed. A `null` entry for an unknown key is accepted because
+  it only deletes. An unchanged stale entry already on disk does not block other
+  writes; it is dropped on save.
+- An unsupported slot value, a `tiebreak` without a `primary`, a provider other
+  than `claude` or `codex` in `preferred-accounts`, or an invalid
+  `claude-fallback` block inside a profile returns `422`
+  `{"error": "invalid_config", "message": "..."}`. Messages identify a key profile
+  by the first 12 hex characters of the key's SHA-256, for example
+  `routing.key-profiles.3f2a9c1b7d4e.selection.primary`.
+- On load and hot reload, profiles for keys missing from `access.api-keys` and
+  `null` entries are dropped; a missing key is reported as a warning with its hash
+  prefix.
+
+Profiles follow their key. Removing a key from `access.api-keys` through a
+configuration write drops its profile from the runtime configuration and from
+the file. To rotate a key through the configuration endpoints, send the new key
+in `access.api-keys` and its profile under the new key in the same PATCH; the old
+key's profile is dropped. The legacy `/v0/management/api-keys` list endpoints
+reconcile profiles automatically: `PATCH` with `{"old": "...", "new": "..."}`,
+or an index patch that replaces one key with a new value, moves the profile to
+the new key; `DELETE`, a `PUT` that removes keys, and a patch that overwrites a
+key with one already listed drop the profiles of keys no longer listed. A `PATCH`
+that appends a new key leaves profiles unchanged. Saving always prunes
+`routing.key-profiles` to the current profiles and removes the node when it is
+empty, so a deleted, rotated, or nulled key does not remain in the file. The
+configuration diff in the log reports `routing.selection` changes and the
+`routing.key-profiles` count, or `updated (redacted)`, never keys or profile
+contents.
+
+#### Home mode, plugins, and logging
+
+Key profiles apply to native standalone routing only. Home mode resolves no
+profile and keeps its control-plane selection; it also disables these management
+endpoints. With a scheduler plugin, every request uses the shared profile, so
+global preferences keep applying there, while key profiles and the Claude ->
+Codex fallback do not apply.
+
+Each selection for a key with its own profile writes one info line:
+
+```text
+level=info msg="Routing profile selection" auth_index=claude-account-index provider=claude routing_key=3f2a9c1b7d4e routing_stage=preferred
+```
+
+`routing_key` is the first 12 hex characters of the key's SHA-256; the raw key is
+never logged. `routing_stage` is `sticky` (a bound session reused its credential),
+`preferred`, or `pipeline`. Inside the Codex fallback leg it is `fallback`, and
+`fallback_stage` records which of those stages chose the Codex credential.
+Requests that use the shared profile write no such line.
 
 ### Quota reserve for shared subscriptions
 
@@ -164,21 +411,24 @@ ignored with a warning, and the credential then has no reserve.
 The reserve affects only new selections:
 
 - `hard` excludes the credential.
-- `soft` assigns a reserve level. The lowest available level wins across all
-  credential priority tiers; level 0 means no active reserve. Within the winning
-  level the usual rules apply: a preferred account first, otherwise the highest
-  priority tier, where the configured strategy chooses. The deepest soft level
-  remains eligible as the last resort.
+- `soft` assigns a reserve level; level 0 means no active reserve. A usable
+  preferred account is taken first at any soft level. Otherwise the `reserves`
+  selection slot keeps the lowest available level across all credential priority
+  tiers, and the other slot chooses within it; the derived legacy selection
+  `{reserves, <strategy>}` applies the levels first. A selection without
+  `reserves`, such as `{priority, round-robin}`, ignores soft levels. The deepest
+  soft level remains eligible as the last resort.
 - When every candidate is excluded by a hard reserve or is cooling down, the
   request gets the usual model-cooldown `429`. Its `Retry-After` points to the
   earliest window reset that would make a candidate selectable again.
 
 A session already bound by session affinity keeps its credential after the
 reserve trips, so the session continues. Executions pinned to a credential, such
-as Codex websocket continuations, also ignore the reserve. New sessions are bound elsewhere. A
-preferred account below its reserve counts as unavailable: `hard` excludes it,
-and `soft` allows it only if no eligible account has a lower reserve level. The reserve is only a selection
-filter. It never writes cooldown state.
+as Codex websocket continuations, also ignore the reserve. New sessions are bound
+elsewhere unless the credential is the profile's preferred account under a soft
+reserve. A preferred account under a `hard` reserve counts as unavailable, while a
+`soft` reserve does not block it. The reserve is only a selection filter. It
+never writes cooldown state.
 
 The proxy does not send background probes. Subscription limits are account-wide,
 so upstream rate-limit headers already include usage by other tools, and the next
@@ -263,6 +513,7 @@ retain the corresponding business operation's fields.
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
 | `/routing/activity` | GET | Get each credential's latest actual selection time. |
+| `/routing/profiles` | GET | Get the shared and per-key routing profiles and the selection slot values. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
 | `/observability/logs/errors` | GET | List error-log files. |
 | `/observability/logs/errors/<name>` | GET | Download an error-log file. |

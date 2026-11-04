@@ -131,14 +131,17 @@ routing:
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # earliest-reset prefers the available Codex/Claude account whose shared subscription
-  # quota resets first, within the highest manual priority tier left after quota reserves. It uses quota observations
+  # quota resets first, across all priority tiers after quota reserves; equal resets rotate.
+  # strategy only feeds the derived selection {primary: reserves, tiebreak: <strategy>}
+  # when selection below is absent. It uses quota observations
   # from upstream responses and successful v8 management quota probes. Refresh quotas in
   # the panel to initialize idle accounts. Unknown/past reset times use round-robin when
   # no candidate has a usable future reset; model-specific and paid overage limits are ignored.
   # Combine earliest-reset with session-affinity to keep active threads on their account.
   # Prefer a specific subscription for new threads (credential auth_index from the panel).
-  # Existing affinity bindings are preserved. Unavailable/unsupported accounts fall back
-  # to the configured strategy. Empty map means automatic selection for both providers.
+  # Existing affinity bindings are preserved. The preferred account is taken even at soft
+  # quota reserve levels; unavailable, hard-reserved, or unsupported accounts fall back
+  # to the selection. Empty map means automatic selection for both providers.
   # Native standalone routing only; Home and scheduler plugins own their own selection.
   preferred-accounts: {} # Example: {codex: "auth-index", claude: "auth-index"}
   # Optional Claude -> Codex subscription fallback. Native routing only (not Home/plugins).
@@ -194,8 +197,10 @@ routing:
   #   "quota_reserve": {"percent": 25, "mode": "soft"}
   # percent is 1..99 and applies to every subscription window (Codex primary/secondary,
   # Claude 5h/7d). Once any window has less than percent remaining, new selections skip
-  # the credential: hard excludes it, and soft (default) uses it only when no credential
-  # outside its reserve is available in any priority tier. Existing affinity bindings and
+  # the credential: hard excludes it, and soft (default) ranks it by reserve level when the
+  # reserves selection slot is active, so it is used only when no credential outside its
+  # reserve is available in any priority tier. A preferred account is still taken at soft
+  # levels. Existing affinity bindings and
   # pinned executions keep their credential. Uses recorded quota observations only; no
   # background probes. Scheduler plugins receive candidates with the reserve applied.
   # Enable universal session-sticky routing for all clients.
@@ -204,9 +209,9 @@ routing:
   # execution or derived session identity, and the existing first-message hash fallback.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   # An established binding outranks credential priority: once a session is bound, that
-  # credential is kept even if a higher-priority credential recovers. Credential priority
-  # applies to cold bindings, requests without a session, and post-failover rebinding
-  # when no available preferred account is configured.
+  # credential is kept even if a higher-priority credential recovers. Cold bindings,
+  # requests without a session, and post-failover rebinding use the preferred account
+  # when available, otherwise the selection (credential priority only via the priority slot).
   # The session affinity layer exists while this flag or any key profile's
   # session-affinity is true; each request then follows its own profile's flag, and a
   # key with session-affinity: false neither reads nor writes bindings. The TTL and

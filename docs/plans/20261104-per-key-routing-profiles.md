@@ -222,9 +222,11 @@
 - Home check: `pickNext`/`pickNextLegacy`/`pickNextMixedLegacy` route to `pickNextViaHome` before `ensureRoutingProfile`, `resolveRoutingProfile` returns `nil` under Home, `ClaudeFallbackSupported` is false there, `GET /routing/profiles` reports `supported=false`, and `forceHomeRuntimeConfig` clears `APIKeys`, so key profiles never apply in Home mode; no CLIProxyAPIHome change is needed
 
 ### Task 10: [Final] Update documentation
-- [ ] add "Per-key routing profiles and selection pipeline" to `docs/management-api-v8.md` next to "Subscription priority and session affinity" (line 66): the four stages, the slot values and their semantics, the preferred-before-soft rule, the legacy derivation and the earliest-reset tie change, the full-copy rule, the `GET /v8/management/routing/profiles` payload, the config PATCH examples including `null` deletion, the 400 and 422 cases, the key rotation and pruning rules, the binding reset on a sticky toggle, the Home-mode note, and the log line
-- [ ] update the "Subscription priority and session affinity" and "Quota reserve for shared subscriptions" sections where they describe the old hidden order
-- [ ] confirm `config.example.yaml` matches the final field names and defaults
+- [x] add "Per-key routing profiles and selection pipeline" to `docs/management-api-v8.md` next to "Subscription priority and session affinity" (line 66): the four stages, the slot values and their semantics, the preferred-before-soft rule, the legacy derivation and the earliest-reset tie change, the full-copy rule, the `GET /v8/management/routing/profiles` payload, the config PATCH examples including `null` deletion, the 400 and 422 cases, the key rotation and pruning rules, the binding reset on a sticky toggle, the Home-mode note, and the log line
+- [x] update the "Subscription priority and session affinity" and "Quota reserve for shared subscriptions" sections where they describe the old hidden order
+- [x] confirm `config.example.yaml` matches the final field names and defaults
+- ➕ the new section sits between "Subscription priority and session affinity" and "Quota reserve for shared subscriptions"; `/routing/profiles` was added to the operational endpoints table; the stale `config.example.yaml` comments on `earliest-reset`, `preferred-accounts`, the soft reserve, and cold bindings now describe the pipeline (field names and defaults already matched; the file and the documented YAML example load cleanly)
+- ⚠️ the docs describe the api-key list reconciliation under `/v0/management/api-keys`, where those handlers are actually registered (the plan text said `/v8/management/api-keys`); through the v8 config endpoints, removing a key drops its profile and a rotation sends the new key and its profile in one PATCH
 
 ## Technical Details
 - **Config** (`routing:`):
