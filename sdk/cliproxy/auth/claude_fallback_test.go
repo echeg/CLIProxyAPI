@@ -1,0 +1,235 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"reflect"
+	"testing"
+	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+)
+
+type claudeFallbackExecutor struct {
+	ProviderExecutor
+	provider string
+	run      func(*Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	stream   func(*Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error)
+}
+
+func (e *claudeFallbackExecutor) Identifier() string { return e.provider }
+func (e *claudeFallbackExecutor) Execute(_ context.Context, a *Auth, r cliproxyexecutor.Request, o cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return e.run(a, r, o)
+}
+func (e *claudeFallbackExecutor) CountTokens(ctx context.Context, a *Auth, r cliproxyexecutor.Request, o cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return e.Execute(ctx, a, r, o)
+}
+func (e *claudeFallbackExecutor) ExecuteStream(_ context.Context, a *Auth, r cliproxyexecutor.Request, o cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if e.stream != nil {
+		return e.stream(a, r, o)
+	}
+	res, err := e.run(a, r, o)
+	if err != nil {
+		return nil, err
+	}
+	return fallbackTestStream(cliproxyexecutor.StreamChunk{Payload: res.Payload}), nil
+}
+func fallbackTestStream(chunks ...cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+	ch := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, c := range chunks {
+		ch <- c
+	}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}
+}
+func fallbackTestManager(t *testing.T, mode string, primaryErr error) (*Manager, *[]string, *claudeFallbackExecutor, *claudeFallbackExecutor) {
+	t.Helper()
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.SetRetryConfig(0, 0, 0)
+	m.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeFallback: internalconfig.ClaudeFallbackConfig{Enabled: mode != "off", Mode: mode, Mappings: []internalconfig.ClaudeFallbackMapping{{From: "claude-opus-*", To: "gpt-6-astra"}}}}})
+	var calls []string
+	primary := &claudeFallbackExecutor{provider: "claude", run: func(a *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+		calls = append(calls, a.Provider)
+		return cliproxyexecutor.Response{Payload: []byte("primary")}, primaryErr
+	}}
+	fallback := &claudeFallbackExecutor{provider: "codex", run: func(a *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+		calls = append(calls, a.Provider)
+		if req.Model != "gpt-6-astra" || a.AuthKind() != AuthKindOAuth {
+			t.Errorf("bad fallback selection: %s/%s", req.Model, a.AuthKind())
+		}
+		if opts.Metadata[cliproxyexecutor.RequestedModelMetadataKey] != "claude-opus-5" {
+			t.Error("lost requested model")
+		}
+		return cliproxyexecutor.Response{Payload: []byte("fallback")}, nil
+	}}
+	m.RegisterExecutor(primary)
+	m.RegisterExecutor(fallback)
+	for i, provider := range []string{"claude", "claude", "codex"} {
+		id := t.Name() + string(rune('a'+i))
+		model := "claude-opus-5"
+		if provider == "codex" {
+			model = "gpt-6-astra"
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: provider, Status: StatusActive, Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth}}); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+	}
+	return m, &calls, primary, fallback
+}
+
+func TestClaudeFallbackModesAndFailures(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, path := range []string{"execute", "count", "stream"} {
+		for _, tc := range []struct {
+			name, mode string
+			err        error
+			want       []string
+		}{
+			{"healthy", "auto", nil, []string{"claude"}},
+			{"quota", "auto", &Error{HTTPStatus: 429}, []string{"claude", "claude", "codex"}},
+			{"overload", "auto", &Error{HTTPStatus: 529}, []string{"claude", "claude", "codex"}},
+			{"network", "auto", io.ErrUnexpectedEOF, []string{"claude", "claude", "codex"}},
+			{"bad request", "auto", &Error{HTTPStatus: 400, Message: `{"error":{"type":"invalid_request_error","message":"invalid request"}}`}, []string{"claude"}},
+			{"canceled", "auto", context.Canceled, []string{"claude"}},
+			{"disabled", "off", &Error{HTTPStatus: 429}, []string{"claude", "claude"}},
+			{"forced", "always", nil, []string{"codex"}},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				m, calls, _, _ := fallbackTestManager(t, tc.mode, tc.err)
+				req := cliproxyexecutor.Request{Model: "claude-opus-5"}
+				var err error
+				switch path {
+				case "execute":
+					_, err = m.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+				case "count":
+					_, err = m.ExecuteCount(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+				case "stream":
+					var result *cliproxyexecutor.StreamResult
+					result, err = m.ExecuteStream(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{Stream: true})
+					if err == nil {
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								err = chunk.Err
+							}
+						}
+					}
+				}
+				if path == "stream" && tc.name == "canceled" {
+					tc.want = []string{"claude", "claude"}
+				}
+				if !reflect.DeepEqual(*calls, tc.want) {
+					t.Fatalf("calls=%v, want %v; err=%v", *calls, tc.want, err)
+				}
+				wantSuccess := tc.err == nil || tc.want[len(tc.want)-1] == "codex"
+				if (err == nil) != wantSuccess {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestClaudeFallbackStreamingBoundary(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		t.Run(map[bool]string{false: "bootstrap", true: "started"}[started], func(t *testing.T) {
+			m, calls, primary, _ := fallbackTestManager(t, "auto", nil)
+			primary.stream = func(a *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+				*calls = append(*calls, a.Provider)
+				chunks := []cliproxyexecutor.StreamChunk{}
+				if started {
+					chunks = append(chunks, cliproxyexecutor.StreamChunk{Payload: []byte("data: partial\n\n")})
+				}
+				chunks = append(chunks, cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: 503}})
+				return fallbackTestStream(chunks...), nil
+			}
+			result, err := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, cliproxyexecutor.Options{Stream: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body string
+			var streamErr error
+			for chunk := range result.Chunks {
+				body += string(chunk.Payload)
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if started {
+				if body != "data: partial\n\n" || streamErr == nil || len(*calls) != 1 {
+					t.Fatalf("replayed started stream: %q %v %v", body, streamErr, *calls)
+				}
+			} else if body != "fallback" || streamErr != nil {
+				t.Fatalf("bootstrap fallback: %q %v", body, streamErr)
+			}
+		})
+	}
+}
+
+func TestClaudeFallbackPreservesContextAndReturnsToPrimary(t *testing.T) {
+	m, calls, primary, fallback := fallbackTestManager(t, "auto", io.ErrUnexpectedEOF)
+	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"continue"}],"tools":[{"name":"Read"}]}`)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload, Headers: http.Header{"X-Session-Id": []string{"existing-session"}}, Metadata: map[string]any{cliproxyexecutor.AuthSelectionModelMetadataKey: "claude-opus-5"}}
+	fallback.run = func(_ *Auth, r cliproxyexecutor.Request, o cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+		*calls = append(*calls, "codex")
+		if r.Model != "gpt-6-astra" || string(r.Payload) != string(payload) || string(o.OriginalRequest) != string(payload) || o.SourceFormat != opts.SourceFormat || o.Headers.Get("X-Session-Id") != "existing-session" {
+			t.Fatal("lost conversation/protocol")
+		}
+		if _, exists := o.Metadata[cliproxyexecutor.AuthSelectionModelMetadataKey]; exists {
+			t.Fatal("source selection override survived")
+		}
+		return cliproxyexecutor.Response{}, nil
+	}
+	req := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+	if _, err := m.Execute(context.Background(), []string{"claude"}, req, opts); err != nil {
+		t.Fatal(err)
+	}
+	if opts.Metadata[cliproxyexecutor.AuthSelectionModelMetadataKey] != "claude-opus-5" {
+		t.Fatal("mutated original options")
+	}
+	primary.run = func(_ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+		*calls = append(*calls, "claude")
+		return cliproxyexecutor.Response{}, nil
+	}
+	if _, err := m.Execute(context.Background(), []string{"claude"}, req, opts); err != nil {
+		t.Fatal(err)
+	}
+	if (*calls)[len(*calls)-1] != "claude" {
+		t.Fatal("did not recover primary")
+	}
+}
+
+func TestClaudeFallbackCooldownAndProtection(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, calls, _, _ := fallbackTestManager(t, "auto", nil)
+	retry := time.Hour
+	for _, a := range m.List() {
+		if a.Provider == "claude" {
+			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: a.Provider, Model: "claude-opus-5", Error: &Error{HTTPStatus: 429}, RetryAfter: &retry})
+		}
+	}
+	if _, err := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(*calls, []string{"codex"}) {
+		t.Fatal(*calls)
+	}
+	_, target := m.claudeFallbackTarget(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5(high)"}, cliproxyexecutor.Options{})
+	if target != "gpt-6-astra(high)" {
+		t.Fatal(target)
+	}
+	for _, opts := range []cliproxyexecutor.Options{{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: "probe-auth"}}} {
+		if _, target := m.claudeFallbackTarget(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, opts); target != "" {
+			t.Fatal("pinned request rerouted")
+		}
+	}
+	if shouldFallbackClaude(errors.New("unknown internal error")) || shouldFallbackClaude(context.DeadlineExceeded) {
+		t.Fatal("unclassified error rerouted")
+	}
+}

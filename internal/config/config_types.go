@@ -353,6 +353,9 @@ type QuotaExceeded struct {
 
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
+	// ClaudeFallback routes configured Claude models to Codex subscriptions.
+	ClaudeFallback ClaudeFallbackConfig `yaml:"claude-fallback,omitempty" json:"claude-fallback,omitempty"`
+
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "earliest-reset".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`

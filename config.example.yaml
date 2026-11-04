@@ -141,6 +141,23 @@ routing:
   # to the configured strategy. Empty map means automatic selection for both providers.
   # Native standalone routing only; Home and scheduler plugins own their own selection.
   preferred-accounts: {} # Example: {codex: "auth-index", claude: "auth-index"}
+  # Optional Claude -> Codex subscription fallback. Native routing only (not Home/plugins).
+  # auto: use Codex after a failed Claude credential round;
+  # always: immediately route matching Claude requests to Codex.
+  # auto handles quota/cooldown, unavailable credentials, 401/403/408/5xx and
+  # transient connection failures, never invalid requests or client cancellation.
+  # Exact source IDs win over trailing-* prefixes. Unmapped models stay on Claude.
+  # A started response is never replayed. Later requests try Claude again in auto mode.
+  claude-fallback:
+    enabled: false
+    mode: auto
+    mappings:
+      - from: "claude-opus-*"
+        to: "gpt-6-astra"
+      - from: "claude-sonnet-*"
+        to: "gpt-6-sol"
+      - from: "claude-fable-*"
+        to: "gpt-6-astra"
   # Codex/Claude OAuth credentials can keep part of their subscription quota for tools
   # outside the proxy. Add a top-level "quota_reserve" next to "priority" in the auth JSON:
   #   "quota_reserve": {"percent": 25, "mode": "soft"}
