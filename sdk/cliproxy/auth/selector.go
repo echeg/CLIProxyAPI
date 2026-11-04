@@ -502,7 +502,7 @@ type prevalidatedAuthCandidatesKey struct{}
 // reserve applies across every tier before manual preference or tier narrowing.
 func getSelectorAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	reserve := !quotaReserveSkipped(ctx)
-	if len(routingProfileFromContext(ctx).preferredAccounts()) == 0 {
+	if pickerOnly(ctx) || len(routingProfileFromContext(ctx).preferredAccounts()) == 0 {
 		return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false, reserve)
 	}
 	available, errAvailable := getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, true, reserve)
@@ -531,7 +531,76 @@ func newSelectionAuths(ctx context.Context, available []*Auth, provider, model s
 	return preferredOrHighestPriorityAuths(ctx, selectable), nil
 }
 
+// availableForPipeline returns the pipeline candidate set for a new selection: every
+// priority tier, with blocked credentials and credentials under an active hard reserve
+// removed, no soft reserve filter and no tier narrowing, sorted by ID. A selection that
+// skips the quota reserve keeps hard-reserved credentials. When nothing remains it
+// reports the same errors as getAvailableAuthsWithPriorityMode, with hard-reserve
+// recovery folded into Retry-After.
+func availableForPipeline(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+	reserve := !quotaReserveSkipped(ctx)
+	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now, reserve)
+	if reserve {
+		for priority, bucket := range availableByPriority {
+			kept := make([]*Auth, 0, len(bucket))
+			for _, candidate := range bucket {
+				until, held := hardQuotaReserveUntil(candidate, now)
+				if !held {
+					kept = append(kept, candidate)
+					continue
+				}
+				cooldownCount++
+				if until.After(now) && (earliest.IsZero() || until.Before(earliest)) {
+					earliest = until
+				}
+			}
+			if len(kept) == 0 {
+				delete(availableByPriority, priority)
+			} else {
+				availableByPriority[priority] = kept
+			}
+		}
+	}
+	if len(availableByPriority) == 0 {
+		if cooldownCount == len(auths) && !earliest.IsZero() {
+			providerForError := provider
+			if providerForError == "mixed" {
+				providerForError = ""
+			}
+			return nil, newModelCooldownError(model, providerForError, earliest.Sub(now))
+		}
+		return nil, newAuthUnavailableError(earliest, now)
+	}
+	return availableAuthsFromPriorityBuckets(availableByPriority, true), nil
+}
+
+// pickerOnlyContextKey marks a selection delegated by the pipeline to a picker: the
+// candidates are final, so the picker must not reapply reserve, tier, or preference
+// narrowing.
+type pickerOnlyContextKey struct{}
+
+func withPickerOnly(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, pickerOnlyContextKey{}, true)
+}
+
+func pickerOnly(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	only, _ := ctx.Value(pickerOnlyContextKey{}).(bool)
+	return only
+}
+
 func getSelectorAvailableAuthsWithPriorityMode(ctx context.Context, auths []*Auth, provider, model string, now time.Time, allPriorities, reserve bool) ([]*Auth, error) {
+	if pickerOnly(ctx) && len(auths) > 0 {
+		return auths, nil
+	}
 	if ctx != nil {
 		if validated, _ := ctx.Value(prevalidatedAuthCandidatesKey{}).(bool); validated && len(auths) > 0 {
 			// The manager already resolved each credential's upstream model and supplied
