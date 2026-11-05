@@ -160,10 +160,10 @@
 - [x] run `gofmt -w` and `go test ./internal/api/handlers/management/` - must pass before task 4
 
 ### Task 4: Register the v8 route and document it
-- [ ] add `v8.GET("/observability/logs/storage", s.mgmt.GetLogStorage)` in `internal/api/server_management_v8.go` next to the other `observability/logs` routes
-- [ ] in `internal/api/server_management_v8_test.go`, add `"/v8/management/observability/logs/storage"` to the access-control request loop (line 44) and `"GET /v8/management/observability/logs/storage"` to the registration list (lines 90-105)
-- [ ] add the endpoint row to the endpoint table in `docs/management-api-v8.md` (around line 555), with the response fields, a note that bytes are logical file lengths, and a note that a scan is not atomic while logging continues
-- [ ] run `gofmt -w` and `go test ./internal/api/` - must pass before task 5
+- [x] add `v8.GET("/observability/logs/storage", s.mgmt.GetLogStorage)` in `internal/api/server_management_v8.go` next to the other `observability/logs` routes
+- [x] in `internal/api/server_management_v8_test.go`, add `"/v8/management/observability/logs/storage"` to the access-control request loop (line 44) and `"GET /v8/management/observability/logs/storage"` to the registration list (lines 90-105)
+- [x] add the endpoint row to the endpoint table in `docs/management-api-v8.md` (around line 555), with the response fields, a note that bytes are logical file lengths, and a note that a scan is not atomic while logging continues
+- [x] run `gofmt -w` and `go test ./internal/api/` - must pass before task 5
 
 ### Task 5: Verify acceptance criteria
 - [ ] verify every item in Overview and Decisions is implemented: shared logs directory, route, fields (no `directory_present`), missing-directory behavior, and capped semantics matching `isLogFileName`

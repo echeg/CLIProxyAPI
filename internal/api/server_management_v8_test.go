@@ -41,7 +41,7 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
 			}
 			cfg.Home.Enabled = tc.home
 			cfg.Plugins.Dir = filepath.Dir(path)
-			for _, route := range []string{"/v0/management/config", "/v8/management/config", "/v0/management/plugins", "/v8/management/plugins", "/v8/management/routing/activity", "/v8/management/routing/claude-fallback", "/v8/management/routing/profiles"} {
+			for _, route := range []string{"/v0/management/config", "/v8/management/config", "/v0/management/plugins", "/v8/management/plugins", "/v8/management/routing/activity", "/v8/management/routing/claude-fallback", "/v8/management/routing/profiles", "/v8/management/observability/logs/storage"} {
 				// Each route gets independent failed-login state so this access-control
 				// test cannot accidentally trigger the management brute-force ban.
 				h := management.NewHandler(cfg, path, coreauth.NewManager(nil, nil, nil))
@@ -97,6 +97,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
 		"GET /v8/management/routing/activity",
 		"GET /v8/management/routing/claude-fallback",
 		"GET /v8/management/routing/profiles",
+		"GET /v8/management/observability/logs/storage",
 		"GET /v8/management/plugins/:id/quota", "POST /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/quota",
 		"POST /v8/management/plugins/store/:id/install", "DELETE /v8/management/plugins/:id",
 	} {

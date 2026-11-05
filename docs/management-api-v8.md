@@ -556,6 +556,7 @@ retain the corresponding business operation's fields.
 | `/observability/logs/errors` | GET | List error-log files. |
 | `/observability/logs/errors/<name>` | GET | Download an error-log file. |
 | `/observability/logs/requests/<id>` | GET | Get a request log. |
+| `/observability/logs/storage` | GET | Get logs directory disk usage and the related logging settings. |
 | `/observability/usage/api-keys` | GET | Get API-key usage. |
 | `/observability/usage/queue` | GET | Get queued usage events. |
 | `/credentials` | GET, POST, DELETE | List, upload, or delete credential files. |
@@ -574,6 +575,44 @@ retain the corresponding business operation's fields.
 | `/plugins/store` | GET | List the plugin store. |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
+
+### Logs directory storage
+
+`GET /observability/logs/storage` scans the logs directory that the request
+logger, `main.log`, and the `logs-max-total-size-mb` cleaner share. It works
+whether or not `logging-to-file` is enabled. Example response:
+
+```json
+{
+  "total_bytes": 3456789012,
+  "total_files": 18234,
+  "capped_bytes": 3401234567,
+  "capped_files": 18220,
+  "oldest_modified_at": "2026-11-05T08:00:00Z",
+  "newest_modified_at": "2026-11-05T12:56:16Z",
+  "limit_mb": 10000,
+  "request_log": true,
+  "logging_to_file": true
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `total_bytes`, `total_files` | Every regular file in the directory tree, including subdirectories. Symlinks are not counted. |
+| `capped_bytes`, `capped_files` | Top-level `*.log` and `*.log.gz` files: the set `logs-max-total-size-mb` is enforced against. It includes the protected `main.log`. |
+| `oldest_modified_at`, `newest_modified_at` | Oldest and newest modification time of the counted files, in UTC RFC 3339. `null` when no file was counted. |
+| `limit_mb` | Effective `logs-max-total-size-mb`; `0` means no cap. |
+| `request_log` | Effective `request-log`. |
+| `logging_to_file` | Effective `logging-to-file`. |
+
+- Bytes are logical file lengths, the same values the cleaner sums. They are
+  not allocated disk blocks, so they can differ from `du`.
+- A missing logs directory returns 200 with zero counts and `null` times.
+- The scan is not atomic. While logging continues, files can be written or
+  removed during the scan, so two calls can return different values.
+- Entries below the logs directory that cannot be read are skipped. A logs
+  directory path that cannot be read, or is not a directory, returns 500 with
+  an `error` field.
 
 ## OAuth
 
