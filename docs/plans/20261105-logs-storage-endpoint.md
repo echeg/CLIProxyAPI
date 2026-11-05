@@ -124,10 +124,10 @@
 ## Implementation Steps
 
 ### Task 1: Put request logs in the shared logs directory
-- [ ] in `internal/api/server_options.go` `defaultRequestLoggerFactory`, convert `logging.ResolveLogDirectory(cfg)` to an absolute path with `filepath.Abs` (fall back to the raw value if `Abs` fails) before passing it to `NewFileRequestLogger`, so the config-dir rebasing no longer applies; leave `NewFileRequestLogger` and the SDK constructors unchanged
-- [ ] add a test in `internal/api/server_test.go`: `t.Chdir` into temp dir A that contains a writable `logs/` directory, put the config at `B/config.yaml`, clear `WRITABLE_PATH`/`writable_path` with `t.Setenv`, write a forced error request log through the factory's logger, and assert that it lands in `A/logs` and not in `B/logs`
-- [ ] confirm `TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory` (auth-dir fallback) still passes unchanged
-- [ ] run `gofmt -w` and `go test ./internal/api/ -run 'RequestLogger'` - must pass before task 2
+- [x] in `internal/api/server_options.go` `defaultRequestLoggerFactory`, convert `logging.ResolveLogDirectory(cfg)` to an absolute path with `filepath.Abs` (fall back to the raw value if `Abs` fails) before passing it to `NewFileRequestLogger`, so the config-dir rebasing no longer applies; leave `NewFileRequestLogger` and the SDK constructors unchanged
+- [x] add a test in `internal/api/server_test.go`: `t.Chdir` into temp dir A that contains a writable `logs/` directory, put the config at `B/config.yaml`, clear `WRITABLE_PATH`/`writable_path` with `t.Setenv`, write a forced error request log through the factory's logger, and assert that it lands in `A/logs` and not in `B/logs`
+- [x] confirm `TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory` (auth-dir fallback) still passes unchanged
+- [x] run `gofmt -w` and `go test ./internal/api/ -run 'RequestLogger'` - must pass before task 2
 
 ### Task 2: Add the logs directory scan helper
 - [ ] create `internal/logging/log_dir_stats.go` with a `LogDirStats` struct (`TotalBytes`, `TotalFiles`, `CappedBytes`, `CappedFiles int64`, `Oldest`, `Newest time.Time`) and `ScanLogDir(dir string) (LogDirStats, error)`

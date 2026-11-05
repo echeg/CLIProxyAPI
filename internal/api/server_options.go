@@ -34,7 +34,13 @@ type ServerOption func(*serverOptionConfig)
 
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
+	// Use the working-directory-relative logs directory shared with the cleaner,
+	// main.log, and the management handlers. Passing an absolute path keeps
+	// NewFileRequestLogger from rebasing it onto the config directory.
 	logsDir := logging.ResolveLogDirectory(cfg)
+	if absLogsDir, errAbs := filepath.Abs(logsDir); errAbs == nil {
+		logsDir = absLogsDir
+	}
 	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
 	return logger

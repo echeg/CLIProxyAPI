@@ -2703,6 +2703,78 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	}
 }
 
+func TestDefaultRequestLoggerFactory_UsesWorkingDirectoryLogsNotConfigDir(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+
+	workDir := t.TempDir()
+	workLogsDir := filepath.Join(workDir, "logs")
+	if errMkdir := os.MkdirAll(workLogsDir, 0o755); errMkdir != nil {
+		t.Fatalf("failed to create working logs dir: %v", errMkdir)
+	}
+	t.Chdir(workDir)
+
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "config.yaml")
+
+	cfg := &proxyconfig.Config{
+		SDKConfig:         proxyconfig.SDKConfig{RequestLog: false},
+		AuthDir:           filepath.Join(workDir, "auth"),
+		ErrorLogsMaxFiles: 10,
+	}
+
+	logger := defaultRequestLoggerFactory(cfg, configPath)
+	fileLogger, ok := logger.(*internallogging.FileRequestLogger)
+	if !ok {
+		t.Fatalf("expected *FileRequestLogger, got %T", logger)
+	}
+
+	errLog := fileLogger.LogRequestWithOptions(
+		"/v1/chat/completions",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		http.StatusBadGateway,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"error":"upstream failure"}`),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		true,
+		"shared-logs-dir",
+		time.Now(),
+		time.Now(),
+	)
+	if errLog != nil {
+		t.Fatalf("failed to write forced error request log: %v", errLog)
+	}
+
+	hasErrorLog := func(dir string) bool {
+		entries, errRead := os.ReadDir(dir)
+		if errRead != nil {
+			if os.IsNotExist(errRead) {
+				return false
+			}
+			t.Fatalf("failed to read logs dir %s: %v", dir, errRead)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasErrorLog(workLogsDir) {
+		t.Fatalf("expected forced error log in working logs dir %s", workLogsDir)
+	}
+	if configLogsDir := filepath.Join(configDir, "logs"); hasErrorLog(configLogsDir) {
+		t.Fatalf("unexpected forced error log in config logs dir %s", configLogsDir)
+	}
+}
+
 func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	withMetadata := formatHomeClaudeModel(homeModelEntry{
 		id:                  "claude-sonnet-4-6",
