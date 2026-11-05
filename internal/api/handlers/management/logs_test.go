@@ -955,3 +955,140 @@ func TestGetRequestLogByID_MatchesFullUUIDAndShortID(t *testing.T) {
 		t.Fatalf("body = %q, want %q", body, "uuid v7 request log content")
 	}
 }
+
+func performGetLogStorage(t *testing.T, h *Handler) (int, map[string]any) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v8/management/observability/logs/storage", nil)
+	h.GetLogStorage(c)
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+	}
+	return rec.Code, body
+}
+
+func TestGetLogStorageReportsStatsAndConfig(t *testing.T) {
+	dir := t.TempDir()
+	zone := time.FixedZone("UTC+3", 3*60*60)
+	oldest := time.Date(2026, 11, 1, 10, 0, 0, 0, zone)
+	newest := time.Date(2026, 11, 5, 15, 30, 45, 0, zone)
+
+	files := []struct {
+		rel     string
+		content string
+		mtime   time.Time
+	}{
+		{"main.log", "12345", newest},
+		{"error-1.log.gz", "123", oldest.Add(time.Hour)},
+		{"request-body-1.tmp", "1234567", oldest},
+		{filepath.Join("sub", "nested.log"), "12", oldest.Add(2 * time.Hour)},
+	}
+	for _, f := range files {
+		path := filepath.Join(dir, f.rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", f.rel, err)
+		}
+		if err := os.WriteFile(path, []byte(f.content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", f.rel, err)
+		}
+		if err := os.Chtimes(path, f.mtime, f.mtime); err != nil {
+			t.Fatalf("chtimes %s: %v", f.rel, err)
+		}
+	}
+
+	cfg := &config.Config{LoggingToFile: true, LogsMaxTotalSizeMB: 512}
+	cfg.RequestLog = true
+	h := NewHandlerWithoutConfigFilePath(cfg, nil)
+	h.SetLogDirectory(dir)
+
+	status, body := performGetLogStorage(t, h)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", status, body)
+	}
+	want := map[string]any{
+		"total_bytes":        float64(17),
+		"total_files":        float64(4),
+		"capped_bytes":       float64(8),
+		"capped_files":       float64(2),
+		"oldest_modified_at": "2026-11-01T07:00:00Z",
+		"newest_modified_at": "2026-11-05T12:30:45Z",
+		"limit_mb":           float64(512),
+		"request_log":        true,
+		"logging_to_file":    true,
+	}
+	if !reflect.DeepEqual(body, want) {
+		t.Fatalf("body = %v, want %v", body, want)
+	}
+}
+
+func TestGetLogStorageMissingDirectoryReturnsZeros(t *testing.T) {
+	h := newLogsTestHandler(filepath.Join(t.TempDir(), "missing"), false)
+
+	status, body := performGetLogStorage(t, h)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", status, body)
+	}
+	want := map[string]any{
+		"total_bytes":        float64(0),
+		"total_files":        float64(0),
+		"capped_bytes":       float64(0),
+		"capped_files":       float64(0),
+		"oldest_modified_at": nil,
+		"newest_modified_at": nil,
+		"limit_mb":           float64(0),
+		"request_log":        false,
+		"logging_to_file":    false,
+	}
+	if !reflect.DeepEqual(body, want) {
+		t.Fatalf("body = %v, want %v", body, want)
+	}
+	for _, key := range []string{"oldest_modified_at", "newest_modified_at"} {
+		if _, ok := body[key]; !ok {
+			t.Fatalf("key %q missing from body %v", key, body)
+		}
+	}
+}
+
+func TestGetLogStorageRegularFileDirectoryReturns500(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	h := newLogsTestHandler(path, true)
+
+	status, body := performGetLogStorage(t, h)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body = %v", status, body)
+	}
+	if msg, _ := body["error"].(string); strings.TrimSpace(msg) == "" {
+		t.Fatalf("error = %v, want non-empty message", body["error"])
+	}
+}
+
+func TestGetLogStorageNilConfigReturns503(t *testing.T) {
+	h := &Handler{}
+	h.SetLogDirectory(t.TempDir())
+
+	status, body := performGetLogStorage(t, h)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body = %v", status, body)
+	}
+	want := map[string]any{"error": "configuration unavailable"}
+	if !reflect.DeepEqual(body, want) {
+		t.Fatalf("body = %v, want %v", body, want)
+	}
+}
+
+func TestGetLogStorageNilHandlerReturns500(t *testing.T) {
+	var h *Handler
+
+	status, body := performGetLogStorage(t, h)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body = %v", status, body)
+	}
+	if body["error"] != "handler unavailable" {
+		t.Fatalf("error = %v, want handler unavailable", body["error"])
+	}
+}

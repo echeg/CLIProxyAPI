@@ -482,6 +482,66 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 	c.FileAttachment(fullPath, name)
 }
 
+// logStorageResponse is the JSON body of GetLogStorage.
+type logStorageResponse struct {
+	TotalBytes       int64   `json:"total_bytes"`
+	TotalFiles       int64   `json:"total_files"`
+	CappedBytes      int64   `json:"capped_bytes"`
+	CappedFiles      int64   `json:"capped_files"`
+	OldestModifiedAt *string `json:"oldest_modified_at"`
+	NewestModifiedAt *string `json:"newest_modified_at"`
+	LimitMB          int     `json:"limit_mb"`
+	RequestLog       bool    `json:"request_log"`
+	LoggingToFile    bool    `json:"logging_to_file"`
+}
+
+// GetLogStorage reports the disk usage of the logs directory together with the
+// effective logging settings. Bytes are logical file lengths; the scan is not
+// atomic while logging continues. A missing directory reports zero usage.
+func (h *Handler) GetLogStorage(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	stats, err := logging.ScanLogDir(dir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to scan log directory: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, logStorageResponse{
+		TotalBytes:       stats.TotalBytes,
+		TotalFiles:       stats.TotalFiles,
+		CappedBytes:      stats.CappedBytes,
+		CappedFiles:      stats.CappedFiles,
+		OldestModifiedAt: formatLogStorageTime(stats.Oldest),
+		NewestModifiedAt: formatLogStorageTime(stats.Newest),
+		LimitMB:          h.cfg.LogsMaxTotalSizeMB,
+		RequestLog:       h.cfg.RequestLog,
+		LoggingToFile:    h.cfg.LoggingToFile,
+	})
+}
+
+// formatLogStorageTime renders t as UTC RFC3339, or nil (JSON null) when zero.
+func formatLogStorageTime(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	formatted := t.UTC().Format(time.RFC3339)
+	return &formatted
+}
+
 func (h *Handler) logDirectory() string {
 	if h == nil {
 		return ""

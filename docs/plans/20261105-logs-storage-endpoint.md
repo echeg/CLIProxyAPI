@@ -150,14 +150,14 @@
 - [x] run `gofmt -w` on changed files and `go test ./internal/logging/` - must pass before task 3
 
 ### Task 3: Add the GetLogStorage management handler
-- [ ] add `GetLogStorage` to `internal/api/handlers/management/logs.go`. Guards copy `GetRequestLogByID`: 500 `handler unavailable` for a nil handler, 503 `configuration unavailable` for a nil config, 500 `log directory not configured` for a blank `h.logDirectory()`. Then call `logging.ScanLogDir`, and return 500 `{"error": ...}` on a scan error
-- [ ] build the snake_case response: `total_bytes`, `total_files`, `capped_bytes`, `capped_files`; `oldest_modified_at`/`newest_modified_at` as `t.UTC().Format(time.RFC3339)` or JSON `null` when zero; `limit_mb`, `request_log`, `logging_to_file` from `h.cfg`
-- [ ] write tests in `logs_test.go` using `SetLogDirectory(t.TempDir())`: files with whole-second non-UTC mtimes and the config flags set; decode the whole JSON and assert every field, including the UTC-formatted times
-- [ ] write tests for the error and edge cases:
+- [x] add `GetLogStorage` to `internal/api/handlers/management/logs.go`. Guards copy `GetRequestLogByID`: 500 `handler unavailable` for a nil handler, 503 `configuration unavailable` for a nil config, 500 `log directory not configured` for a blank `h.logDirectory()`. Then call `logging.ScanLogDir`, and return 500 `{"error": ...}` on a scan error
+- [x] build the snake_case response: `total_bytes`, `total_files`, `capped_bytes`, `capped_files`; `oldest_modified_at`/`newest_modified_at` as `t.UTC().Format(time.RFC3339)` or JSON `null` when zero; `limit_mb`, `request_log`, `logging_to_file` from `h.cfg`
+- [x] write tests in `logs_test.go` using `SetLogDirectory(t.TempDir())`: files with whole-second non-UTC mtimes and the config flags set; decode the whole JSON and assert every field, including the UTC-formatted times
+- [x] write tests for the error and edge cases:
   - missing directory → 200 with zeros, and both time keys present with `null` values;
   - `SetLogDirectory` pointing at a regular file → 500 with a non-empty `error`;
   - nil config → 503 `{"error":"configuration unavailable"}`.
-- [ ] run `gofmt -w` and `go test ./internal/api/handlers/management/` - must pass before task 4
+- [x] run `gofmt -w` and `go test ./internal/api/handlers/management/` - must pass before task 4
 
 ### Task 4: Register the v8 route and document it
 - [ ] add `v8.GET("/observability/logs/storage", s.mgmt.GetLogStorage)` in `internal/api/server_management_v8.go` next to the other `observability/logs` routes
