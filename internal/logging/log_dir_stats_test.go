@@ -131,6 +131,11 @@ func TestScanLogDir_RootRegularFileReturnsError(t *testing.T) {
 }
 
 func TestScanLogDir_PathUnderRegularFileReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows reports ERROR_PATH_NOT_FOUND, which os.IsNotExist accepts, so
+		// the root reads as missing there, matching the cleaner's os.ReadDir.
+		t.Skip("Windows has no ENOTDIR; a path below a file reads as missing")
+	}
 	file := filepath.Join(t.TempDir(), "file")
 	writeStatsFixture(t, file, 1, time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC))
 	// ENOTDIR is not "not exist", so it must not be reported as an empty directory.

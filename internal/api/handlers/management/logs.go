@@ -503,12 +503,28 @@ func (h *Handler) GetLogStorage(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg == nil {
+
+	// Snapshot the config under h.mu, which guards reloads, and scan unlocked.
+	h.mu.Lock()
+	cfg := h.cfg
+	var (
+		dir                       string
+		limitMB                   int
+		requestLog, loggingToFile bool
+	)
+	if cfg != nil {
+		dir = h.logDirectory()
+		limitMB = cfg.LogsMaxTotalSizeMB
+		// Commercial mode disables request logging regardless of request-log.
+		requestLog = cfg.RequestLog && !cfg.CommercialMode
+		loggingToFile = cfg.LoggingToFile
+	}
+	h.mu.Unlock()
+
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-
-	dir := h.logDirectory()
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -527,10 +543,9 @@ func (h *Handler) GetLogStorage(c *gin.Context) {
 		CappedFiles:      stats.CappedFiles,
 		OldestModifiedAt: formatLogStorageTime(stats.Oldest),
 		NewestModifiedAt: formatLogStorageTime(stats.Newest),
-		LimitMB:          h.cfg.LogsMaxTotalSizeMB,
-		// Commercial mode disables request logging regardless of request-log.
-		RequestLog:    h.cfg.RequestLog && !h.cfg.CommercialMode,
-		LoggingToFile: h.cfg.LoggingToFile,
+		LimitMB:          limitMB,
+		RequestLog:       requestLog,
+		LoggingToFile:    loggingToFile,
 	})
 }
 

@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1102,4 +1103,27 @@ func TestGetLogStorageNilHandlerReturns500(t *testing.T) {
 	if body["error"] != "handler unavailable" {
 		t.Fatalf("error = %v, want handler unavailable", body["error"])
 	}
+}
+
+// Run with -race: GetLogStorage must read the config under h.mu, which guards
+// SetConfig during hot reloads.
+func TestGetLogStorageConcurrentSetConfigIsRaceFree(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{LogsMaxTotalSizeMB: 1}, nil)
+	h.SetLogDirectory(t.TempDir())
+
+	const iterations = 50
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			h.SetConfig(&config.Config{LogsMaxTotalSizeMB: i + 2})
+		}
+	}()
+	for i := 0; i < iterations; i++ {
+		if status, body := performGetLogStorage(t, h); status != http.StatusOK {
+			t.Fatalf("status = %d, body = %v", status, body)
+		}
+	}
+	wg.Wait()
 }
