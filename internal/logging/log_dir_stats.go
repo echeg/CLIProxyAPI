@@ -89,7 +89,7 @@ func (s *LogDirStats) walkSubdir(dir string) {
 			}
 			return nil
 		}
-		if d == nil || !d.Type().IsRegular() {
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		info, errInfo := d.Info()

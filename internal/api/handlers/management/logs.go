@@ -528,8 +528,9 @@ func (h *Handler) GetLogStorage(c *gin.Context) {
 		OldestModifiedAt: formatLogStorageTime(stats.Oldest),
 		NewestModifiedAt: formatLogStorageTime(stats.Newest),
 		LimitMB:          h.cfg.LogsMaxTotalSizeMB,
-		RequestLog:       h.cfg.RequestLog,
-		LoggingToFile:    h.cfg.LoggingToFile,
+		// Commercial mode disables request logging regardless of request-log.
+		RequestLog:    h.cfg.RequestLog && !h.cfg.CommercialMode,
+		LoggingToFile: h.cfg.LoggingToFile,
 	})
 }
 

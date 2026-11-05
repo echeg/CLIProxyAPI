@@ -580,7 +580,11 @@ retain the corresponding business operation's fields.
 
 `GET /observability/logs/storage` scans the logs directory that the request
 logger, `main.log`, and the `logs-max-total-size-mb` cleaner share. It works
-whether or not `logging-to-file` is enabled. Example response:
+whether or not `logging-to-file` is enabled. The directory is `$WRITABLE_PATH/logs`
+when `WRITABLE_PATH` is set, otherwise `logs` under the process working directory
+when that directory exists and is writable, otherwise `<auth-dir>/logs`. It is not
+resolved against the config file's directory, and the response does not include
+the path. Example response:
 
 ```json
 {
@@ -601,9 +605,9 @@ whether or not `logging-to-file` is enabled. Example response:
 | `total_bytes`, `total_files` | Every regular file in the directory tree, including subdirectories. Symlinks are not counted. |
 | `capped_bytes`, `capped_files` | Top-level `*.log` and `*.log.gz` files: the set `logs-max-total-size-mb` is enforced against. It includes the protected `main.log`. |
 | `oldest_modified_at`, `newest_modified_at` | Oldest and newest modification time of the counted files, in UTC RFC 3339. `null` when no file was counted. |
-| `limit_mb` | Effective `logs-max-total-size-mb`; `0` means no cap. |
-| `request_log` | Effective `request-log`. |
-| `logging_to_file` | Effective `logging-to-file`. |
+| `limit_mb` | Runtime `logs-max-total-size-mb`, with defaults applied; `0` means no cap. |
+| `request_log` | Whether request logging is on: `request-log` with defaults applied, and `false` when `commercial-mode` is enabled. |
+| `logging_to_file` | Runtime `logging-to-file`, with defaults applied. |
 
 - Bytes are logical file lengths, the same values the cleaner sums. They are
   not allocated disk blocks, so they can differ from `du`.

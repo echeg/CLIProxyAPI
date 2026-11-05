@@ -1041,13 +1041,24 @@ func TestGetLogStorageMissingDirectoryReturnsZeros(t *testing.T) {
 		"request_log":        false,
 		"logging_to_file":    false,
 	}
+	// DeepEqual on maps also fails when a null-valued time key is absent.
 	if !reflect.DeepEqual(body, want) {
 		t.Fatalf("body = %v, want %v", body, want)
 	}
-	for _, key := range []string{"oldest_modified_at", "newest_modified_at"} {
-		if _, ok := body[key]; !ok {
-			t.Fatalf("key %q missing from body %v", key, body)
-		}
+}
+
+func TestGetLogStorageCommercialModeReportsRequestLogOff(t *testing.T) {
+	cfg := &config.Config{CommercialMode: true}
+	cfg.RequestLog = true
+	h := NewHandlerWithoutConfigFilePath(cfg, nil)
+	h.SetLogDirectory(t.TempDir())
+
+	status, body := performGetLogStorage(t, h)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", status, body)
+	}
+	if body["request_log"] != false {
+		t.Fatalf("request_log = %v, want false in commercial mode", body["request_log"])
 	}
 }
 
@@ -1062,8 +1073,8 @@ func TestGetLogStorageRegularFileDirectoryReturns500(t *testing.T) {
 	if status != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500, body = %v", status, body)
 	}
-	if msg, _ := body["error"].(string); strings.TrimSpace(msg) == "" {
-		t.Fatalf("error = %v, want non-empty message", body["error"])
+	if msg, _ := body["error"].(string); !strings.HasPrefix(msg, "failed to scan log directory:") {
+		t.Fatalf("error = %v, want a scan failure message", body["error"])
 	}
 }
 

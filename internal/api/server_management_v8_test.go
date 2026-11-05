@@ -41,11 +41,14 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
 			}
 			cfg.Home.Enabled = tc.home
 			cfg.Plugins.Dir = filepath.Dir(path)
+			logDir := t.TempDir()
 			for _, route := range []string{"/v0/management/config", "/v8/management/config", "/v0/management/plugins", "/v8/management/plugins", "/v8/management/routing/activity", "/v8/management/routing/claude-fallback", "/v8/management/routing/profiles", "/v8/management/observability/logs/storage"} {
 				// Each route gets independent failed-login state so this access-control
 				// test cannot accidentally trigger the management brute-force ban.
 				h := management.NewHandler(cfg, path, coreauth.NewManager(nil, nil, nil))
 				h.SetLocalPassword("test-password")
+				// Keep the logs storage scan off the host's real logs directory.
+				h.SetLogDirectory(logDir)
 				s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
 				s.managementRoutesEnabled.Store(tc.enabled)
 				s.registerManagementRoutes()

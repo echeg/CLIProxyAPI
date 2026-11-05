@@ -150,7 +150,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Add request logging middleware (positioned after recovery, before auth)
-	// Resolve logs directory relative to the configuration file directory.
+	// The default factory writes into the shared logs directory from
+	// logging.ResolveLogDirectory, the same one main.log, the cleaner, and the
+	// management handlers use; it is not resolved against the config directory.
 	var requestLogger logging.RequestLogger
 	var toggle func(bool)
 	if !cfg.CommercialMode {

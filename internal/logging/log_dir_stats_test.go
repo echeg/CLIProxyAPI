@@ -130,6 +130,52 @@ func TestScanLogDir_RootRegularFileReturnsError(t *testing.T) {
 	}
 }
 
+func TestScanLogDir_PathUnderRegularFileReturnsError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	writeStatsFixture(t, file, 1, time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC))
+	// ENOTDIR is not "not exist", so it must not be reported as an empty directory.
+	if _, errScan := ScanLogDir(filepath.Join(file, "logs")); errScan == nil {
+		t.Fatal("expected an error for a root below a regular file")
+	}
+}
+
+func TestScanLogDir_UnreadableRootReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	if errChmod := os.Chmod(dir, 0o000); errChmod != nil {
+		t.Fatalf("chmod root: %v", errChmod)
+	}
+	t.Cleanup(func() {
+		if errChmod := os.Chmod(dir, 0o755); errChmod != nil {
+			t.Errorf("restore root permissions: %v", errChmod)
+		}
+	})
+	if _, errScan := ScanLogDir(dir); errScan == nil {
+		t.Fatal("expected an error for an unreadable root")
+	}
+}
+
+// The capped stats must be exactly the total the cleaner enforces its limit on.
+func TestScanLogDir_CappedBytesMatchCleanerTotal(t *testing.T) {
+	dir := t.TempDir()
+	buildStatsFixture(t, dir)
+	stats := scanOrFail(t, dir)
+
+	deleted, errClean := enforceLogDirSizeLimit(dir, stats.CappedBytes, "")
+	if errClean != nil || deleted != 0 {
+		t.Fatalf("limit = capped bytes: deleted %d, err %v; want 0, nil", deleted, errClean)
+	}
+	deleted, errClean = enforceLogDirSizeLimit(dir, stats.CappedBytes-1, "")
+	if errClean != nil || deleted == 0 {
+		t.Fatalf("limit = capped bytes - 1: deleted %d, err %v; want > 0, nil", deleted, errClean)
+	}
+}
+
 func TestScanLogDir_SymlinkedRootMatchesTarget(t *testing.T) {
 	target := t.TempDir()
 	oldest, newest := buildStatsFixture(t, target)

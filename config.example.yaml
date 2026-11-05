@@ -1159,6 +1159,10 @@ multimedia:
 
 # Application logs, request logs, usage aggregation, and profiling.
 observability:
+  # main.log, request logs, error logs, and the size cleaner share one logs directory:
+  # $WRITABLE_PATH/logs when WRITABLE_PATH is set, otherwise ./logs under the process working
+  # directory when it exists and is writable, otherwise <auth-dir>/logs. It is not resolved
+  # relative to this config file.
   logs:
     # Enable debug logging
     debug: false

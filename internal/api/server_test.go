@@ -2723,33 +2723,7 @@ func TestDefaultRequestLoggerFactory_UsesWorkingDirectoryLogsNotConfigDir(t *tes
 		ErrorLogsMaxFiles: 10,
 	}
 
-	logger := defaultRequestLoggerFactory(cfg, configPath)
-	fileLogger, ok := logger.(*internallogging.FileRequestLogger)
-	if !ok {
-		t.Fatalf("expected *FileRequestLogger, got %T", logger)
-	}
-
-	errLog := fileLogger.LogRequestWithOptions(
-		"/v1/chat/completions",
-		http.MethodPost,
-		map[string][]string{"Content-Type": {"application/json"}},
-		[]byte(`{"input":"hello"}`),
-		http.StatusBadGateway,
-		map[string][]string{"Content-Type": {"application/json"}},
-		[]byte(`{"error":"upstream failure"}`),
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		true,
-		"shared-logs-dir",
-		time.Now(),
-		time.Now(),
-	)
-	if errLog != nil {
-		t.Fatalf("failed to write forced error request log: %v", errLog)
-	}
+	writeForcedErrorRequestLog(t, defaultRequestLoggerFactory(cfg, configPath))
 
 	hasErrorLog := func(dir string) bool {
 		entries, errRead := os.ReadDir(dir)
@@ -2772,6 +2746,68 @@ func TestDefaultRequestLoggerFactory_UsesWorkingDirectoryLogsNotConfigDir(t *tes
 	}
 	if configLogsDir := filepath.Join(configDir, "logs"); hasErrorLog(configLogsDir) {
 		t.Fatalf("unexpected forced error log in config logs dir %s", configLogsDir)
+	}
+}
+
+// The request logger and the logs storage endpoint of a real server must share
+// one directory even when the working directory differs from the config directory.
+func TestNewServerLogStorageCountsRequestLogs(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+	workDir := t.TempDir()
+	if errMkdir := os.MkdirAll(filepath.Join(workDir, "logs"), 0o755); errMkdir != nil {
+		t.Fatalf("failed to create working logs dir: %v", errMkdir)
+	}
+	t.Chdir(workDir)
+
+	// newTestServerWithConfig puts the config file in its own temp directory.
+	s := newTestServerWithConfig(t, &proxyconfig.Config{ErrorLogsMaxFiles: 10})
+	writeForcedErrorRequestLog(t, s.requestLogger)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v8/management/observability/logs/storage", nil)
+	s.mgmt.GetLogStorage(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		CappedFiles int64 `json:"capped_files"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("decode response %q: %v", rec.Body.String(), errDecode)
+	}
+	if body.CappedFiles != 1 {
+		t.Fatalf("capped_files = %d, want 1 (the forced error log)", body.CappedFiles)
+	}
+}
+
+func writeForcedErrorRequestLog(t *testing.T, logger internallogging.RequestLogger) {
+	t.Helper()
+	fileLogger, ok := logger.(*internallogging.FileRequestLogger)
+	if !ok {
+		t.Fatalf("expected *FileRequestLogger, got %T", logger)
+	}
+	errLog := fileLogger.LogRequestWithOptions(
+		"/v1/chat/completions",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		http.StatusBadGateway,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"error":"upstream failure"}`),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		true,
+		"shared-logs-dir",
+		time.Now(),
+		time.Now(),
+	)
+	if errLog != nil {
+		t.Fatalf("failed to write forced error request log: %v", errLog)
 	}
 }
 
