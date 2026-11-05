@@ -171,8 +171,8 @@
 - [x] run `go vet ./internal/logging/ ./internal/api/...` and `go test ./internal/logging/ ./internal/api/...`, then `go test ./...`; all must pass, or a pre-existing unrelated failure is noted with ⚠️ and evidence that it fails on `main` too
 
 ### Task 6: [Final] Update documentation
-- [ ] confirm `docs/management-api-v8.md` matches the final response shape
-- [ ] update project knowledge docs (AGENTS.md) only if a new pattern was introduced
+- [x] confirm `docs/management-api-v8.md` matches the final response shape
+- [x] update project knowledge docs (AGENTS.md) only if a new pattern was introduced (no new pattern; AGENTS.md unchanged)
 
 ## Technical Details
 - Response example:
