@@ -130,13 +130,13 @@
 - [x] run `gofmt -w` and `go test ./internal/api/ -run 'RequestLogger'` - must pass before task 2
 
 ### Task 2: Add the logs directory scan helper
-- [ ] create `internal/logging/log_dir_stats.go` with a `LogDirStats` struct (`TotalBytes`, `TotalFiles`, `CappedBytes`, `CappedFiles int64`, `Oldest`, `Newest time.Time`) and `ScanLogDir(dir string) (LogDirStats, error)`
-- [ ] handle the root: `filepath.Clean(strings.TrimSpace(dir))`; a blank path gives zero stats; `os.Stat` (follows a symlinked root): not-exist gives zero stats and a nil error, a non-directory or any other error is returned wrapped with context
-- [ ] read the top level with `os.ReadDir`. A regular file counts into the totals, and also into the capped stats when `isLogFileName(name)`. A directory is walked with `filepath.WalkDir`: count only regular files (`d.Type().IsRegular()`, which skips symlinks) into the totals. Skip any entry or subdirectory whose `Info()` or read fails (return `fs.SkipDir` for directories; never dereference a nil `d`). Track the oldest and newest mtime over counted files only; bytes are `info.Size()`
-- [ ] write tests in `internal/logging/log_dir_stats_test.go` on `t.TempDir()`:
+- [x] create `internal/logging/log_dir_stats.go` with a `LogDirStats` struct (`TotalBytes`, `TotalFiles`, `CappedBytes`, `CappedFiles int64`, `Oldest`, `Newest time.Time`) and `ScanLogDir(dir string) (LogDirStats, error)`
+- [x] handle the root: `filepath.Clean(strings.TrimSpace(dir))`; a blank path gives zero stats; `os.Stat` (follows a symlinked root): not-exist gives zero stats and a nil error, a non-directory or any other error is returned wrapped with context
+- [x] read the top level with `os.ReadDir`. A regular file counts into the totals, and also into the capped stats when `isLogFileName(name)`. A directory is walked with `filepath.WalkDir`: count only regular files (`d.Type().IsRegular()`, which skips symlinks) into the totals. Skip any entry or subdirectory whose `Info()` or read fails (return `fs.SkipDir` for directories; never dereference a nil `d`). Track the oldest and newest mtime over counted files only; bytes are `info.Size()`
+- [x] write tests in `internal/logging/log_dir_stats_test.go` on `t.TempDir()`:
   - a fixture with `a.log`, `B.LOG`, `c.log.gz`, `request-body-1.tmp`, `sub/nested.log`, `request-log-parts-x/part.bin`, and an empty top-level directory `dir.log/`. Assert exact total and capped bytes and counts: `sub/nested.log` counts in totals only, and `dir.log/` is not counted
   - oldest and newest set with `os.Chtimes` to whole-second non-UTC times; directories set to far-off mtimes that must not appear in the result
-- [ ] write tests for the edge cases:
+- [x] write tests for the edge cases:
   - missing directory → zeros with a nil error;
   - empty directory → zeros and zero times;
   - blank path;
@@ -147,7 +147,7 @@
   - unreadable subdirectory (mode 0o000, restored in `t.Cleanup`) → scan succeeds and counts the readable files.
 
   The symlink tests skip when `os.Symlink` fails. The unreadable-subdirectory test skips on Windows and when running as root.
-- [ ] run `gofmt -w` on changed files and `go test ./internal/logging/` - must pass before task 3
+- [x] run `gofmt -w` on changed files and `go test ./internal/logging/` - must pass before task 3
 
 ### Task 3: Add the GetLogStorage management handler
 - [ ] add `GetLogStorage` to `internal/api/handlers/management/logs.go`. Guards copy `GetRequestLogByID`: 500 `handler unavailable` for a nil handler, 503 `configuration unavailable` for a nil config, 500 `log directory not configured` for a blank `h.logDirectory()`. Then call `logging.ScanLogDir`, and return 500 `{"error": ...}` on a scan error
