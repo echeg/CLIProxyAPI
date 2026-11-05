@@ -166,9 +166,9 @@
 - [x] run `gofmt -w` and `go test ./internal/api/` - must pass before task 5
 
 ### Task 5: Verify acceptance criteria
-- [ ] verify every item in Overview and Decisions is implemented: shared logs directory, route, fields (no `directory_present`), missing-directory behavior, and capped semantics matching `isLogFileName`
-- [ ] run the compile check `go build -o test-output ./cmd/server && rm test-output`
-- [ ] run `go vet ./internal/logging/ ./internal/api/...` and `go test ./internal/logging/ ./internal/api/...`, then `go test ./...`; all must pass, or a pre-existing unrelated failure is noted with ⚠️ and evidence that it fails on `main` too
+- [x] verify every item in Overview and Decisions is implemented: shared logs directory, route, fields (no `directory_present`), missing-directory behavior, and capped semantics matching `isLogFileName`
+- [x] run the compile check `go build -o test-output ./cmd/server && rm test-output`
+- [x] run `go vet ./internal/logging/ ./internal/api/...` and `go test ./internal/logging/ ./internal/api/...`, then `go test ./...`; all must pass, or a pre-existing unrelated failure is noted with ⚠️ and evidence that it fails on `main` too
 
 ### Task 6: [Final] Update documentation
 - [ ] confirm `docs/management-api-v8.md` matches the final response shape
