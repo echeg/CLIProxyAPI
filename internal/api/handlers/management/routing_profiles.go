@@ -35,15 +35,11 @@ func (h *Handler) GetRoutingProfiles(c *gin.Context) {
 		seen[key] = true
 		view := routingKeyProfileView{Key: key, Profile: profile.Clone()}
 		view.Profile.Selection = profile.EffectiveSelection()
-		if view.Profile.ClaudeFallback.Mappings == nil {
-			view.Profile.ClaudeFallback.Mappings = []config.ClaudeFallbackMapping{}
-		}
+		view.Profile.ClaudeFallback = legacyFallbackView(*profile)
 		keys = append(keys, view)
 	}
 	h.mu.Unlock()
-	if shared.ClaudeFallback.Mappings == nil {
-		shared.ClaudeFallback.Mappings = []config.ClaudeFallbackMapping{}
-	}
+	shared.ClaudeFallback = legacyFallbackView(shared)
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, gin.H{
 		"supported": manager.ClaudeFallbackSupported(),
@@ -54,6 +50,16 @@ func (h *Handler) GetRoutingProfiles(c *gin.Context) {
 			"pickers":   config.SelectionPickerSlots,
 		},
 	})
+}
+
+// legacyFallbackView returns the claude-fallback view of a profile derived from
+// its effective providers.claude.fallback, with mappings as [] instead of null.
+func legacyFallbackView(profile config.RoutingProfile) config.ClaudeFallbackConfig {
+	view := profile.EffectiveProviders().Claude.Fallback.LegacyClaudeFallback()
+	if view.Mappings == nil {
+		view.Mappings = []config.ClaudeFallbackMapping{}
+	}
+	return view
 }
 
 // reconcileKeyProfiles keeps routing.key-profiles in step with an api-keys list

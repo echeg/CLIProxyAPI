@@ -45,7 +45,9 @@ func TestClaudeFallbackManagementSaveAndDisable(t *testing.T) {
 		if errReload != nil {
 			t.Fatal(errReload)
 		}
-		if loaded.Routing.ClaudeFallback.Enabled != enabled || loaded.Routing.ClaudeFallback.Mode != "always" || len(loaded.Routing.ClaudeFallback.Mappings) != 1 || loaded.Routing.Strategy != "earliest-reset" {
+		// A legacy write is stored as providers.claude.fallback; read it back through the legacy view.
+		saved := loaded.Routing.SharedProfile().EffectiveProviders().Claude.Fallback.LegacyClaudeFallback()
+		if saved.Enabled != enabled || saved.Mode != "always" || len(saved.Mappings) != 1 || loaded.Routing.Strategy != "earliest-reset" {
 			t.Fatalf("lost settings: %+v", loaded.Routing)
 		}
 		rec = httptest.NewRecorder()

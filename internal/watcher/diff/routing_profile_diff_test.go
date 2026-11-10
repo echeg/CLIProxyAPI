@@ -39,6 +39,14 @@ func TestBuildConfigChangeDetailsRoutingSelectionAndKeyProfiles(t *testing.T) {
 		{"shared fallback updated", func(c *config.Config) {
 			c.Routing.ClaudeFallback = config.ClaudeFallbackConfig{Enabled: true, Mode: "auto", Mappings: []config.ClaudeFallbackMapping{{From: "claude-*", To: "gpt-6-sol"}}}
 		}, "routing.claude-fallback: updated"},
+		{"shared providers updated", func(c *config.Config) {
+			c.Routing.Providers.Codex = config.ProviderRoutingConfig{Mode: "api", APICredential: "idx-1"}
+		}, "routing.providers: updated"},
+		{"profile providers updated", func(c *config.Config) {
+			c.Routing.KeyProfiles[keyA] = &config.RoutingProfile{SessionAffinity: true, Providers: config.ProvidersRoutingConfig{
+				Claude: config.ProviderRoutingConfig{APICredential: "idx-1", Fallback: config.ProviderFallbackConfig{Target: "api"}},
+			}}
+		}, "routing.key-profiles: updated (redacted)"},
 		{"profile rekeyed", func(c *config.Config) {
 			c.Routing.KeyProfiles = map[string]*config.RoutingProfile{keyB: {SessionAffinity: true}}
 		}, "routing.key-profiles: updated (redacted)"},

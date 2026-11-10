@@ -57,7 +57,8 @@ func newRoutingProfile(profile config.RoutingProfile, keyHash string, fromKey bo
 		sticky:    profile.SessionAffinity,
 		preferred: profile.PreferredAccounts,
 		selection: profile.EffectiveSelection(),
-		fallback:  profile.ClaudeFallback,
+		// The Codex leg runs only for target codex; the legacy view carries it.
+		fallback: profile.EffectiveProviders().Claude.Fallback.LegacyClaudeFallback(),
 	}
 }
 

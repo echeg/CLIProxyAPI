@@ -17,7 +17,8 @@ func (h *Handler) GetClaudeFallback(c *gin.Context) {
 	manager := h.authManager
 	settings := config.ClaudeFallbackConfig{Mode: "auto", Mappings: []config.ClaudeFallbackMapping{}}
 	if h.cfg != nil {
-		settings = h.cfg.Routing.ClaudeFallback
+		// The legacy view is derived from providers.claude.fallback of the shared profile.
+		settings = h.cfg.Routing.SharedProfile().EffectiveProviders().Claude.Fallback.LegacyClaudeFallback()
 		settings.Mappings = append([]config.ClaudeFallbackMapping{}, settings.Mappings...)
 		if settings.Mode == "" {
 			settings.Mode = "auto"

@@ -206,6 +206,10 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Routing.ClaudeFallback, newCfg.Routing.ClaudeFallback) {
 		changes = append(changes, "routing.claude-fallback: updated")
 	}
+	// Values stay out of the log: the block names upstream credential indexes.
+	if !reflect.DeepEqual(oldCfg.Routing.Providers, newCfg.Routing.Providers) {
+		changes = append(changes, "routing.providers: updated")
+	}
 	if oldCfg.Routing.Selection != newCfg.Routing.Selection {
 		changes = append(changes, fmt.Sprintf("routing.selection: %s -> %s", formatSelection(oldCfg.Routing.Selection), formatSelection(newCfg.Routing.Selection)))
 	}

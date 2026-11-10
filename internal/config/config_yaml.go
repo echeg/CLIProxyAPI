@@ -73,6 +73,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	// Deleted, rotated, and nulled client keys must never stay on disk; an empty
 	// generated map drops the node because key-profiles is omitempty.
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "routing", "key-profiles")
+	dropSupersededLegacyClaudeFallback(original.Content[0], generated.Content[0])
 	replacePluginConfigsSubtree(original.Content[0], generated.Content[0])
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
@@ -890,6 +891,18 @@ func shouldPruneNestedMappingKeys(path []string) bool {
 	default:
 		return false
 	}
+}
+
+// dropSupersededLegacyClaudeFallback removes routing.claude-fallback from the
+// original document once the shared profile is written with
+// providers.claude.fallback, which supersedes the legacy block. Key profiles need
+// no special case: their subtrees are pruned to the generated keys.
+func dropSupersededLegacyClaudeFallback(dstRoot, srcRoot *yaml.Node) {
+	generated := yamlPath(srcRoot, "routing")
+	if yamlPath(generated, "providers.claude.fallback") == nil || yamlPath(generated, "claude-fallback") != nil {
+		return
+	}
+	removeMapKey(yamlPath(dstRoot, "routing"), "claude-fallback")
 }
 
 // isKeyProfileSubtreePath reports whether path is a routing.key-profiles entry or

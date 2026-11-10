@@ -86,6 +86,9 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		return
 	}
 	before := cloneConfigV8Node(root)
+	// written is a copy of the request value at its config path; the merge below
+	// shares nodes with root, so later edits of root must not leak into it.
+	var written *yaml.Node
 	config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 	if c.Request.Method == http.MethodDelete {
 		if len(parts) == 0 {
@@ -112,6 +115,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			return
 		}
 		stripAPIKeysAuthIndexesFromUpdate(parts, &update)
+		written = configV8PatchRoot(parts, cloneConfigV8Node(update.Content[0]))
 		if len(parts) == 0 && update.Content[0].Kind != yaml.MappingNode {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "config_must_be_object"})
 			return
@@ -153,6 +157,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	if !yamlRequest && c.Request.Method != http.MethodDelete {
 		preserveV8TURNSecrets(root, before)
+		mergeLegacyClaudeFallbackWrites(root, before, written)
 	}
 	// Revisions are owned by Home and must not become ordinary editable settings.
 	for _, field := range []string{"credentials/concurrency/lifecycle-config-revision", "credentials/concurrency/observation-barrier-revision", "plugins/auth-revision"} {
