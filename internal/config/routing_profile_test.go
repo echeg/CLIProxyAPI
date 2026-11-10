@@ -216,6 +216,9 @@ func TestRoutingSharedProfile(t *testing.T) {
 			Mode:     "auto",
 			Mappings: []ClaudeFallbackMapping{{From: "claude-*", To: "gpt-x"}},
 		},
+		Providers: ProvidersRoutingConfig{
+			Codex: ProviderRoutingConfig{APICredential: "idx-api", Fallback: ProviderFallbackConfig{Target: ProviderFallbackAPI, Mappings: []ClaudeFallbackMapping{{From: "gpt-*", To: "kept"}}}},
+		},
 	}
 	shared := routing.SharedProfile()
 	want := RoutingProfile{
@@ -223,13 +226,18 @@ func TestRoutingSharedProfile(t *testing.T) {
 		PreferredAccounts: map[string]string{"codex": "idx-codex"},
 		Selection:         SelectionConfig{Primary: SelectionReserves, Tiebreak: SelectionEarliestReset},
 		ClaudeFallback:    routing.ClaudeFallback,
+		Providers:         routing.Providers,
 	}
 	if !reflect.DeepEqual(shared, want) {
 		t.Fatalf("shared = %+v, want %+v", shared, want)
 	}
+	if effective := shared.EffectiveProviders(); effective.Claude.Fallback.Target != ProviderFallbackCodex || effective.Codex.Fallback.Target != ProviderFallbackAPI {
+		t.Fatalf("shared effective providers = %+v", effective)
+	}
 	shared.PreferredAccounts["codex"] = "changed"
 	shared.ClaudeFallback.Mappings[0].To = "changed"
-	if routing.PreferredAccounts["codex"] != "idx-codex" || routing.ClaudeFallback.Mappings[0].To != "gpt-x" {
+	shared.Providers.Codex.Fallback.Mappings[0].To = "changed"
+	if routing.PreferredAccounts["codex"] != "idx-codex" || routing.ClaudeFallback.Mappings[0].To != "gpt-x" || routing.Providers.Codex.Fallback.Mappings[0].To != "kept" {
 		t.Fatal("shared profile aliases the global routing fields")
 	}
 
@@ -239,6 +247,23 @@ func TestRoutingSharedProfile(t *testing.T) {
 	}
 	if empty := (RoutingConfig{}).SharedProfile(); empty.PreferredAccounts != nil || empty.Selection != DefaultSelection() {
 		t.Fatalf("empty shared profile = %+v", empty)
+	}
+}
+
+func TestRoutingProfileCloneProviders(t *testing.T) {
+	profile := RoutingProfile{Providers: ProvidersRoutingConfig{
+		Claude: ProviderRoutingConfig{Fallback: ProviderFallbackConfig{Target: ProviderFallbackCodex, Mappings: []ClaudeFallbackMapping{{From: "claude-*", To: "gpt-x"}}}},
+		Codex:  ProviderRoutingConfig{Fallback: ProviderFallbackConfig{Mappings: []ClaudeFallbackMapping{{From: "a", To: "b"}}}},
+	}}
+	clone := profile.Clone()
+	if !reflect.DeepEqual(clone, profile) {
+		t.Fatalf("clone = %+v, want %+v", clone, profile)
+	}
+	clone.Providers.Claude.Fallback.Mappings[0].To = "changed"
+	clone.Providers.Codex.Fallback.Mappings[0].To = "changed"
+	clone.Providers.Claude.Mode = ProviderModeAPI
+	if profile.Providers.Claude.Fallback.Mappings[0].To != "gpt-x" || profile.Providers.Codex.Fallback.Mappings[0].To != "b" || profile.Providers.Claude.Mode != "" {
+		t.Fatal("clone shares providers state")
 	}
 }
 

@@ -42,6 +42,10 @@ type RoutingProfile struct {
 	PreferredAccounts map[string]string    `yaml:"preferred-accounts,omitempty" json:"preferred-accounts,omitempty"`
 	Selection         SelectionConfig      `yaml:"selection,omitempty" json:"selection"`
 	ClaudeFallback    ClaudeFallbackConfig `yaml:"claude-fallback,omitempty" json:"claude-fallback"`
+	// Providers is the per-provider mode and fallback as written in the config.
+	// Read the policy through EffectiveProviders, which applies defaults and the
+	// legacy ClaudeFallback block.
+	Providers ProvidersRoutingConfig `yaml:"providers,omitempty" json:"providers"`
 }
 
 // IsPickerSlot reports whether slot chooses a single credential instead of narrowing.
@@ -140,12 +144,16 @@ func normalizePreferredAccountsMap(accounts map[string]string, fieldPath string)
 	return normalized, nil
 }
 
-// Normalize validates routing.selection and every key profile. It is lenient about
-// key-profile membership: null entries and entries for keys absent from apiKeys are
-// dropped with a warning that identifies the key only by its hash prefix.
+// Normalize validates routing.selection, the shared providers and claude-fallback
+// blocks, and every key profile. It is lenient about key-profile membership: null
+// entries and entries for keys absent from apiKeys are dropped with a warning that
+// identifies the key only by its hash prefix.
 func (r *RoutingConfig) Normalize(apiKeys []string) error {
 	if errSelection := r.Selection.Normalize("routing.selection"); errSelection != nil {
 		return errSelection
+	}
+	if errProviders := normalizeProfileProviders(&r.Providers, &r.ClaudeFallback, "routing.providers", ""); errProviders != nil {
+		return errProviders
 	}
 	if len(r.KeyProfiles) == 0 {
 		r.KeyProfiles = nil
@@ -170,8 +178,8 @@ func (r *RoutingConfig) Normalize(apiKeys []string) error {
 		if errSelection := profile.Selection.Normalize(path + ".selection"); errSelection != nil {
 			return errSelection
 		}
-		if errFallback := profile.ClaudeFallback.Normalize(); errFallback != nil {
-			return fmt.Errorf("%s: %w", path, errFallback)
+		if errProviders := normalizeProfileProviders(&profile.Providers, &profile.ClaudeFallback, path+".providers", path); errProviders != nil {
+			return errProviders
 		}
 		preferred, errPreferred := normalizePreferredAccountsMap(profile.PreferredAccounts, path+".preferred-accounts")
 		if errPreferred != nil {
@@ -193,6 +201,7 @@ func (r RoutingConfig) SharedProfile() RoutingProfile {
 		PreferredAccounts: r.PreferredAccounts,
 		Selection:         r.EffectiveSelection(),
 		ClaudeFallback:    r.ClaudeFallback,
+		Providers:         r.Providers,
 	}.Clone()
 }
 
@@ -200,6 +209,7 @@ func (r RoutingConfig) SharedProfile() RoutingProfile {
 func (p RoutingProfile) Clone() RoutingProfile {
 	p.PreferredAccounts = maps.Clone(p.PreferredAccounts)
 	p.ClaudeFallback.Mappings = slices.Clone(p.ClaudeFallback.Mappings)
+	p.Providers = p.Providers.Clone()
 	return p
 }
 

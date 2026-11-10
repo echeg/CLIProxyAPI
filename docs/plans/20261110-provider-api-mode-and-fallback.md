@@ -136,13 +136,13 @@
 ## Implementation Steps
 
 ### Task 1: Add provider routing config types, validation, and legacy conversion
-- [ ] create `internal/config/provider_routing.go` with `ProviderRoutingConfig{Mode, APICredential, Fallback ProviderFallbackConfig}`, `ProviderFallbackConfig{Target, Mode, Mappings []ClaudeFallbackMapping}`, constants for modes (`subscription`, `api`) and targets (`off`, `codex`, `api`), and `ProvidersRoutingConfig{Claude, Codex}` with yaml/json tags `providers` -> `claude` / `codex` -> `mode`, `api-credential`, `fallback` -> `target`, `mode`, `mappings`
-- [ ] implement `Normalize(fieldPath string)` covering every rule in Decisions/validation (trim and lower-case enums, empty mode -> `subscription`, empty target -> `off`, provider-specific targets, required `api-credential`, `mode: api` with non-`off` target, mapping rules reused from `ClaudeFallbackConfig.Normalize` for `target: codex`); return the list of warnings (ignored `mode`/`mappings` under `target: api`) separately from errors so callers can log them
-- [ ] add conversion helpers: legacy `ClaudeFallbackConfig` -> `ProviderFallbackConfig` and back (`LegacyClaudeFallback()` returns `enabled` true only for `target: codex`), plus `Target(model)` lookup delegating to the existing longest-prefix logic
-- [ ] add `Providers ProvidersRoutingConfig` to `RoutingProfile` and to `RoutingConfig` (shared), update `SharedProfile()` and `Clone()` (deep-copy mappings), and call the new `Normalize` from `RoutingConfig.Normalize` for the shared block (`routing.providers`) and every key profile (`routing.key-profiles.<hash>.providers`); apply the "both blocks present -> `providers` wins, warn" rule and the legacy -> new conversion here so the in-memory profile always has an effective `Providers`
-- [ ] write table-driven tests in `internal/config/provider_routing_test.go` for every validation rule (success and error, error text contains the field path with the key hash, never the raw key)
-- [ ] write tests for legacy conversion both ways and for precedence when both blocks are present; extend `routing_profile_test.go` for `SharedProfile()`/`Clone()` independence
-- [ ] run `go test ./internal/config/...`, gofmt, compile check - must pass before task 2
+- [x] create `internal/config/provider_routing.go` with `ProviderRoutingConfig{Mode, APICredential, Fallback ProviderFallbackConfig}`, `ProviderFallbackConfig{Target, Mode, Mappings []ClaudeFallbackMapping}`, constants for modes (`subscription`, `api`) and targets (`off`, `codex`, `api`), and `ProvidersRoutingConfig{Claude, Codex}` with yaml/json tags `providers` -> `claude` / `codex` -> `mode`, `api-credential`, `fallback` -> `target`, `mode`, `mappings`
+- [x] implement `Normalize(fieldPath string)` covering every rule in Decisions/validation (trim and lower-case enums, empty mode -> `subscription`, empty target -> `off`, provider-specific targets, required `api-credential`, `mode: api` with non-`off` target, mapping rules reused from `ClaudeFallbackConfig.Normalize` for `target: codex`); return the list of warnings (ignored `mode`/`mappings` under `target: api`) separately from errors so callers can log them
+- [x] add conversion helpers: legacy `ClaudeFallbackConfig` -> `ProviderFallbackConfig` and back (`LegacyClaudeFallback()` returns `enabled` true only for `target: codex`), plus `Target(model)` lookup delegating to the existing longest-prefix logic
+- [x] add `Providers ProvidersRoutingConfig` to `RoutingProfile` and to `RoutingConfig` (shared), update `SharedProfile()` and `Clone()` (deep-copy mappings), and call the new `Normalize` from `RoutingConfig.Normalize` for the shared block (`routing.providers`) and every key profile (`routing.key-profiles.<hash>.providers`); apply the "both blocks present -> `providers` wins, warn" rule and the legacy -> new conversion here so the in-memory profile always has an effective `Providers`
+- [x] write table-driven tests in `internal/config/provider_routing_test.go` for every validation rule (success and error, error text contains the field path with the key hash, never the raw key)
+- [x] write tests for legacy conversion both ways and for precedence when both blocks are present; extend `routing_profile_test.go` for `SharedProfile()`/`Clone()` independence
+- [x] run `go test ./internal/config/...`, gofmt, compile check - must pass before task 2
 
 ### Task 2: Persist the providers block (load, save, legacy writes, config diff)
 - [ ] read `internal/config/config_yaml.go` save path and `internal/api/handlers/management/config_v8.go` PATCH path first; note in this plan (Technical Details) how a key-profile entry is replaced on PATCH and where the pre-write config is available
@@ -213,6 +213,13 @@
       Mappings []ClaudeFallbackMapping `yaml:"mappings,omitempty" json:"mappings"`
   }
   ```
+- **Task 1 implementation notes (deviations from the original wording)**:
+  - The stored `Providers` keeps only what the config spells out: `Normalize` trims and lower-cases enums and validates the effective values, but does not write the `subscription` / `off` defaults and does not copy the legacy `claude-fallback` block into it. This keeps `routing: null` equal to `RoutingConfig{}`, empty key profiles equal to `RoutingProfile{}`, and a load/save without routing changes byte-stable.
+  - The effective policy is read through `RoutingProfile.EffectiveProviders()` (defaults filled, legacy block converted when `providers.claude.fallback` is unset). `SharedProfile()` copies `Providers` as stored, so callers in Tasks 3-5 must use `EffectiveProviders()` on both the shared and key profiles, not the raw field.
+  - Precedence: when `providers.claude.fallback` and the legacy block are both set, `Normalize` logs a warning and clears the legacy block in memory (an invalid ignored legacy block does not fail the load). Task 2 must make the save drop the legacy node for the shared `routing` mapping too (only key-profile subtrees are pruned today).
+  - The effective policy (legacy block combined with `providers`) is validated as a whole, e.g. `providers.claude.mode: api` + legacy `enabled: true` is rejected at `...providers.claude.fallback.target`.
+  - Shared legacy validation moved from `config_load.go` / `parse.go` into `RoutingConfig.Normalize`; legacy error texts are unchanged (`ClaudeFallbackConfig.Normalize` now delegates to the shared `normalizeFallbackRules`).
+  - The mapping lookup is `ProviderFallbackConfig.MappingTarget(model)` because the struct already has a `Target` field.
 - **Eligibility rule** (pseudo):
   ```text
   if request is pinned, has its own requiredKind/credentialPolicy, or policy unsupported: existing rules only

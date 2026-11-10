@@ -534,7 +534,11 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// ClaudeFallback routes configured Claude models to Codex subscriptions.
+	// It is the legacy spelling of Providers.Claude.Fallback (see RoutingProfile.Providers).
 	ClaudeFallback ClaudeFallbackConfig `yaml:"claude-fallback,omitempty" json:"claude-fallback,omitempty"`
+
+	// Providers is the shared per-provider mode and fallback (routing.providers).
+	Providers ProvidersRoutingConfig `yaml:"providers,omitempty" json:"providers,omitempty"`
 
 	// Strategy is the legacy credential selection strategy. It is used only to derive
 	// the effective selection {reserves, <strategy>} when Selection is empty.
