@@ -338,7 +338,10 @@ func TestClaudeExecutor_Issue7000ManagerRetryKeepsAuto(t *testing.T) {
 			reg := registry.GetGlobalRegistry()
 			reg.RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
 			t.Cleanup(func() { reg.UnregisterClient(authID) })
-			if _, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "claude", Attributes: map[string]string{"api_key": "key-issue7000"}}); errRegister != nil {
+			auth := &cliproxyauth.Auth{ID: authID, Provider: "claude", Attributes: map[string]string{"api_key": "key-issue7000"}}
+			// Claude API keys are selected only under routing mode api.
+			manager.SetConfig(withAPIModeRouting(nil, auth))
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 				t.Fatalf("register auth: %v", errRegister)
 			}
 			var bodies [][]byte

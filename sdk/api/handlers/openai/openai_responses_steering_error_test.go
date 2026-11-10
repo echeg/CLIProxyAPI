@@ -98,7 +98,7 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 			manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
 			authID := "steering-error-" + tc.name
 			model := "steering-error-model"
-			if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}}); err != nil {
+			if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"auth_kind": "oauth", "api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}}); err != nil {
 				t.Fatal(err)
 			}
 			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
@@ -243,6 +243,10 @@ func TestResponsesWebsocketClosesOnIdleCodexDisconnect(t *testing.T) {
 				credential.Metadata = map[string]any{"access_token": "test-token"}
 			} else {
 				credential.Attributes["api_key"] = "test-key"
+				// Codex API keys are selected only under routing mode api.
+				credential.Index = authID
+				cfg.Routing.Providers.Codex = config.ProviderRoutingConfig{Mode: config.ProviderModeAPI, APICredential: authID}
+				manager.SetConfig(cfg)
 			}
 			if _, err = manager.Register(context.Background(), credential); err != nil {
 				t.Fatal(err)

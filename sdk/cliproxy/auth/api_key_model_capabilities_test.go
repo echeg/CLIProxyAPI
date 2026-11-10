@@ -494,15 +494,19 @@ func TestSelectedCodexConfigurationUpdateCapabilityExecutionModelOverride(t *tes
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			manager := NewManager(nil, nil, nil)
-			manager.SetConfig(tc.config)
-			executor := &selectedCapabilityCaptureExecutor{provider: tc.provider}
-			manager.RegisterExecutor(executor)
 			auth := configuredCapabilityTestAuth("override-"+tc.name, tc.key)
 			auth.Provider = tc.provider
 			if tc.oauth {
 				auth.Attributes = map[string]string{"plan_type": "free"}
 				auth.Metadata = map[string]any{"access_token": "fake-token"}
+			} else {
+				// Claude and Codex API keys are selected only under routing mode api.
+				auth.Index = "override-index-" + tc.name
+				withAPIModeRouting(tc.config, tc.provider, auth.Index)
 			}
+			manager.SetConfig(tc.config)
+			executor := &selectedCapabilityCaptureExecutor{provider: tc.provider}
+			manager.RegisterExecutor(executor)
 			registerCapabilityTestAuth(t, manager, auth)
 			reg := registry.GetGlobalRegistry()
 			reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: tc.selectionModel, SupportConfigurationUpdate: true}})

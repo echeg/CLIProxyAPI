@@ -85,8 +85,9 @@ func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
 					manager.SetRetryConfig(3, 30*time.Second, 0)
 					manager.RegisterExecutor(executor)
 					model := "later-credential-model"
-					bad := &auth.Auth{ID: t.Name() + "-bad", Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "test", "base_url": upstream.URL, "websockets": "true", "priority": "4"}}
-					good := &auth.Auth{ID: t.Name() + "-good", Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "unused", "base_url": upstream.URL, "websockets": "true", "priority": "3"}}
+					// These API-key fixtures stand in for subscription accounts failing over to each other.
+					bad := &auth.Auth{ID: t.Name() + "-bad", Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"auth_kind": "oauth", "api_key": "test", "base_url": upstream.URL, "websockets": "true", "priority": "4"}}
+					good := &auth.Auth{ID: t.Name() + "-good", Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"auth_kind": "oauth", "api_key": "unused", "base_url": upstream.URL, "websockets": "true", "priority": "3"}}
 					for _, candidate := range []*auth.Auth{bad, good} {
 						registry.GetGlobalRegistry().RegisterClient(candidate.ID, "codex", []*registry.ModelInfo{{ID: model}})
 						t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(candidate.ID) })

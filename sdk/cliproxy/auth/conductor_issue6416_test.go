@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -471,6 +472,10 @@ func TestManager_Issue6416_APIKeyRotation_LateResultDoesNotCooldownNewAPIKey(t *
 	executor := &issue6416TestExecutor{id: "codex"}
 	m := NewManager(nil, nil, nil)
 	m.RegisterExecutor(executor)
+	// Codex API keys are selected only under routing mode api.
+	cfg := &internalconfig.Config{}
+	withAPIModeRouting(cfg, "codex", "issue-6416-index")
+	m.SetConfig(cfg)
 
 	reg := registry.GetGlobalRegistry()
 	authID := "auth-issue-6416-apikey"
@@ -479,6 +484,7 @@ func TestManager_Issue6416_APIKeyRotation_LateResultDoesNotCooldownNewAPIKey(t *
 
 	initialAuth := &Auth{
 		ID:       authID,
+		Index:    "issue-6416-index",
 		Provider: "codex",
 		Attributes: map[string]string{
 			AttributeAPIKey: "old-api-key",

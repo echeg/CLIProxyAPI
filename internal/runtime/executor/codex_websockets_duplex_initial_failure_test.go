@@ -127,8 +127,10 @@ func TestCodexDuplexInitialFailure(t *testing.T) {
 					manager.SetConfig(cfg)
 					manager.SetRetryConfig(3, 30*time.Second, 0)
 					manager.RegisterExecutor(exec)
+					// These API-key fixtures stand in for subscription accounts failing over to each other.
+					bad.Attributes["auth_kind"] = "oauth"
 					good := &auth.Auth{ID: "duplex-initial-good", Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{
-						"api_key": "good-key", "base_url": upstream.URL, "websockets": "true", "priority": "3",
+						"auth_kind": "oauth", "api_key": "good-key", "base_url": upstream.URL, "websockets": "true", "priority": "3",
 					}}
 					for _, candidate := range []*auth.Auth{bad, good} {
 						registry.GetGlobalRegistry().RegisterClient(candidate.ID, "codex", []*registry.ModelInfo{{ID: model}})

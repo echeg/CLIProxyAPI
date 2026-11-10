@@ -92,7 +92,7 @@ func TestResponsesSteerInFlightWebSocket(t *testing.T) {
 		ID:         authID,
 		Provider:   "codex",
 		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"},
+		Attributes: map[string]string{"auth_kind": "oauth", "api_key": "test-key", "base_url": upstream.URL, "websockets": "true"},
 	}); err != nil {
 		t.Fatal(err)
 	}

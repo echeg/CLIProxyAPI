@@ -94,6 +94,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 				Provider: "codex",
 				Status:   coreauth.StatusActive,
 				Attributes: map[string]string{
+					"auth_kind":  "oauth",
 					"api_key":    "test-key",
 					"base_url":   upstream.URL,
 					"websockets": "true",
@@ -378,7 +379,7 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 		ID:         authID,
 		Provider:   "codex",
 		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"api_key": "test-key"},
+		Attributes: map[string]string{"auth_kind": "oauth", "api_key": "test-key"},
 	})
 	if errRegister != nil {
 		t.Fatal(errRegister)

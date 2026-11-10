@@ -252,6 +252,8 @@ func TestClaudeExecutor_AuthManager_FableOnlyRejectionDoesNotBlockOpus(t *testin
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-fable-5"}, {ID: "claude-opus-5"}})
 	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
@@ -344,6 +346,8 @@ func TestClaudeExecutor_AuthManager_OverageSpendCapReachedDoesNotBlockOpus_Issue
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-fable-5-1"}, {ID: "claude-opus-5"}})
 	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
@@ -469,6 +473,8 @@ func TestClaudeExecutor_AuthManager_ModelLevelCoolingConfigScopesSharedRejection
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-3-5-sonnet"}, {ID: "claude-opus-5"}})
 	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
@@ -636,6 +642,8 @@ func TestClaudeExecutor_AuthManager_OverageSpendCapWithRetryAfter_Issue5920(t *t
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-fable-5-1"}, {ID: "claude-opus-5"}})
 	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
@@ -751,6 +759,8 @@ func TestClaudeExecutor_AuthManager_OverageSpendCapFirstRequestAllowsOpus_Issue5
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-fable-5-1"}, {ID: "claude-opus-5"}})
 	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
@@ -858,6 +868,8 @@ func TestClaudeExecutor_AuthManager_FableOnlyRejectionWithout5hHeadersAllowsOpus
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-fable-5-1"}, {ID: "claude-opus-5-5"}})
 	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}

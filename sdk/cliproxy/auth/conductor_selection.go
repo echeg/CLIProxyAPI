@@ -87,6 +87,9 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	// providerPolicy is the routing profile that restricts claude/codex
+	// credentials to its per-provider mode; nil means no provider policy.
+	providerPolicy *routingProfile
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -111,6 +114,14 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
 	}
+	// A request with its own kind or credential policy, or one pinned to a
+	// credential, keeps its constraints; the profile's provider policy applies to
+	// every other native selection.
+	if eligibility.requiredKind == "" && eligibility.credentialPolicy == "" && pinnedAuthIDFromMetadata(opts.Metadata) == "" {
+		if profile := routingProfileFromContext(ctx); profile != nil && profile.providerPolicy {
+			eligibility.providerPolicy = profile
+		}
+	}
 	return eligibility
 }
 
@@ -122,6 +133,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 		return false
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
+		return false
+	}
+	if e.providerPolicy != nil && !providerPolicyAllows(e.providerPolicy, auth) {
 		return false
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
@@ -2981,7 +2995,20 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	return authCopy, executor, providerKey, nil
 }
 
+// pickNextMixed selects the next credential for an execution and names the
+// routing provider policy when it is why no credential is available.
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if !m.HomeEnabled() {
+		ctx = m.ensureRoutingProfile(ctx)
+	}
+	auth, executor, provider, errPick := m.selectNextMixed(ctx, providers, model, opts, tried)
+	if errPick != nil {
+		errPick = m.providerPolicySelectionError(ctx, providers, opts, errPick)
+	}
+	return auth, executor, provider, errPick
+}
+
+func (m *Manager) selectNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	opts.EnsureMetadata()
 	clearSchedulerSelectionID(opts.Metadata)
 	if m.HomeEnabled() {

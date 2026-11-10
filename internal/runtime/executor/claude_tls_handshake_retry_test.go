@@ -212,6 +212,8 @@ func TestClaudeExecutorManagerRetriesSilentTLSHandshakeThroughConnectProxy(t *te
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() { reg.UnregisterClient(authID) })
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}

@@ -53,7 +53,8 @@ upstream:
 						executor = NewXAIExecutor(cfg)
 					}
 					manager := cliproxyauth.NewManager(nil, nil, nil)
-					manager.SetConfig(cfg)
+					// Codex API keys are selected only under routing mode api.
+					manager.SetConfig(withAPIModeRouting(cfg, auth))
 					manager.RegisterExecutor(executor)
 					if _, err = manager.Register(context.Background(), auth); err != nil {
 						t.Fatal(err)

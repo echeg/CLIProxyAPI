@@ -47,7 +47,10 @@ func TestCodexDuplexConnectionTimeoutDoesNotCoolHealthyAccount(t *testing.T) {
 	manager.SetConfig(cfg)
 	manager.RegisterExecutor(NewCodexAutoExecutor(cfg))
 	id, model := "duplex-health-account", "duplex-health-model"
-	_, err := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}})
+	account := &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}}
+	// Codex API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(cfg, account))
+	_, err := manager.Register(context.Background(), account)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +133,10 @@ func TestCodexDuplexSummaryCredentialFailuresThroughManager(t *testing.T) {
 			exec := NewCodexAutoExecutor(cfg)
 			manager.RegisterExecutor(exec)
 			defer exec.CloseExecutionSession("summary-health-session")
-			if _, errRegister := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}}); errRegister != nil {
+			account := &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}}
+			// Codex API keys are selected only under routing mode api.
+			manager.SetConfig(withAPIModeRouting(cfg, account))
+			if _, errRegister := manager.Register(context.Background(), account); errRegister != nil {
 				t.Fatal(errRegister)
 			}
 			registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model, IsCompat: true}})

@@ -21,6 +21,11 @@ type routingProfile struct {
 	preferred map[string]string
 	selection config.SelectionConfig
 	fallback  config.ClaudeFallbackConfig
+	// providers is the effective per-provider mode and fallback policy.
+	providers config.ProvidersRoutingConfig
+	// providerPolicy is false when the provider policy is unsupported (a scheduler
+	// plugin owns routing), so eligibility ignores providers.
+	providerPolicy bool
 }
 
 type routingProfileContextKey struct{}
@@ -51,6 +56,7 @@ func (p *routingProfile) preferredAccounts() map[string]string {
 }
 
 func newRoutingProfile(profile config.RoutingProfile, keyHash string, fromKey bool) *routingProfile {
+	providers := profile.EffectiveProviders()
 	return &routingProfile{
 		keyHash:   keyHash,
 		fromKey:   fromKey,
@@ -58,8 +64,25 @@ func newRoutingProfile(profile config.RoutingProfile, keyHash string, fromKey bo
 		preferred: profile.PreferredAccounts,
 		selection: profile.EffectiveSelection(),
 		// The Codex leg runs only for target codex; the legacy view carries it.
-		fallback: profile.EffectiveProviders().Claude.Fallback.LegacyClaudeFallback(),
+		fallback:       providers.Claude.Fallback.LegacyClaudeFallback(),
+		providers:      providers,
+		providerPolicy: true,
 	}
+}
+
+// providerMode returns the effective mode of provider and whether the profile
+// enforces a provider policy for it. Only claude and codex carry a policy.
+func (p *routingProfile) providerMode(provider string) (config.ProviderRoutingConfig, bool) {
+	if p == nil || !p.providerPolicy {
+		return config.ProviderRoutingConfig{}, false
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		return p.providers.Claude, true
+	case "codex":
+		return p.providers.Codex, true
+	}
+	return config.ProviderRoutingConfig{}, false
 }
 
 // clientAPIKeyFromContext returns the authenticated inbound client key stored by
@@ -91,7 +114,10 @@ func (m *Manager) resolveRoutingProfile(ctx context.Context) *routingProfile {
 		cfg = &config.Config{}
 	}
 	if m.hasPluginScheduler() {
-		return newSharedRoutingProfile(cfg.Routing, "")
+		// The plugin owns credential choice, so the provider policy does not apply.
+		profile := newSharedRoutingProfile(cfg.Routing, "")
+		profile.providerPolicy = false
+		return profile
 	}
 	key := clientAPIKeyFromContext(ctx)
 	keyHash := ""
@@ -143,6 +169,8 @@ const (
 	routingStagePreferred = "preferred"
 	routingStagePipeline  = "pipeline"
 	routingStageFallback  = "fallback"
+	// routingStageAPI marks a selection made under providers.<provider>.mode: api.
+	routingStageAPI = "api"
 )
 
 // routingFallbackLegKey marks the context of the Codex leg of a Claude -> Codex
@@ -178,6 +206,10 @@ func logRoutingProfileSelection(ctx context.Context, stage string, auth *Auth) {
 		"routing_stage": stage,
 		"provider":      strings.ToLower(strings.TrimSpace(auth.Provider)),
 		"auth_index":    candidatePreferenceIndex(auth),
+	}
+	if policy, ok := profile.providerMode(auth.Provider); ok && policy.Mode == config.ProviderModeAPI && auth.AuthKind() == AuthKindAPIKey {
+		stage = routingStageAPI
+		fields["routing_stage"] = stage
 	}
 	if routingFallbackLeg(ctx) && stage != routingStageFallback {
 		fields["routing_stage"] = routingStageFallback

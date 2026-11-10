@@ -83,7 +83,7 @@ func newLossFixture(t *testing.T, steering bool, script func(index int, c *webso
 			ID:         authID,
 			Provider:   "codex",
 			Status:     coreauth.StatusActive,
-			Attributes: map[string]string{"api_key": key, "base_url": upstream.URL, "websockets": "true"},
+			Attributes: map[string]string{"auth_kind": "oauth", "api_key": key, "base_url": upstream.URL, "websockets": "true"},
 			Metadata: map[string]any{
 				"request_scoped_errors": []config.RequestScopedErrorRule{
 					{Status: http.StatusBadGateway, Match: []string{"upstream_websocket_lost"}, Action: "continue"},
@@ -701,6 +701,7 @@ func TestResponsesWebsocketEarly429RetriesAnotherCredentialWithoutClosingDownstr
 						Provider: "codex",
 						Status:   coreauth.StatusActive,
 						Attributes: map[string]string{
+							"auth_kind":  "oauth",
 							"api_key":    spec.key,
 							"base_url":   upstream.URL,
 							"websockets": "true",
@@ -967,6 +968,7 @@ func TestResponsesWebsocketTerminal429WhenAllCredentialsExhaustedOrCooling(t *te
 		Provider: "codex",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
+			"auth_kind":  "oauth",
 			"api_key":    "key-single",
 			"base_url":   upstream.URL,
 			"websockets": "true",
@@ -1153,6 +1155,7 @@ func TestResponsesWebsocketPinned429ExposesErrorWhenOnlyAlternativeHasExpiredTok
 		Provider: "codex",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
+			"auth_kind":  "oauth",
 			"api_key":    "key-active",
 			"base_url":   upstream.URL,
 			"websockets": "true",
@@ -1163,6 +1166,7 @@ func TestResponsesWebsocketPinned429ExposesErrorWhenOnlyAlternativeHasExpiredTok
 		Provider: "codex",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
+			"auth_kind":  "oauth",
 			"api_key":    "key-expired",
 			"base_url":   upstream.URL,
 			"websockets": "true",

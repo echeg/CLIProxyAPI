@@ -96,7 +96,7 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 			manager.SetConfig(cfg)
 			manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
 			authID := "steering-integration-" + scenario
-			_, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}})
+			_, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"auth_kind": "oauth", "api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -263,7 +263,7 @@ func TestResponsesWebsocketIsCompatLocalCompactionIntegration_Issue7406(t *testi
 				ID:         authID,
 				Provider:   "codex",
 				Status:     coreauth.StatusActive,
-				Attributes: map[string]string{"api_key": "test-compat-key", "base_url": upstream.URL, "websockets": "true"},
+				Attributes: map[string]string{"auth_kind": "oauth", "api_key": "test-compat-key", "base_url": upstream.URL, "websockets": "true"},
 			}); errReg != nil {
 				t.Fatal(errReg)
 			}
@@ -416,7 +416,7 @@ func TestResponsesWebsocketExistingWSCompactionRejectsStaleParent_Issue7406(t *t
 		ID:         authID,
 		Provider:   "codex",
 		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"api_key": "test-compat-key", "base_url": upstream.URL, "websockets": "true"},
+		Attributes: map[string]string{"auth_kind": "oauth", "api_key": "test-compat-key", "base_url": upstream.URL, "websockets": "true"},
 	}); errReg != nil {
 		t.Fatal(errReg)
 	}

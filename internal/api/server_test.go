@@ -3370,6 +3370,7 @@ func TestServerCodexAPIKeyResponsesStreamingRequestLog(t *testing.T) {
 
 	credential := &auth.Auth{
 		ID:       "codex-api-key-test",
+		Index:    "codex-api-key-test-index",
 		Provider: "codex",
 		Status:   auth.StatusActive,
 		Attributes: map[string]string{
@@ -3377,6 +3378,9 @@ func TestServerCodexAPIKeyResponsesStreamingRequestLog(t *testing.T) {
 			"base_url":           mockUpstream.URL,
 		},
 	}
+	// Codex API keys are selected only under routing mode api.
+	server.cfg.Routing.Providers.Codex = proxyconfig.ProviderRoutingConfig{Mode: proxyconfig.ProviderModeAPI, APICredential: credential.Index}
+	server.handlers.AuthManager.SetConfig(server.cfg)
 	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
@@ -4035,7 +4039,14 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(authEntry.ID)
 	})
 
-	httpServer := httptest.NewServer(server.engine)
+	// The websocket handler outlives the hijacked connection and still writes
+	// its request log into the temp auth dir; wait for it before cleanup.
+	var activeHandlers sync.WaitGroup
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		activeHandlers.Add(1)
+		defer activeHandlers.Done()
+		server.engine.ServeHTTP(w, r)
+	}))
 	defer httpServer.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"
@@ -4044,7 +4055,10 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 	if errDial != nil {
 		t.Fatalf("dial websocket: %v", errDial)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		_ = conn.Close()
+		activeHandlers.Wait()
+	}()
 
 	turn1 := []byte(`{"type":"response.create","model":"ws-reauth-model","input":[{"type":"message","role":"user","content":"turn 1"}]}`)
 	if errWrite := conn.WriteMessage(websocket.TextMessage, turn1); errWrite != nil {

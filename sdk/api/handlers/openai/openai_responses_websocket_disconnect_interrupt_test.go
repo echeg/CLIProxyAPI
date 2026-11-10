@@ -85,7 +85,7 @@ func TestResponsesInterruptRacingWebsocketLossIsNotAnsweredLocally(t *testing.T)
 		ID:         authID,
 		Provider:   "codex",
 		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"api_key": "test-key", "websockets": "true"},
+		Attributes: map[string]string{"auth_kind": "oauth", "api_key": "test-key", "websockets": "true"},
 	})
 	if errRegister != nil {
 		t.Fatal(errRegister)

@@ -351,6 +351,8 @@ func task6Gateway(t *testing.T, exec cliproxyauth.ProviderExecutor, auth *clipro
 	manager := cliproxyauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(exec)
 	auth.Status = cliproxyauth.StatusActive
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, errRegister := manager.Register(t.Context(), auth); errRegister != nil {
 		t.Fatal(errRegister)
 	}

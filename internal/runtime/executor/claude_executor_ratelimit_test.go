@@ -323,8 +323,9 @@ func TestClaudeExecutor_RateLimit_FastModeAuthoritativeRejectionHeadersOverrideB
 	manager.RegisterExecutor(executor)
 
 	baseID := uuid.NewString()
-	auth1 := &cliproxyauth.Auth{ID: baseID + "-fast-override-1", Provider: "claude", Attributes: map[string]string{"api_key": "k1", "base_url": server1.URL}}
-	auth2 := &cliproxyauth.Auth{ID: baseID + "-fast-override-2", Provider: "claude", Attributes: map[string]string{"api_key": "k2", "base_url": server2.URL}}
+	// These API-key fixtures stand in for subscription accounts failing over to each other.
+	auth1 := &cliproxyauth.Auth{ID: baseID + "-fast-override-1", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth", "api_key": "k1", "base_url": server1.URL}}
+	auth2 := &cliproxyauth.Auth{ID: baseID + "-fast-override-2", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth", "api_key": "k2", "base_url": server2.URL}}
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth1.ID, "claude", []*registry.ModelInfo{{ID: "claude-3-5-sonnet-20241022"}})
@@ -463,6 +464,8 @@ func TestClaudeExecutor_AuthManager_CredentialScopeBlocksAllModelsAndAliases(t *
 		reg.UnregisterClient(auth.ID)
 	})
 
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("failed to register auth: %v", errRegister)
 	}
@@ -566,6 +569,8 @@ func TestClaudeExecutor_AuthManager_OrdinaryModel429DoesNotBlockSiblingModels(t 
 		reg.UnregisterClient(auth.ID)
 	})
 
+	// Claude API keys are selected only under routing mode api.
+	manager.SetConfig(withAPIModeRouting(nil, auth))
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
@@ -635,20 +640,23 @@ func TestClaudeExecutor_AuthManager_AlternativeCredentialCanBeSelected(t *testin
 	manager.RegisterExecutor(executor)
 
 	baseID := uuid.NewString()
+	// These API-key fixtures stand in for subscription accounts failing over to each other.
 	auth1 := &cliproxyauth.Auth{
 		ID:       baseID + "-claude-cred-1",
 		Provider: "claude",
 		Attributes: map[string]string{
-			"api_key":  "test-key-1",
-			"base_url": server1.URL,
+			"auth_kind": "oauth",
+			"api_key":   "test-key-1",
+			"base_url":  server1.URL,
 		},
 	}
 	auth2 := &cliproxyauth.Auth{
 		ID:       baseID + "-claude-cred-2",
 		Provider: "claude",
 		Attributes: map[string]string{
-			"api_key":  "test-key-2",
-			"base_url": server2.URL,
+			"auth_kind": "oauth",
+			"api_key":   "test-key-2",
+			"base_url":  server2.URL,
 		},
 	}
 
@@ -744,8 +752,9 @@ func TestClaudeExecutor_AuthManager_MultiModelPoolStreamStopsProbingOn429(t *tes
 	manager.RegisterExecutor(executor)
 
 	baseID := uuid.NewString()
-	auth1 := &cliproxyauth.Auth{ID: baseID + "-pool-1", Provider: "claude", Attributes: map[string]string{"api_key": "k1", "base_url": server1.URL}}
-	auth2 := &cliproxyauth.Auth{ID: baseID + "-pool-2", Provider: "claude", Attributes: map[string]string{"api_key": "k2", "base_url": server2.URL}}
+	// These API-key fixtures stand in for subscription accounts failing over to each other.
+	auth1 := &cliproxyauth.Auth{ID: baseID + "-pool-1", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth", "api_key": "k1", "base_url": server1.URL}}
+	auth2 := &cliproxyauth.Auth{ID: baseID + "-pool-2", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth", "api_key": "k2", "base_url": server2.URL}}
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth1.ID, "claude", []*registry.ModelInfo{

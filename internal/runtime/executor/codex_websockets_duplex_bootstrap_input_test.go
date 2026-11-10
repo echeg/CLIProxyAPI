@@ -91,9 +91,10 @@ func TestCodexDuplexBootstrapPreservesFollowup(t *testing.T) {
 			manager.SetRetryConfig(3, 30*time.Second, 0)
 			manager.RegisterExecutor(executor)
 			model := "duplex-bootstrap-followup-model"
+			// These API-key fixtures stand in for subscription accounts failing over to each other.
 			for i, key := range []string{"bad-key", "good-key"} {
 				candidate := &auth.Auth{ID: fmt.Sprintf("%s-%d", t.Name(), i), Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{
-					"api_key": key, "base_url": upstream.URL, "websockets": "true", "priority": fmt.Sprint(4 - i),
+					"auth_kind": "oauth", "api_key": key, "base_url": upstream.URL, "websockets": "true", "priority": fmt.Sprint(4 - i),
 				}}
 				registry.GetGlobalRegistry().RegisterClient(candidate.ID, "codex", []*registry.ModelInfo{{ID: model}})
 				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(candidate.ID) })

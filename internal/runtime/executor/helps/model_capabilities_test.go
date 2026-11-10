@@ -104,6 +104,10 @@ func TestApplyRequestThinkingConfigurationUpdateSelectedCodexModel(t *testing.T)
 			manager := cliproxyauth.NewManager(nil, nil, nil)
 			manager.SetConfig(&internalconfig.Config{
 				SDKConfig: internalconfig.SDKConfig{ForceModelPrefix: true},
+				// Codex API keys are selected only under routing mode api.
+				Routing: internalconfig.RoutingConfig{Providers: internalconfig.ProvidersRoutingConfig{
+					Codex: internalconfig.ProviderRoutingConfig{Mode: internalconfig.ProviderModeAPI, APICredential: "selected-update-auth"},
+				}},
 				CodexKey: []internalconfig.CodexKey{{
 					APIKey: "selected-update-key", Prefix: "tenant",
 					Models: []internalconfig.CodexModel{{
@@ -115,7 +119,7 @@ func TestApplyRequestThinkingConfigurationUpdateSelectedCodexModel(t *testing.T)
 			executor := &configuredThinkingExecutor{provider: "codex", targetFormat: "codex", body: []byte(tc.body)}
 			manager.RegisterExecutor(executor)
 			auth := &cliproxyauth.Auth{
-				ID: "selected-update-auth", Provider: "codex", Prefix: "tenant",
+				ID: "selected-update-auth", Index: "selected-update-auth", Provider: "codex", Prefix: "tenant",
 				Attributes: map[string]string{
 					cliproxyauth.AttributeAuthKind: cliproxyauth.AuthKindAPIKey,
 					cliproxyauth.AttributeAPIKey:   "selected-update-key",
@@ -201,6 +205,10 @@ func TestApplyRequestThinkingUsesExactClaudeModeForSummaryOnlyRequest(t *testing
 	manager := cliproxyauth.NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{
 		SDKConfig: internalconfig.SDKConfig{ForceModelPrefix: true},
+		// Claude API keys are selected only under routing mode api.
+		Routing: internalconfig.RoutingConfig{Providers: internalconfig.ProvidersRoutingConfig{
+			Claude: internalconfig.ProviderRoutingConfig{Mode: internalconfig.ProviderModeAPI, APICredential: "summary-selected-auth"},
+		}},
 		ClaudeKey: []internalconfig.ClaudeKey{{
 			APIKey: "summary-selected-key",
 			Prefix: "summary-tenant",
@@ -218,6 +226,7 @@ func TestApplyRequestThinkingUsesExactClaudeModeForSummaryOnlyRequest(t *testing
 	manager.RegisterExecutor(executor)
 	auth := &cliproxyauth.Auth{
 		ID:       "summary-selected-auth",
+		Index:    "summary-selected-auth",
 		Provider: "claude",
 		Prefix:   "summary-tenant",
 		Attributes: map[string]string{
@@ -278,6 +287,10 @@ func TestApplyRequestThinkingUsesSelectedPrefixedAPIKeyModel(t *testing.T) {
 	manager := cliproxyauth.NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{
 		SDKConfig: internalconfig.SDKConfig{ForceModelPrefix: true},
+		// Claude API keys are selected only under routing mode api.
+		Routing: internalconfig.RoutingConfig{Providers: internalconfig.ProvidersRoutingConfig{
+			Claude: internalconfig.ProviderRoutingConfig{Mode: internalconfig.ProviderModeAPI, APICredential: "selected-auth"},
+		}},
 		ClaudeKey: []internalconfig.ClaudeKey{{
 			APIKey: "selected-key",
 			Prefix: "tenant",
@@ -291,6 +304,7 @@ func TestApplyRequestThinkingUsesSelectedPrefixedAPIKeyModel(t *testing.T) {
 	manager.RegisterExecutor(executor)
 	auth := &cliproxyauth.Auth{
 		ID:       "selected-auth",
+		Index:    "selected-auth",
 		Provider: "claude",
 		Prefix:   "tenant",
 		Attributes: map[string]string{

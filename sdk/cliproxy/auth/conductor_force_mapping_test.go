@@ -611,13 +611,16 @@ func setupAPIKeyForceMappingManager(t *testing.T, provider, upstreamModel, alias
 	default:
 		t.Fatalf("unsupported provider %q", provider)
 	}
-	manager.SetConfig(cfg)
-
 	auth := &Auth{
 		ID:         provider + "-api-key-force-mapping-auth",
+		Index:      provider + "-force-mapping-index",
 		Provider:   provider,
 		Attributes: map[string]string{"api_key": apiKey},
 	}
+	// Claude and Codex API keys are selected only under routing mode api.
+	withAPIModeRouting(cfg, provider, auth.Index)
+	manager.SetConfig(cfg)
+
 	if provider == "openai-compatibility" {
 		auth.Attributes["compat_name"] = provider
 		auth.Attributes["provider_key"] = provider

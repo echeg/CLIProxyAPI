@@ -61,7 +61,7 @@ func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 	if _, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
 		ID: authID, Provider: "codex", Status: cliproxyauth.StatusActive,
-		Attributes: map[string]string{"base_url": server.URL, "api_key": "incomplete"},
+		Attributes: map[string]string{"auth_kind": "oauth", "base_url": server.URL, "api_key": "incomplete"},
 		Metadata:   map[string]any{"disable_cooling": true},
 	}); errRegister != nil {
 		t.Fatal(errRegister)
