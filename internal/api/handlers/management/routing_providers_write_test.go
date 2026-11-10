@@ -186,6 +186,38 @@ func TestConfigV8LegacyClaudeFallbackWriteEdgeCases(t *testing.T) {
 		}
 	})
 
+	t.Run("legacy PATCH of null turns the fallback off", func(t *testing.T) {
+		for _, stored := range []string{config.ProviderFallbackCodex, config.ProviderFallbackAPI} {
+			for _, write := range []struct{ name, target, body string }{
+				{"shared", "/v8/management/config", `{"routing":{"claude-fallback":null}}`},
+				{"shared-path", "/v8/management/config/routing/claude-fallback", `null`},
+				{"key", "/v8/management/config", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"claude-fallback":null}}}}`},
+			} {
+				t.Run(stored+"/"+write.name, func(t *testing.T) {
+					block := "providers: {claude: " + storedClaudeBlock(stored) + "}\n"
+					h, path := newRoutingProfilesTestHandler(t, keyPrefix+"      "+block+"  "+block)
+					if rec := serveConfigV8(t, h, http.MethodPatch, write.target, write.body); rec.Code != http.StatusOK {
+						t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+					}
+					profile, parts := h.cfg.Routing.SharedProfile(), []string{}
+					if write.name == "key" {
+						profile, parts = *h.cfg.Routing.KeyProfiles[providersWriteKey], []string{"key-profiles", providersWriteKey}
+					}
+					want := config.ProviderFallbackConfig{Target: config.ProviderFallbackOff}
+					if stored == config.ProviderFallbackAPI {
+						want.Target = config.ProviderFallbackAPI
+					}
+					if got := profile.EffectiveProviders().Claude; got.APICredential != "claude-idx" || !reflect.DeepEqual(got.Fallback, want) {
+						t.Fatalf("claude = %+v, want fallback %+v", got, want)
+					}
+					if savedRoutingNode(t, path, append(parts, "claude-fallback")...) != nil {
+						t.Fatal("legacy node kept")
+					}
+				})
+			}
+		}
+	})
+
 	t.Run("DELETE of a converted legacy path turns the fallback off", func(t *testing.T) {
 		raw := keyPrefix + "      providers: {claude: " + storedClaudeBlock(config.ProviderFallbackCodex) + "}\n  providers: {claude: " + storedClaudeBlock(config.ProviderFallbackCodex) + "}\n"
 		h, path := newRoutingProfilesTestHandler(t, raw)

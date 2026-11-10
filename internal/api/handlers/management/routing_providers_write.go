@@ -18,7 +18,8 @@ import (
 //     -> target off unless the stored target is api, which is kept; mode and
 //     mappings are copied. A PATCH (merge) applies the legacy fields over the
 //     stored fallback, so a partial patch such as {"enabled": false} keeps the
-//     stored mode and mappings even after the legacy node was converted;
+//     stored mode and mappings even after the legacy node was converted; a
+//     null block is disabled with no mode or mappings;
 //   - the legacy node is dropped once providers.claude.fallback is set.
 //
 // root is the merged document, before the stored one, and patch the written
@@ -55,11 +56,17 @@ func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node, merge 
 		if stored != nil && stored.Kind == yaml.MappingNode && stored.Decode(&previous) != nil {
 			return
 		}
+		legacyNode := configV8Node(merged, []string{"claude-fallback"})
+		if legacyNode == nil {
+			return
+		}
+		// A null block decodes as no change, so it starts from the zero value: a
+		// PATCH of null turns the fallback off, as it did before the conversion.
 		var legacy config.ClaudeFallbackConfig
-		if merge {
+		if merge && legacyNode.Tag != "!!null" {
 			legacy = previous.EffectiveProviders().Claude.Fallback.LegacyClaudeFallback()
 		}
-		if node := configV8Node(merged, []string{"claude-fallback"}); node == nil || node.Decode(&legacy) != nil {
+		if legacyNode.Decode(&legacy) != nil {
 			return
 		}
 		fallback := config.ProviderFallbackFromLegacy(legacy)
