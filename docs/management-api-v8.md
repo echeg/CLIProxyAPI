@@ -583,10 +583,13 @@ and no `providers.claude.fallback`:
 - `enabled: true` sets `target: codex`. `enabled: false` sets `target: off`,
   unless the stored target is `api`, which is kept because the legacy view cannot
   express it. `mode` and `mappings` are copied in both cases.
-- A `PATCH` applies the legacy fields over the stored fallback, so a partial
-  patch such as `PATCH /v8/management/config/routing/claude-fallback`
-  `{"enabled": false}` keeps the stored `mode` and `mappings`. A `PUT` replaces
-  them.
+- Only the legacy fields the write carries are read; a stored legacy block that
+  `providers.claude.fallback` overrides stays ignored. A `PATCH` applies them
+  over the stored fallback, so a partial patch such as
+  `PATCH /v8/management/config/routing/claude-fallback` `{"enabled": false}`
+  keeps the stored `mode` and `mappings`, and a `null` field resets only that
+  field. A `PUT` of the block replaces them; a `PUT` of one field (for example
+  `/v8/management/config/routing/claude-fallback/mode`) replaces only that field.
 - `DELETE` of a profile's `claude-fallback` path also deletes its
   `providers.claude.fallback` (the fallback is then `off`), unless the target is
   `api`, which is kept.

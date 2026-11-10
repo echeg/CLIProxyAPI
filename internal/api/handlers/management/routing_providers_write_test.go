@@ -186,6 +186,67 @@ func TestConfigV8LegacyClaudeFallbackWriteEdgeCases(t *testing.T) {
 		}
 	})
 
+	t.Run("legacy PATCH of a null field resets that field", func(t *testing.T) {
+		wantMappings := []config.ClaudeFallbackMapping{{From: "claude-*", To: "gpt-6-sol"}}
+		for _, tc := range []struct {
+			body string
+			want config.ProviderFallbackConfig
+		}{
+			{`{"enabled":null}`, config.ProviderFallbackConfig{Target: config.ProviderFallbackOff, Mode: "always", Mappings: wantMappings}},
+			{`{"mode":null}`, config.ProviderFallbackConfig{Target: config.ProviderFallbackCodex, Mappings: wantMappings}},
+		} {
+			h, _ := newRoutingProfilesTestHandler(t, "config-version: 8\nrouting:\n  providers: {claude: "+storedClaudeBlock(config.ProviderFallbackCodex)+"}\n")
+			if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config/routing/claude-fallback", tc.body); rec.Code != http.StatusOK {
+				t.Fatalf("patch %s status %d: %s", tc.body, rec.Code, rec.Body.String())
+			}
+			if got := h.cfg.Routing.SharedProfile().EffectiveProviders().Claude.Fallback; !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("after %s: fallback = %+v, want %+v", tc.body, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("legacy write ignores a superseded legacy block", func(t *testing.T) {
+		raw := "config-version: 8\nrouting:\n  providers: {claude: {fallback: {target: off}}}\n  claude-fallback: {enabled: true, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}\n"
+		for _, write := range []struct{ method, target, body string }{
+			{http.MethodPatch, "/v8/management/config/routing/claude-fallback", `{"mode":"auto"}`},
+			{http.MethodPut, "/v8/management/config/routing/claude-fallback/mode", `"auto"`},
+		} {
+			h, path := newRoutingProfilesTestHandler(t, raw)
+			if rec := serveConfigV8(t, h, write.method, write.target, write.body); rec.Code != http.StatusOK {
+				t.Fatalf("%s %s status %d: %s", write.method, write.target, rec.Code, rec.Body.String())
+			}
+			want := config.ProviderFallbackConfig{Target: config.ProviderFallbackOff, Mode: "auto"}
+			if got := h.cfg.Routing.SharedProfile().EffectiveProviders().Claude.Fallback; !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: fallback = %+v, want %+v", write.method, got, want)
+			}
+			if savedRoutingNode(t, path, "claude-fallback") != nil {
+				t.Fatalf("%s: legacy node kept", write.method)
+			}
+		}
+	})
+
+	t.Run("PUT of a legacy field keeps the other stored fields", func(t *testing.T) {
+		h, _ := newRoutingProfilesTestHandler(t, "config-version: 8\nrouting:\n  providers: {claude: "+storedClaudeBlock(config.ProviderFallbackCodex)+"}\n")
+		if rec := serveConfigV8(t, h, http.MethodPut, "/v8/management/config/routing/claude-fallback/mode", `"auto"`); rec.Code != http.StatusOK {
+			t.Fatalf("put status %d: %s", rec.Code, rec.Body.String())
+		}
+		want := config.ProviderFallbackConfig{Target: config.ProviderFallbackCodex, Mode: "auto", Mappings: []config.ClaudeFallbackMapping{{From: "claude-*", To: "gpt-6-sol"}}}
+		if got := h.cfg.Routing.SharedProfile().EffectiveProviders().Claude.Fallback; !reflect.DeepEqual(got, want) {
+			t.Fatalf("fallback = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("legacy PATCH reads a stored target in any case", func(t *testing.T) {
+		h, _ := newRoutingProfilesTestHandler(t, "config-version: 8\nrouting:\n  providers: {claude: {fallback: {target: CODEX, mode: always, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}}}\n")
+		if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config/routing/claude-fallback", `{"mode":"auto"}`); rec.Code != http.StatusOK {
+			t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+		}
+		want := config.ProviderFallbackConfig{Target: config.ProviderFallbackCodex, Mode: "auto", Mappings: []config.ClaudeFallbackMapping{{From: "claude-*", To: "gpt-6-sol"}}}
+		if got := h.cfg.Routing.SharedProfile().EffectiveProviders().Claude.Fallback; !reflect.DeepEqual(got, want) {
+			t.Fatalf("fallback = %+v, want %+v", got, want)
+		}
+	})
+
 	t.Run("legacy PATCH of null turns the fallback off", func(t *testing.T) {
 		for _, stored := range []string{config.ProviderFallbackCodex, config.ProviderFallbackAPI} {
 			for _, write := range []struct{ name, target, body string }{

@@ -66,9 +66,11 @@ func ProviderFallbackFromLegacy(c ClaudeFallbackConfig) ProviderFallbackConfig {
 }
 
 // LegacyClaudeFallback returns the legacy claude-fallback view of f.
-// Enabled is true only for target codex; mode and mappings are copied.
+// Enabled is true only for target codex, read like Normalize reads it so a
+// policy that is not normalized yet keeps its view; mode and mappings are copied.
 func (f ProviderFallbackConfig) LegacyClaudeFallback() ClaudeFallbackConfig {
-	return ClaudeFallbackConfig{Enabled: f.Target == ProviderFallbackCodex, Mode: f.Mode, Mappings: slices.Clone(f.Mappings)}
+	enabled := strings.EqualFold(strings.TrimSpace(f.Target), ProviderFallbackCodex)
+	return ClaudeFallbackConfig{Enabled: enabled, Mode: f.Mode, Mappings: slices.Clone(f.Mappings)}
 }
 
 // MappingTarget returns the Codex model mapped from model: an exact match first,

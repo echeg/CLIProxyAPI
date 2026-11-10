@@ -151,6 +151,12 @@ func TestProviderFallbackLegacyConversion(t *testing.T) {
 		t.Fatalf("api legacy view = %+v", view)
 	}
 
+	// The target is read like Normalize reads it, so a stored policy that was not
+	// normalized yet (for example decoded from the file) keeps its legacy view.
+	if view := (ProviderFallbackConfig{Target: " CODEX ", Mappings: mappings}).LegacyClaudeFallback(); !view.Enabled {
+		t.Fatalf("upper-case codex legacy view = %+v", view)
+	}
+
 	// Conversions copy mappings.
 	legacy := ClaudeFallbackConfig{Enabled: true, Mappings: []ClaudeFallbackMapping{{From: "a", To: "b"}}}
 	converted := ProviderFallbackFromLegacy(legacy)

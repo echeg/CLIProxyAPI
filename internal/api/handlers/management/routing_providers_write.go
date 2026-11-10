@@ -16,14 +16,17 @@ import (
 //   - a claude-fallback node without providers.claude.fallback in the write is
 //     converted into providers.claude.fallback: enabled -> target codex, disabled
 //     -> target off unless the stored target is api, which is kept; mode and
-//     mappings are copied. A PATCH (merge) applies the legacy fields over the
-//     stored fallback, so a partial patch such as {"enabled": false} keeps the
-//     stored mode and mappings even after the legacy node was converted; a
-//     null block is disabled with no mode or mappings;
+//     mappings are copied. Only the fields the write carries are read, never a
+//     stored legacy block that providers.claude.fallback overrides. A merge
+//     applies them over the stored effective fallback, so a partial patch such
+//     as {"enabled": false} keeps the stored mode and mappings even after the
+//     legacy node was converted, and a null field or block resets that field;
 //   - the legacy node is dropped once providers.claude.fallback is set.
 //
 // root is the merged document, before the stored one, and patch the written
-// value placed at its config path; patch must not share nodes with root.
+// value placed at its config path; patch must not share nodes with root. merge
+// is set for a PATCH and for a PUT below a claude-fallback block, which replaces
+// one field of it (see writesInsideClaudeFallback).
 func mergeLegacyClaudeFallbackWrites(root, before, patch *yaml.Node, merge bool) {
 	written := configV8Node(patch, []string{"routing"})
 	if written == nil || written.Kind != yaml.MappingNode {
@@ -51,27 +54,31 @@ func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node, merge 
 			setConfigV8Child(merged, "providers", cloneConfigV8Node(previous))
 		}
 	}
-	if configV8Node(written, []string{"claude-fallback"}) != nil && configV8Node(written, []string{"providers", "claude", "fallback"}) == nil {
+	if writtenLegacy := configV8Node(written, []string{"claude-fallback"}); writtenLegacy != nil && configV8Node(written, []string{"providers", "claude", "fallback"}) == nil {
 		var previous config.RoutingProfile
 		if stored != nil && stored.Kind == yaml.MappingNode && stored.Decode(&previous) != nil {
 			return
 		}
-		legacyNode := configV8Node(merged, []string{"claude-fallback"})
-		if legacyNode == nil {
-			return
+		storedFallback := previous.EffectiveProviders().Claude.Fallback
+		// Read only the submitted legacy fields: the merged node may still carry a
+		// stored legacy block that providers.claude.fallback overrides. A merge
+		// applies them as YAML over the stored legacy view, so a null field or
+		// block resets to the zero value, as it did before the conversion.
+		source := writtenLegacy
+		if merge {
+			var view yaml.Node
+			if view.Encode(storedFallback.LegacyClaudeFallback()) != nil {
+				return
+			}
+			mergeConfigV8Patch(&view, writtenLegacy)
+			source = &view
 		}
-		// A null block decodes as no change, so it starts from the zero value: a
-		// PATCH of null turns the fallback off, as it did before the conversion.
 		var legacy config.ClaudeFallbackConfig
-		if merge && legacyNode.Tag != "!!null" {
-			legacy = previous.EffectiveProviders().Claude.Fallback.LegacyClaudeFallback()
-		}
-		if legacyNode.Decode(&legacy) != nil {
+		if source.Decode(&legacy) != nil {
 			return
 		}
 		fallback := config.ProviderFallbackFromLegacy(legacy)
-		storedTarget := strings.TrimSpace(previous.EffectiveProviders().Claude.Fallback.Target)
-		if !legacy.Enabled && strings.EqualFold(storedTarget, config.ProviderFallbackAPI) {
+		if !legacy.Enabled && strings.EqualFold(strings.TrimSpace(storedFallback.Target), config.ProviderFallbackAPI) {
 			fallback.Target = config.ProviderFallbackAPI
 		}
 		var node yaml.Node
@@ -84,6 +91,17 @@ func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node, merge 
 	if configV8Node(merged, []string{"providers", "claude", "fallback"}) != nil {
 		deleteConfigV8Path(merged, []string{"claude-fallback"})
 	}
+}
+
+// writesInsideClaudeFallback reports whether a write path points below a
+// profile's legacy claude-fallback block, such as routing/claude-fallback/mode
+// or routing/key-profiles/<key>/claude-fallback/enabled.
+func writesInsideClaudeFallback(parts []string) bool {
+	n := len(parts)
+	if n < 3 || parts[0] != "routing" {
+		return false
+	}
+	return parts[1] == "claude-fallback" || (n >= 5 && parts[1] == "key-profiles" && parts[3] == "claude-fallback")
 }
 
 // deleteConvertedClaudeFallback handles a DELETE of a profile's legacy

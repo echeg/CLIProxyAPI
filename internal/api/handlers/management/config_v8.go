@@ -158,7 +158,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	if !yamlRequest && c.Request.Method != http.MethodDelete {
 		preserveV8TURNSecrets(root, before)
-		mergeLegacyClaudeFallbackWrites(root, before, written, c.Request.Method == http.MethodPatch)
+		mergeLegacyClaudeFallbackWrites(root, before, written, c.Request.Method == http.MethodPatch || writesInsideClaudeFallback(parts))
 	}
 	// Revisions are owned by Home and must not become ordinary editable settings.
 	for _, field := range []string{"credentials/concurrency/lifecycle-config-revision", "credentials/concurrency/observation-barrier-revision", "plugins/auth-revision"} {
