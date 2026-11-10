@@ -183,11 +183,12 @@
 - [x] run `go test ./internal/api/handlers/management/...`, gofmt, compile check - must pass before task 6
 
 ### Task 6: Verify acceptance criteria
-- [ ] verify every Overview goal against the code: default profile never selects a Claude/Codex API key; per-key API fallback; `mode: api`; Codex parity
-- [ ] verify edge cases: mixed-provider request, pinned Codex websocket continuation under `subscription` mode with an API-key pin, hot reload switching a key between modes mid-session (existing bindings to a now-ineligible credential fail over instead of sticking)
-- [ ] run the full suite `go test ./...` (known flaky tests listed in `docs/backlog/` may be re-run once; do not modify them)
-- [ ] run `gofmt -l .` (no output) and the compile check `go build -o test-output ./cmd/server && rm test-output`
-- [ ] run `go vet ./internal/config/... ./sdk/cliproxy/auth/... ./internal/api/handlers/management/...` and fix findings in touched code
+- [x] verify every Overview goal against the code: default profile never selects a Claude/Codex API key; per-key API fallback; `mode: api`; Codex parity
+- [x] verify edge cases: mixed-provider request, pinned Codex websocket continuation under `subscription` mode with an API-key pin, hot reload switching a key between modes mid-session (existing bindings to a now-ineligible credential fail over instead of sticking)
+- [x] run the full suite `go test ./...` (known flaky tests listed in `docs/backlog/` may be re-run once; do not modify them)
+- [x] run `gofmt -l .` (no output) and the compile check `go build -o test-output ./cmd/server && rm test-output`
+- [x] run `go vet ./internal/config/... ./sdk/cliproxy/auth/... ./internal/api/handlers/management/...` and fix findings in touched code
+- ➕ verification notes: Overview goals map to `providerPolicyAllows` (eligibility, default `subscription` excludes Claude/Codex API keys), `executeWithProviderFallback` with `target: api` (shared and key profiles, `TestAPIFallback*`), `mode: api` (`TestProviderPolicyExecutionSelection`), and Codex parity (every policy/fallback test runs both providers). Added regression tests for the edge cases that had no explicit coverage: `pinned codex api key is exempt` and `mixed claude and codex under codex api mode` rows in `TestProviderPolicyExecutionSelection`, and `TestProviderPolicyHotReloadMovesBoundSessions` (a session bound under one mode moves to an eligible credential after a reload to the other mode, both providers). `go test ./...` passed on the first run (no flaky re-run needed); `gofmt -l .`, the compile check, and `go vet` on the listed packages are clean.
 
 ### Task 7: Update documentation
 - [ ] `docs/management-api-v8.md`: new section "Per-provider mode and API fallback" (schema, validation, runtime rules, logging fields), update the routing stages list, the profiles response example (`providers`, `api_credentials`), the writing-profiles rules (legacy-write merge), and add a prominent note on the default change (Claude/Codex API keys leave the primary leg; set `mode: api` to use them)

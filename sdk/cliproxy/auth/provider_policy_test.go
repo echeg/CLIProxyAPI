@@ -208,6 +208,9 @@ func TestProviderPolicyExecutionSelection(t *testing.T) {
 		{"mixed pool skips claude key", nil, []providerPolicyTestAuth{keyClaude, keyGemini}, []string{"claude", "gemini"}, cliproxyexecutor.Options{}, false, keyGemini.id},
 		{"other provider key untouched", nil, []providerPolicyTestAuth{keyGemini}, []string{"gemini"}, cliproxyexecutor.Options{}, false, keyGemini.id},
 		{"pinned api key is exempt", nil, []providerPolicyTestAuth{oauthClaude, keyClaude}, []string{"claude"}, pin(keyClaude.id), false, keyClaude.id},
+		// A Codex websocket continuation pins the credential of its session.
+		{"pinned codex api key is exempt", nil, []providerPolicyTestAuth{oauthCodex, keyCodex}, []string{"codex"}, pin(keyCodex.id), false, keyCodex.id},
+		{"mixed claude and codex under codex api mode", providerPolicyConfig(internalconfig.ProviderRoutingConfig{}, apiMode(keyCodex.index)), []providerPolicyTestAuth{keyClaude, oauthCodex, keyCodex}, []string{"claude", "codex"}, cliproxyexecutor.Options{}, false, keyCodex.id},
 		{"plugin scheduler keeps api keys", nil, []providerPolicyTestAuth{keyClaude}, []string{"claude"}, cliproxyexecutor.Options{}, true, keyClaude.id},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -344,5 +347,46 @@ func TestLogRoutingProfileSelectionAPIStage(t *testing.T) {
 				t.Fatalf("entry %d leaks a credential secret: %v", i, entries[i].Data)
 			}
 		}
+	}
+}
+
+// A hot reload that switches a provider between modes applies to sessions that
+// are already bound: a binding to a credential the new mode excludes fails over
+// to an eligible credential instead of sticking.
+func TestProviderPolicyHotReloadMovesBoundSessions(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			oauth := providerPolicyTestAuth{"hr-" + provider + "-oauth", provider, AuthKindOAuth, provider + "-oauth"}
+			key := providerPolicyTestAuth{"hr-" + provider + "-key", provider, AuthKindAPIKey, provider + "-key"}
+			apiCfg := providerPolicyConfig(apiMode(key.index), internalconfig.ProviderRoutingConfig{})
+			if provider == "codex" {
+				apiCfg = providerPolicyConfig(internalconfig.ProviderRoutingConfig{}, apiMode(key.index))
+			}
+			m, calls := providerPolicyTestManager(t, apiCfg, oauth, key)
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: NewPipelineSelector(m.SharedSelection), TTL: time.Hour})
+			t.Cleanup(selector.Stop)
+			m.SetSelector(selector)
+			session := "hot-reload-" + provider
+			opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{session}}}
+			run := func(step string, want string) {
+				t.Helper()
+				*calls = nil
+				if _, errExecute := m.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: providerPolicyTestModel}, opts); errExecute != nil {
+					t.Fatalf("%s: Execute: %v", step, errExecute)
+				}
+				if len(*calls) != 1 || (*calls)[0] != want {
+					t.Fatalf("%s: calls = %v, want [%s]", step, *calls, want)
+				}
+				if bound, _ := selector.LookupAffinity(provider, providerPolicyTestModel, session); bound != want {
+					t.Fatalf("%s: session bound to %q, want %q", step, bound, want)
+				}
+			}
+
+			run("api mode", key.id)
+			m.SetConfig(&internalconfig.Config{})
+			run("after reload to subscription", oauth.id)
+			m.SetConfig(apiCfg)
+			run("after reload back to api", key.id)
+		})
 	}
 }
