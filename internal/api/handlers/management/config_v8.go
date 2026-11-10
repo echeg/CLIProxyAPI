@@ -222,6 +222,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
 	}
 	h.cfg = next
+	warnUnknownRoutingAPICredentials(next, h.authManager)
 	snapshot := h.reloadSnapshotConfigLocked()
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), snapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": 8})

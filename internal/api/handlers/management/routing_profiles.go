@@ -14,8 +14,10 @@ type routingKeyProfileView struct {
 	Profile config.RoutingProfile `json:"profile"`
 }
 
-// GetRoutingProfiles returns the shared profile, every key profile, and the slot
-// values a selection accepts. Writes go through the v8 config PATCH.
+// GetRoutingProfiles returns the shared profile, every key profile, the slot
+// values a selection accepts, and the claude/codex API-key credentials a profile
+// can name. Profiles carry their effective providers block and the legacy
+// claude-fallback view derived from it. Writes go through the v8 config PATCH.
 func (h *Handler) GetRoutingProfiles(c *gin.Context) {
 	h.mu.Lock()
 	manager := h.authManager
@@ -36,15 +38,18 @@ func (h *Handler) GetRoutingProfiles(c *gin.Context) {
 		view := routingKeyProfileView{Key: key, Profile: profile.Clone()}
 		view.Profile.Selection = profile.EffectiveSelection()
 		view.Profile.ClaudeFallback = legacyFallbackView(*profile)
+		view.Profile.Providers = effectiveProvidersView(*profile)
 		keys = append(keys, view)
 	}
 	h.mu.Unlock()
 	shared.ClaudeFallback = legacyFallbackView(shared)
+	shared.Providers = effectiveProvidersView(shared)
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, gin.H{
-		"supported": manager.ClaudeFallbackSupported(),
-		"shared":    shared,
-		"keys":      keys,
+		"supported":       manager.ClaudeFallbackSupported(),
+		"shared":          shared,
+		"keys":            keys,
+		"api_credentials": routingAPICredentials(manager),
 		"selection_options": gin.H{
 			"narrowing": config.SelectionNarrowingSlots,
 			"pickers":   config.SelectionPickerSlots,

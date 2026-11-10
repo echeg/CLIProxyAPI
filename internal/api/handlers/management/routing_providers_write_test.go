@@ -186,6 +186,9 @@ func TestConfigV8InvalidProvidersWriteRejected(t *testing.T) {
 		name, patch, wantPath string
 	}{
 		{"unknown mode", `{"routing":{"providers":{"claude":{"mode":"hybrid"}}}}`, "routing.providers.claude.mode"},
+		{"unknown target", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"codex":{"fallback":{"target":"claude"}}}}}}}`, "routing.key-profiles." + hash + ".providers.codex.fallback.target"},
+		{"api mode without credential", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"codex":{"mode":"api"}}}}}}`, "routing.key-profiles." + hash + ".providers.codex.api-credential"},
+		{"codex target without mappings", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"claude":{"fallback":{"target":"codex","mappings":null}}}}}}}`, "routing.key-profiles." + hash + ".providers.claude.fallback"},
 		{"codex target on codex", `{"routing":{"providers":{"codex":{"mode":"subscription","fallback":{"target":"codex"}}}}}`, "routing.providers.codex.fallback.target"},
 		{"api fallback without credential", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"codex":{"fallback":{"target":"api"}}}}}}}`, "routing.key-profiles." + hash + ".providers.codex.api-credential"},
 		{"api mode with a fallback", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"claude":{"mode":"api"}}}}}}`, "routing.key-profiles." + hash + ".providers.claude.fallback.target"},
