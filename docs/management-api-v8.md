@@ -154,17 +154,29 @@ in a cluster.
 
 ### Claude -> Codex subscription fallback
 
-`routing.claude-fallback` sends selected Claude models to a Codex subscription:
+`routing.providers.claude.fallback` with `target: codex` sends selected Claude
+models to a Codex subscription:
 
 ```yaml
 routing:
-  claude-fallback:
-    enabled: true
-    mode: auto          # auto (default) or always
-    mappings:
-      - from: "claude-opus-*"
-        to: "gpt-6-astra"
+  providers:
+    claude:
+      fallback:
+        target: codex       # off (default), codex, or api
+        mode: auto          # auto (default) or always
+        mappings:
+          - from: "claude-opus-*"
+            to: "gpt-6-astra"
 ```
+
+The legacy spelling `routing.claude-fallback: {enabled, mode, mappings}` is
+still accepted in the shared profile and in key profiles. `enabled: true`
+means `target: codex` and `enabled: false` means `target: off`; `mode` and
+`mappings` are kept. When a profile carries both blocks,
+`providers.claude.fallback` wins and the legacy block is ignored with a
+warning. A save writes `providers` and drops the legacy block of that profile.
+See [Per-provider mode and API fallback](#per-provider-mode-and-api-fallback)
+for the `api` target.
 
 - A `from` that matches the model exactly wins; otherwise the longest matching
   trailing-`*` prefix wins. Unmapped models stay on Claude. A thinking suffix
@@ -179,32 +191,156 @@ routing:
 
 `GET /v8/management/routing/claude-fallback` returns
 `{"supported": bool, "settings": {...}, "models": {"claude": [...], "codex": [...]}}`
-with `Cache-Control: no-store`. `models` lists the model IDs of enabled Claude
-credentials and Codex OAuth credentials. `supported` is `false` in Home mode and
-with a scheduler plugin. Write the settings through
-`PATCH /v8/management/config`. A key profile can carry its own
-`claude-fallback` block (see below).
+with `Cache-Control: no-store`. `settings` is the legacy
+`{enabled, mode, mappings}` view derived from the shared
+`providers.claude.fallback`; `enabled` is `true` only for `target: codex`.
+`models` lists the model IDs of enabled Claude credentials and Codex OAuth
+credentials. `supported` is `false` in Home mode and with a scheduler plugin.
+Write the settings through `PATCH /v8/management/config`. A key profile can
+carry its own `providers` block (see below).
+
+### Per-provider mode and API fallback
+
+> **Default change.** Upstream API keys of Claude and Codex
+> (`api-keys.claude`, `api-keys.codex`) no longer join the primary selection
+> pool. Without a `providers` block every profile runs both providers in
+> `subscription` mode, which selects OAuth subscriptions only. To use an API
+> key, name it in `providers.<provider>.api-credential` and set
+> `mode: api`, or set `fallback.target: api` to use it only after the
+> subscriptions fail. With no subscription credential at all, a request fails
+> with `auth_not_found` and the message
+> `no subscription credentials for claude; set routing providers.claude.mode: api`.
+
+Every routing profile (the shared `routing.*` profile and each
+`routing.key-profiles.<key>`) can carry a `providers` block with a `claude` and a
+`codex` sub-block:
+
+```yaml
+routing:
+  providers:
+    claude:
+      mode: subscription               # subscription (default) or api
+      api-credential: "<auth_index>"   # required for mode: api or fallback.target: api
+      fallback:
+        target: codex                  # off (default), codex, or api
+        mode: auto                     # auto or always; target codex only
+        mappings: [{from: "claude-opus-*", to: "gpt-6-astra"}]  # target codex only
+    codex:
+      mode: subscription
+      api-credential: "<auth_index>"
+      fallback:
+        target: api                    # off or api
+  key-profiles:
+    "client-key-a":
+      providers:
+        claude: {mode: api, api-credential: "<auth_index>"}
+        codex: {api-credential: "<auth_index>", fallback: {target: api}}
+```
+
+`api-credential` is the `auth_index` of an `api-keys.claude` or `api-keys.codex`
+entry of the same provider; take it from `api_credentials` in
+`GET /v8/management/routing/profiles`. A key profile replaces the shared profile
+completely: a key profile without `providers` runs both providers in
+`subscription` mode with fallback `off`.
+
+#### Validation
+
+Invalid settings fail the load and return `422 invalid_config` on a write. Key
+profile paths use the 12-hex key hash, for example
+`routing.key-profiles.3f2a9c1b7d4e.providers.claude.api-credential`.
+
+- `mode` must be `subscription` or `api`; `fallback.target` must be `off`,
+  `codex`, or `api`. Values are trimmed and lower-cased.
+- `mode: api` or `fallback.target: api` without `api-credential` is an error.
+- `codex.fallback.target: codex` is an error.
+- `mode: api` with a `fallback.target` other than `off` is an error.
+- `target: codex` keeps the Claude -> Codex rules: at least one mapping, a `*`
+  only at the end of `from`, no duplicate `from`.
+- `fallback.mode` and `mappings` under `target: api` are kept but ignored; the
+  load logs a warning.
+- An `api-credential` that matches no enabled API-key credential of that provider
+  is not an error, because the key may be added later. A successful
+  configuration write logs one warning per such profile with the fields
+  `profile` (`shared` or the key hash) and `claude_api_credential` /
+  `codex_api_credential` (the `auth_index`).
+
+#### Runtime rules
+
+- **Primary leg.** Each candidate credential is filtered by the mode of its own
+  provider, so a request that selects from a mixed Claude and Codex pool applies
+  both modes. `subscription` excludes API-key credentials; `api` allows only the
+  API-key credential whose `auth_index` equals `api-credential`. Other providers
+  are not affected.
+- **`mode: api`.** Subscriptions are skipped. Session affinity works as usual
+  within the one credential. A cooling-down key returns its cooldown error with
+  `Retry-After`; no other API key is ever substituted. A missing or disabled
+  credential returns `auth_not_found` with
+  `no enabled claude API key matches routing providers.claude.api-credential "<auth_index>"`.
+- **`fallback.target: api`.** After a failed primary round the same model runs
+  again on the same provider with only the profile's API key. The triggers match
+  the Codex fallback in `auto` mode: 401, 403, 408, 429, and 5xx responses, no
+  available credential, and transient connection failures; never invalid
+  requests, a canceled client request, or a request stop. `fallback.mode` does
+  not apply: the API target is always `auto`.
+- The API leg neither reads nor writes session bindings, so the next request of
+  the session starts from the subscriptions again.
+- When the API key cannot be selected (cooldown, disabled, removed, unknown
+  index), the client gets the primary error with its status and `Retry-After`.
+- Fallbacks do not chain: a fallback leg never falls back again. Streaming
+  requests fall back only before the response starts.
+- A request that can use both providers checks the `claude` fallback first.
+- A completed primary round goes to the fallback instead of waiting for a
+  cooldown, for both targets.
+- The policy is skipped for executions pinned to a credential (Codex websocket
+  continuations) and for requests that require their own credential kind or
+  policy (the Codex leg of the Claude -> Codex fallback, Codex Alpha Search with
+  an API key).
+- Home mode and scheduler plugins keep their own selection: the provider policy
+  and both fallback targets do not apply there. CLIProxyAPIHome does not
+  implement the provider policy, so a cluster deployment needs matching selector
+  support in Home before using these settings.
+
+#### Logging
+
+`Routing profile selection` lines (see
+[Home mode, plugins, and logging](#home-mode-plugins-and-logging)) report
+`routing_stage=api` for a credential selected under `mode: api`. Inside a
+fallback leg `routing_stage` is `fallback`, `fallback_stage` records the stage
+that chose the credential, and `fallback_target` is `codex` or `api`. The
+fallback itself logs `Routing claude request to API key fallback` (fields
+`provider`, `source_model`, `fallback_target`, `primary_status`) or
+`Routing Claude request to Codex fallback` (fields `source_model`,
+`fallback_model`, `fallback_mode`, `fallback_target`, `primary_status`). The
+configuration diff reports `routing.providers: updated` for the shared block and
+`updated (redacted)` for key profiles; raw keys and API keys are never logged.
 
 ### Per-key routing profiles and selection pipeline
 
 Every client key in `access.api-keys` can have its own routing profile. A profile
-has four stages, applied in this order to each request:
+has five stages, applied in this order to each request:
 
-1. **Sticky session** (`session-affinity`): a session already bound to a
+1. **Provider mode** (`providers.<provider>.mode`): `subscription` keeps only
+   Claude/Codex subscriptions in the candidate pool, `api` keeps only the
+   profile's `api-credential` (see
+   [Per-provider mode and API fallback](#per-provider-mode-and-api-fallback)).
+2. **Sticky session** (`session-affinity`): a session already bound to a
    credential keeps it while it stays usable.
-2. **Preferred subscription** (`preferred-accounts`): for a new selection, the
+3. **Preferred subscription** (`preferred-accounts`): for a new selection, the
    preferred `claude` or `codex` credential is taken when it is usable.
-3. **Pool strategy** (`selection`): `primary`, then `tiebreak`, choose among the
+4. **Pool strategy** (`selection`): `primary`, then `tiebreak`, choose among the
    remaining credentials.
-4. **Claude -> Codex fallback** (`claude-fallback`): the Codex leg of a failed or
-   redirected Claude request runs stages 1-3 again with the same key's Codex
-   preference and selection.
+5. **Fallback** (`providers.<provider>.fallback`): after a failed primary round,
+   the `codex` target runs stages 1-4 again on Codex with the same key's Codex
+   preference and selection; the `api` target runs the same model again with only
+   the profile's API key and without session affinity.
 
 A key without a profile uses the shared profile: the global
 `routing.session-affinity`, `routing.preferred-accounts`, `routing.selection`, and
-`routing.claude-fallback` fields. A key with a profile uses it completely. Nothing
-is inherited from the shared fields: an omitted block means off or empty, and an
-omitted `selection` means `{primary: reserves, tiebreak: round-robin}`.
+`routing.providers` fields (or the legacy `routing.claude-fallback`). A key with a
+profile uses it completely. Nothing is inherited from the shared fields: an
+omitted block means off or empty, an omitted `providers` means `subscription`
+mode with fallback `off`, and an omitted `selection` means
+`{primary: reserves, tiebreak: round-robin}`.
 
 ```yaml
 routing:
@@ -212,13 +348,16 @@ routing:
   session-affinity-ttl: 24h
   preferred-accounts: {claude: "claude-account-index", codex: "codex-account-index"}
   selection: {primary: reserves, tiebreak: earliest-reset}
-  claude-fallback: {enabled: true, mode: auto, mappings: [{from: "claude-opus-*", to: "gpt-6-astra"}]}
+  providers:
+    claude: {fallback: {target: codex, mode: auto, mappings: [{from: "claude-opus-*", to: "gpt-6-astra"}]}}
   key-profiles:
     "client-key-a":
       session-affinity: false
       preferred-accounts: {claude: "another-claude-index"}
       selection: {primary: priority, tiebreak: round-robin}
-      claude-fallback: {enabled: true, mode: auto, mappings: [{from: "claude-*", to: "gpt-6-sol"}]}
+      providers:
+        claude: {api-credential: "claude-api-key-index", fallback: {target: api}}
+        codex: {mode: api, api-credential: "codex-api-key-index"}
 ```
 
 `key-profiles` is keyed by the exact client key. `session-affinity-ttl` and
@@ -248,8 +387,8 @@ empty, round-robin chooses among the remaining ties. A `tiebreak` without a
 A new selection runs this pipeline per provider:
 
 ```text
-available = every priority tier; not disabled, cooling down, model-ineligible,
-            or under an active hard quota reserve
+available = every priority tier; allowed by the provider mode; not disabled,
+            cooling down, model-ineligible, or under an active hard quota reserve
 if the profile's preferred credential for the provider is available: use it
 group = available
 for slot in [primary, tiebreak]:
@@ -264,7 +403,8 @@ cooldown, disabled status, model ineligibility, or removal moves it to the pool.
 Soft levels rank only the remaining pool and only when `reserves` is one of the
 slots. Manual credential priority applies only when `priority` is one of the slots.
 Executions pinned to a credential, such as Codex websocket continuations, keep
-their credential and ignore preferences, reserves, and selection.
+their credential and ignore the provider mode, preferences, reserves, and
+selection.
 
 #### Legacy configuration
 
@@ -302,8 +442,9 @@ the shared profile share bindings as before.
 #### Reading profiles
 
 `GET /v8/management/routing/profiles` returns the shared profile, every key
-profile in `access.api-keys` order, and the accepted slot values. The response
-contains raw client keys and is sent with `Cache-Control: no-store`.
+profile in `access.api-keys` order, the Claude and Codex API-key credentials a
+profile can name, and the accepted slot values. The response contains raw client
+keys and is sent with `Cache-Control: no-store`.
 
 ```json
 {
@@ -312,7 +453,11 @@ contains raw client keys and is sent with `Cache-Control: no-store`.
     "session-affinity": true,
     "preferred-accounts": {"claude": "claude-account-index"},
     "selection": {"primary": "reserves", "tiebreak": "earliest-reset"},
-    "claude-fallback": {"enabled": true, "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]}
+    "claude-fallback": {"enabled": true, "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]},
+    "providers": {
+      "claude": {"mode": "subscription", "api-credential": "", "fallback": {"target": "codex", "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]}},
+      "codex": {"mode": "subscription", "api-credential": "", "fallback": {"target": "off", "mode": "", "mappings": []}}
+    }
   },
   "keys": [
     {
@@ -321,10 +466,18 @@ contains raw client keys and is sent with `Cache-Control: no-store`.
         "session-affinity": false,
         "preferred-accounts": {"claude": "another-claude-index"},
         "selection": {"primary": "priority", "tiebreak": "round-robin"},
-        "claude-fallback": {"enabled": true, "mode": "auto", "mappings": [{"from": "claude-*", "to": "gpt-6-sol"}]}
+        "claude-fallback": {"enabled": false, "mode": "", "mappings": []},
+        "providers": {
+          "claude": {"mode": "subscription", "api-credential": "claude-api-key-index", "fallback": {"target": "api", "mode": "", "mappings": []}},
+          "codex": {"mode": "api", "api-credential": "codex-api-key-index", "fallback": {"target": "off", "mode": "", "mappings": []}}
+        }
       }
     }
   ],
+  "api_credentials": {
+    "claude": [{"auth_index": "claude-api-key-index", "label": "Anthropic", "base_url": "", "disabled": false}],
+    "codex": [{"auth_index": "codex-api-key-index", "label": "OpenAI", "base_url": "https://api.openai.com/v1", "disabled": false}]
+  },
   "selection_options": {
     "narrowing": ["priority", "reserves", "earliest-reset", "most-remaining"],
     "pickers": ["round-robin", "weighted-round-robin", "fill-first"]
@@ -334,8 +487,15 @@ contains raw client keys and is sent with `Cache-Control: no-store`.
 
 `shared.selection` and each key's `selection` are effective values: a derived
 legacy selection or the key default is shown instead of an empty object.
+`providers` is effective too: both sub-blocks are always present, defaults are
+filled in, a legacy `claude-fallback` block is already converted, and `mappings`
+is `[]` rather than `null`. `claude-fallback` is the legacy view derived from
+`providers.claude.fallback` for older clients; its `enabled` is `true` only for
+`target: codex`. `api_credentials` always has a `claude` and a `codex` list of
+API-key credentials sorted by `auth_index`; `disabled` covers disabled
+credentials, and the API key itself is never included.
 `preferred-accounts` is omitted when empty. `supported` is `false` in Home mode
-and with a scheduler plugin. Take `auth_index` values from
+and with a scheduler plugin. Take subscription `auth_index` values from
 `GET /v8/management/credentials` and fallback target models from
 `GET /v8/management/routing/claude-fallback`.
 
@@ -380,7 +540,7 @@ To return to the derived legacy selection, patch `routing.selection` to `null`.
   it only deletes. An unchanged stale entry already on disk does not block other
   writes; it is dropped on save.
 - An unsupported slot value, a `tiebreak` without a `primary`, a provider other
-  than `claude` or `codex` in `preferred-accounts`, or an invalid
+  than `claude` or `codex` in `preferred-accounts`, or an invalid `providers` or
   `claude-fallback` block inside a profile returns `422`
   `{"error": "invalid_config", "message": "..."}`. Messages identify a key profile
   by the first 12 hex characters of the key's SHA-256, for example
@@ -388,6 +548,27 @@ To return to the derived legacy selection, patch `routing.selection` to `null`.
 - On load and hot reload, profiles for keys missing from `access.api-keys` and
   `null` entries are dropped; a missing key is reported as a warning with its hash
   prefix.
+
+Writes that still use the legacy `claude-fallback` block (older panels send it
+with each profile and no `providers`) are merged into the stored `providers`
+instead of replacing it, so an older client cannot wipe API settings. For the
+shared profile and each key profile in the write that carries `claude-fallback`
+and no `providers.claude.fallback`:
+
+- The stored `providers` of that profile is kept; only
+  `providers.claude.fallback` is updated from the legacy block.
+- `enabled: true` sets `target: codex`. `enabled: false` sets `target: off`,
+  unless the stored target is `api`, which is kept because the legacy view cannot
+  express it. `mode` and `mappings` are copied in both cases.
+- The legacy node is removed from the file once `providers.claude.fallback` is
+  set, so the file carries one spelling per profile.
+- A `PUT` of a whole profile that omits `providers` keeps the stored `providers`
+  of that profile as well. YAML document writes (`/config.yaml`) are stored as
+  sent.
+
+```json
+{"routing": {"key-profiles": {"client-key-a": {"providers": {"claude": {"api-credential": "claude-api-key-index", "fallback": {"target": "api"}}}}}}}
+```
 
 Profiles follow their key. Removing a key from `access.api-keys` through a
 configuration write drops its profile from the runtime configuration and from
@@ -401,17 +582,18 @@ key with one already listed drop the profiles of keys no longer listed. A `PATCH
 that appends a new key leaves profiles unchanged. Saving always prunes
 `routing.key-profiles` to the current profiles and removes the node when it is
 empty, so a deleted, rotated, or nulled key does not remain in the file. The
-configuration diff in the log reports `routing.selection` changes and the
-`routing.key-profiles` count, or `updated (redacted)`, never keys or profile
-contents.
+configuration diff in the log reports `routing.selection` changes,
+`routing.providers: updated`, and the `routing.key-profiles` count, or
+`updated (redacted)`, never keys, credential indexes, or profile contents.
 
 #### Home mode, plugins, and logging
 
 Key profiles apply to native standalone routing only. Home mode resolves no
 profile and keeps its control-plane selection; it also disables these management
 endpoints. With a scheduler plugin, every request uses the shared profile, so
-global preferences keep applying there, while key profiles and the Claude ->
-Codex fallback do not apply.
+global preferences keep applying there, while key profiles, the provider mode,
+and both fallback targets do not apply. CLIProxyAPIHome does not implement the
+provider policy.
 
 Each selection for a key with its own profile writes one info line:
 
@@ -421,9 +603,10 @@ level=info msg="Routing profile selection" auth_index=claude-account-index provi
 
 `routing_key` is the first 12 hex characters of the key's SHA-256; the raw key is
 never logged. `routing_stage` is `sticky` (a bound session reused its credential),
-`preferred`, or `pipeline`. Inside the Codex fallback leg it is `fallback`, and
-`fallback_stage` records which of those stages chose the Codex credential.
-Requests that use the shared profile write no such line.
+`preferred`, `pipeline`, or `api` (an API-key credential selected for a provider
+in `mode: api`). Inside a fallback leg it is `fallback`, `fallback_stage` records
+which of those stages chose the credential, and `fallback_target` is `codex` or
+`api`. Requests that use the shared profile write no such line.
 
 ### Quota reserve for shared subscriptions
 
@@ -595,8 +778,8 @@ retain the corresponding business operation's fields.
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
 | `/routing/activity` | GET | Get each credential's latest actual selection time. |
-| `/routing/profiles` | GET | Get the shared and per-key routing profiles and the selection slot values. |
-| `/routing/claude-fallback` | GET | Get the shared Claude -> Codex fallback settings, support status, and available Claude/Codex model IDs. |
+| `/routing/profiles` | GET | Get the shared and per-key routing profiles (including effective `providers`), the Claude/Codex API-key credentials, and the selection slot values. |
+| `/routing/claude-fallback` | GET | Get the legacy view of the shared Claude -> Codex fallback settings, support status, and available Claude/Codex model IDs. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
 | `/observability/logs/errors` | GET | List error-log files. |
 | `/observability/logs/errors/<name>` | GET | Download an error-log file. |

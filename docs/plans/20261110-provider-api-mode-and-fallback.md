@@ -191,10 +191,10 @@
 - ➕ verification notes: Overview goals map to `providerPolicyAllows` (eligibility, default `subscription` excludes Claude/Codex API keys), `executeWithProviderFallback` with `target: api` (shared and key profiles, `TestAPIFallback*`), `mode: api` (`TestProviderPolicyExecutionSelection`), and Codex parity (every policy/fallback test runs both providers). Added regression tests for the edge cases that had no explicit coverage: `pinned codex api key is exempt` and `mixed claude and codex under codex api mode` rows in `TestProviderPolicyExecutionSelection`, and `TestProviderPolicyHotReloadMovesBoundSessions` (a session bound under one mode moves to an eligible credential after a reload to the other mode, both providers). `go test ./...` passed on the first run (no flaky re-run needed); `gofmt -l .`, the compile check, and `go vet` on the listed packages are clean.
 
 ### Task 7: Update documentation
-- [ ] `docs/management-api-v8.md`: new section "Per-provider mode and API fallback" (schema, validation, runtime rules, logging fields), update the routing stages list, the profiles response example (`providers`, `api_credentials`), the writing-profiles rules (legacy-write merge), and add a prominent note on the default change (Claude/Codex API keys leave the primary leg; set `mode: api` to use them)
-- [ ] `config.example.yaml`: document `routing.providers` and the key-profile form next to the existing `claude-fallback` example, mark `claude-fallback` as the legacy spelling
-- [ ] `AGENTS.md`: extend the `sdk/cliproxy/auth/` architecture line with the provider policy in eligibility and the per-provider fallback wrapper
-- [ ] note in `docs/management-api-v8.md` that CLIProxyAPIHome does not implement the provider policy
+- [x] `docs/management-api-v8.md`: new section "Per-provider mode and API fallback" (schema, validation, runtime rules, logging fields), update the routing stages list, the profiles response example (`providers`, `api_credentials`), the writing-profiles rules (legacy-write merge), and add a prominent note on the default change (Claude/Codex API keys leave the primary leg; set `mode: api` to use them)
+- [x] `config.example.yaml`: document `routing.providers` and the key-profile form next to the existing `claude-fallback` example, mark `claude-fallback` as the legacy spelling
+- [x] `AGENTS.md`: extend the `sdk/cliproxy/auth/` architecture line with the provider policy in eligibility and the per-provider fallback wrapper
+- [x] note in `docs/management-api-v8.md` that CLIProxyAPIHome does not implement the provider policy
 
 ## Technical Details
 - **Types** (`internal/config/provider_routing.go`):
