@@ -1,7 +1,7 @@
 # Responses websocket stays on the API key after an API fallback turn
 
 - found: 2026-11-10, plan: 20261110-provider-api-mode-and-fallback, phase: internal review
-- severity: minor
+- severity: major (billing: paid API spend continues for the rest of the connection)
 - area: sdk/api/handlers/openai/openai_responses_websocket.go
 
 `routing.providers.codex.fallback.target: api` runs the API fallback leg without
