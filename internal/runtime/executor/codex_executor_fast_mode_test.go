@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -87,7 +88,9 @@ func TestApplyCodexFastModeKeepsRequestedTier(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Codex.FastMode = true
 	body := []byte(`{"model":"gpt-5.5","service_tier":"ultrafast"}`)
-	if got := string(applyCodexFastMode(cfg, codexOAuthTestAuth("http://example.invalid"), "gpt-5.5", body)); got != string(body) {
+	doc := ojson.NewDoc(body)
+	applyCodexFastModeDoc(cfg, codexOAuthTestAuth("http://example.invalid"), "gpt-5.5", doc)
+	if got := string(doc.Bytes()); got != string(body) {
 		t.Fatalf("body = %s, want unchanged", got)
 	}
 }

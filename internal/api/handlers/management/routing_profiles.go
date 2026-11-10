@@ -122,9 +122,10 @@ func countUnknownKeyProfiles(root, before *yaml.Node) int {
 	return count
 }
 
-// pruneUnknownKeyProfiles removes routing.key-profiles entries whose key is absent
-// from access.api-keys, and the key-profiles node itself when it ends up empty.
-func pruneUnknownKeyProfiles(root *yaml.Node) {
+// pruneSavedKeyProfiles removes routing.key-profiles entries that are null (a null
+// in a write deletes the profile) or whose key is absent from access.api-keys, and
+// the key-profiles node itself when it ends up empty.
+func pruneSavedKeyProfiles(root *yaml.Node) {
 	profiles := configV8Node(root, []string{"routing", "key-profiles"})
 	if profiles == nil || profiles.Kind != yaml.MappingNode {
 		return
@@ -132,6 +133,10 @@ func pruneUnknownKeyProfiles(root *yaml.Node) {
 	known := knownAPIKeys(root)
 	kept := profiles.Content[:0]
 	for i := 0; i+1 < len(profiles.Content); i += 2 {
+		value := profiles.Content[i+1]
+		if value == nil || value.Tag == "!!null" {
+			continue
+		}
 		if known[profiles.Content[i].Value] {
 			kept = append(kept, profiles.Content[i], profiles.Content[i+1])
 		}

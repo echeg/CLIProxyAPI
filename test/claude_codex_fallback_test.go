@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -16,7 +17,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type unavailableClaudeExecutor struct{ coreauth.ProviderExecutor }
@@ -104,7 +104,7 @@ func TestClaudeFallbackRealCodexTranslation(t *testing.T) {
 			}
 			select {
 			case body := <-requests:
-				if gjson.GetBytes(body, "model").String() != "gpt-6-astra" || !strings.Contains(string(body), "function_call_output") || !strings.Contains(string(body), "previous content") || !strings.Contains(string(body), "Keep the conversation") {
+				if ojson.GetBytes(body, "model").String() != "gpt-6-astra" || !strings.Contains(string(body), "function_call_output") || !strings.Contains(string(body), "previous content") || !strings.Contains(string(body), "Keep the conversation") {
 					t.Fatalf("lost model/history in translation: %s", body)
 				}
 			default:

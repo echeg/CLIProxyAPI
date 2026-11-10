@@ -121,7 +121,7 @@ func TestResolveRoutingProfilePluginSchedulerUsesSharedProfile(t *testing.T) {
 		for _, account := range accounts {
 			candidates = append(candidates, m.auths[account.ID])
 		}
-		_, selected, _, errAvailable := m.availableAuthsForSelector(ctx, selector, candidates, "codex", model, cliproxyexecutor.Options{}, time.Now(), true)
+		_, selected, _, errAvailable := m.availableAuthsForSelector(ctx, selector, candidates, "codex", model, cliproxyexecutor.Options{}, time.Now(), pluginSchedulerWantsAcrossPriorities(m.pluginScheduler), true)
 		if errAvailable != nil {
 			t.Fatal(errAvailable)
 		}

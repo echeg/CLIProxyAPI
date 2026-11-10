@@ -139,9 +139,18 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ctx = m.ensureRoutingProfile(ctx)
-	result, errStream := executeWithClaudeFallback(m, ctx, providers, req, opts, m.executeStream)
+	// executeStream returns a matched stop rule or a terminated request as an error,
+	// like the native stream path. The fallback wrapper strips the stop marker, so
+	// record it here: only a failure that exhausted the retries renders as a stream.
+	returnedAsError := false
+	execute := func(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+		result, errStream := m.executeStream(ctx, providers, req, opts)
+		returnedAsError = isRequestStopError(errStream) || isRequestTerminatedError(errStream)
+		return result, errStream
+	}
+	result, errStream := executeWithClaudeFallback(m, ctx, providers, req, opts, execute)
 	var bootstrapErr *streamBootstrapError
-	if errors.As(errStream, &bootstrapErr) && bootstrapErr != nil {
+	if !returnedAsError && errors.As(errStream, &bootstrapErr) && bootstrapErr != nil {
 		return streamErrorResult(bootstrapErr.Headers(), errStream), nil
 	}
 	return result, errStream

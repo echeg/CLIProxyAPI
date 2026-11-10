@@ -318,7 +318,7 @@ func TestListAuthFilesExposesQuotaReserveVerdict(t *testing.T) {
 
 	// Once the tripping window resets, the verdict clears without new observations.
 	h.nowFunc = func() time.Time { return reset7d.Add(time.Second) }
-	entry := h.buildAuthFileEntry(mustGetAuth(t, manager, "tripped.json"))
+	entry := h.buildAuthFileEntry(mustGetAuth(t, manager, "tripped.json"), authFileQuotaContext{})
 	if entry["quota_reserve_active"] != false {
 		t.Fatalf("after reset quota_reserve_active = %#v, want false", entry["quota_reserve_active"])
 	}

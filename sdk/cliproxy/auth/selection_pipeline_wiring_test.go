@@ -62,7 +62,7 @@ func TestAvailableAuthsForSelectorHandsPipelineEveryTier(t *testing.T) {
 			candidates = append(candidates, auth)
 		}
 		var errNewSelection, errAvailable error
-		priorityAuths, selectorAuths, errNewSelection, errAvailable = manager.availableAuthsForSelector(context.Background(), selector, candidates, "codex", "", cliproxyexecutor.Options{}, time.Now(), reserve)
+		priorityAuths, selectorAuths, errNewSelection, errAvailable = manager.availableAuthsForSelector(context.Background(), selector, candidates, "codex", "", cliproxyexecutor.Options{}, time.Now(), pluginSchedulerWantsAcrossPriorities(manager.pluginScheduler), reserve)
 		manager.mu.RUnlock()
 		if errAvailable != nil || errNewSelection != nil {
 			t.Fatalf("availableAuthsForSelector() errors = %v, %v", errAvailable, errNewSelection)

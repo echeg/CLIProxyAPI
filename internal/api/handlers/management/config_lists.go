@@ -47,9 +47,9 @@ func rejectInvalidFingerprintProfile(c *gin.Context, field, profile string) bool
 	return false
 }
 
-// Generic helpers for list[string]. Callers must hold h.mu: the helpers save
-// through persistLocked so the mutation, its hook, and the save are atomic.
-func (h *Handler) putStringListLocked(c *gin.Context, set func([]string), after func()) {
+// Generic helpers for list[string]. Each helper takes h.mu itself and runs the
+// mutation, its hook, and the persistLocked save in one critical section.
+func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -66,6 +66,8 @@ func (h *Handler) putStringListLocked(c *gin.Context, set func([]string), after 
 		}
 		arr = obj.Items
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	set(arr)
 	if after != nil {
 		after()
@@ -73,7 +75,9 @@ func (h *Handler) putStringListLocked(c *gin.Context, set func([]string), after 
 	h.persistLocked(c)
 }
 
-func (h *Handler) patchStringListLocked(c *gin.Context, target *[]string, after func()) {
+// patchStringList resolves the list through targetOf under h.mu, so it edits the
+// current config instead of one a reload has replaced.
+func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, after func()) {
 	var body struct {
 		Old   *string `json:"old"`
 		New   *string `json:"new"`
@@ -84,6 +88,9 @@ func (h *Handler) patchStringListLocked(c *gin.Context, target *[]string, after 
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	target := targetOf()
 	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(*target) {
 		(*target)[*body.Index] = *body.Value
 		if after != nil {
@@ -113,7 +120,12 @@ func (h *Handler) patchStringListLocked(c *gin.Context, target *[]string, after 
 	c.JSON(400, gin.H{"error": "missing fields"})
 }
 
-func (h *Handler) deleteFromStringListLocked(c *gin.Context, target *[]string, after func()) {
+// deleteFromStringList resolves the list through targetOf under h.mu, so it edits
+// the current config instead of one a reload has replaced.
+func (h *Handler) deleteFromStringList(c *gin.Context, targetOf func() *[]string, after func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	target := targetOf()
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
@@ -146,36 +158,37 @@ func (h *Handler) deleteFromStringListLocked(c *gin.Context, target *[]string, a
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
 
-// The api-keys handlers hold h.mu across the list mutation, the key-profile
-// reconciliation, and the save, so routing.key-profiles never names a key that
-// left access.api-keys.
+// The api-keys handlers snapshot the list inside the helper's critical section,
+// so the list mutation, the key-profile reconciliation, and the save share one
+// h.mu hold and routing.key-profiles never names a key that left access.api-keys.
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	before := append([]string(nil), h.cfg.APIKeys...)
-	h.putStringListLocked(c, func(v []string) {
+	var before []string
+	h.putStringList(c, func(v []string) {
+		before = append([]string(nil), h.cfg.APIKeys...)
 		h.cfg.APIKeys = append([]string(nil), v...)
-	}, h.reconcileAPIKeyProfilesLocked(before))
+	}, func() { h.reconcileAPIKeyProfilesLocked(before) })
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	before := append([]string(nil), h.cfg.APIKeys...)
-	h.patchStringListLocked(c, &h.cfg.APIKeys, h.reconcileAPIKeyProfilesLocked(before))
+	var before []string
+	h.patchStringList(c, func() *[]string {
+		before = append([]string(nil), h.cfg.APIKeys...)
+		return &h.cfg.APIKeys
+	}, func() { h.reconcileAPIKeyProfilesLocked(before) })
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	before := append([]string(nil), h.cfg.APIKeys...)
-	h.deleteFromStringListLocked(c, &h.cfg.APIKeys, h.reconcileAPIKeyProfilesLocked(before))
+	var before []string
+	h.deleteFromStringList(c, func() *[]string {
+		before = append([]string(nil), h.cfg.APIKeys...)
+		return &h.cfg.APIKeys
+	}, func() { h.reconcileAPIKeyProfilesLocked(before) })
 }
 
-func (h *Handler) reconcileAPIKeyProfilesLocked(before []string) func() {
-	return func() {
-		reconcileKeyProfiles(before, h.cfg.APIKeys, h.cfg.Routing.KeyProfiles)
-		if len(h.cfg.Routing.KeyProfiles) == 0 {
-			h.cfg.Routing.KeyProfiles = nil
-		}
+// reconcileAPIKeyProfilesLocked drops key profiles whose key left access.api-keys
+// and moves a renamed key's profile to its new value. Callers must hold h.mu.
+func (h *Handler) reconcileAPIKeyProfilesLocked(before []string) {
+	reconcileKeyProfiles(before, h.cfg.APIKeys, h.cfg.Routing.KeyProfiles)
+	if len(h.cfg.Routing.KeyProfiles) == 0 {
+		h.cfg.Routing.KeyProfiles = nil
 	}
 }
 
@@ -1253,8 +1266,10 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
@@ -1272,6 +1287,8 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		return
 	}
 	normalized := config.NormalizeExcludedModels(body.Models)
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if len(normalized) == 0 {
 		if h.cfg.OAuthExcludedModels == nil {
 			c.JSON(404, gin.H{"error": "provider not found"})
@@ -1285,14 +1302,14 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		if len(h.cfg.OAuthExcludedModels) == 0 {
 			h.cfg.OAuthExcludedModels = nil
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	if h.cfg.OAuthExcludedModels == nil {
 		h.cfg.OAuthExcludedModels = make(map[string][]string)
 	}
 	h.cfg.OAuthExcludedModels[provider] = normalized
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
@@ -1301,6 +1318,8 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing provider"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.cfg.OAuthExcludedModels == nil {
 		c.JSON(404, gin.H{"error": "provider not found"})
 		return
@@ -1313,7 +1332,7 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 	if len(h.cfg.OAuthExcludedModels) == 0 {
 		h.cfg.OAuthExcludedModels = nil
 	}
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // oauth-model-alias: map[string][]OAuthModelAlias
@@ -1338,8 +1357,10 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cfg.OAuthModelAlias = sanitizedOAuthModelAlias(entries)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
@@ -1366,6 +1387,8 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 
 	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
 	normalized := normalizedMap[channel]
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if len(normalized) == 0 {
 		if h.cfg.OAuthModelAlias == nil {
 			c.JSON(404, gin.H{"error": "channel not found"})
@@ -1379,14 +1402,14 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 		if len(h.cfg.OAuthModelAlias) == 0 {
 			h.cfg.OAuthModelAlias = nil
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	if h.cfg.OAuthModelAlias == nil {
 		h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
 	}
 	h.cfg.OAuthModelAlias[channel] = normalized
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -1398,6 +1421,8 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.cfg.OAuthModelAlias == nil {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
@@ -1410,7 +1435,7 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	if len(h.cfg.OAuthModelAlias) == 0 {
 		h.cfg.OAuthModelAlias = nil
 	}
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // oauth-request-scoped-errors: map[string][]RequestScopedErrorRule
@@ -1435,8 +1460,10 @@ func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cfg.OAuthRequestScopedErrors = sanitizedOAuthRequestScopedErrors(entries)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
@@ -1463,6 +1490,8 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 
 	normalizedMap := sanitizedOAuthRequestScopedErrors(map[string][]config.RequestScopedErrorRule{channel: body.Rules})
 	normalized := normalizedMap[channel]
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if len(normalized) == 0 {
 		if h.cfg.OAuthRequestScopedErrors == nil {
 			c.JSON(404, gin.H{"error": "channel not found"})
@@ -1476,14 +1505,14 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 		if len(h.cfg.OAuthRequestScopedErrors) == 0 {
 			h.cfg.OAuthRequestScopedErrors = nil
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	if h.cfg.OAuthRequestScopedErrors == nil {
 		h.cfg.OAuthRequestScopedErrors = make(map[string][]config.RequestScopedErrorRule)
 	}
 	h.cfg.OAuthRequestScopedErrors[channel] = normalized
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
@@ -1495,6 +1524,8 @@ func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.cfg.OAuthRequestScopedErrors == nil {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
@@ -1507,7 +1538,7 @@ func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
 	if len(h.cfg.OAuthRequestScopedErrors) == 0 {
 		h.cfg.OAuthRequestScopedErrors = nil
 	}
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // codex-api-key: []CodexKey

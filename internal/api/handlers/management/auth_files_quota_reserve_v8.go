@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 // ListAuthFilesV8 includes the full staged reserve policy and its current level.
@@ -28,8 +28,8 @@ func authFilesListResponseForVersion(response gin.H, stagedReserve bool) gin.H {
 	return response
 }
 
-func (h *Handler) buildAuthFileEntryForVersion(auth *coreauth.Auth, stagedReserve bool, quotaSupported map[string]struct{}) gin.H {
-	entry := h.buildAuthFileEntry(auth, quotaSupported)
+func (h *Handler) buildAuthFileEntryForVersion(auth *coreauth.Auth, stagedReserve bool, quota authFileQuotaContext) gin.H {
+	entry := h.buildAuthFileEntry(auth, quota)
 	if entry == nil || !stagedReserve {
 		return entry
 	}
@@ -51,7 +51,7 @@ func authFileQuotaReservePolicyFromJSON(data []byte, provider string) (coreauth.
 	if !coreauth.QuotaReserveSupportedProvider(provider) {
 		return coreauth.QuotaReservePolicy{}, false
 	}
-	raw := gjson.GetBytes(data, authFileQuotaReserveField)
+	raw := ojson.GetBytes(data, authFileQuotaReserveField)
 	if !raw.Exists() {
 		return coreauth.QuotaReservePolicy{}, false
 	}
