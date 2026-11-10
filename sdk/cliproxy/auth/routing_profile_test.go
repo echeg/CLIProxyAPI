@@ -58,7 +58,7 @@ func TestResolveRoutingProfile(t *testing.T) {
 	if keyA == nil || !keyA.fromKey || keyA.keyHash != internalconfig.KeyHashPrefix(routingTestKeyA) {
 		t.Fatalf("key A profile = %+v", keyA)
 	}
-	if keyA.sticky || keyA.preferred["claude"] != "key-a-claude" || keyA.selection.Primary != "earliest-reset" || keyA.fallback.Mode != "always" {
+	if keyA.sticky || keyA.preferred["claude"] != "key-a-claude" || keyA.selection.Primary != "earliest-reset" || keyA.providers.Claude.Fallback.Mode != "always" {
 		t.Fatalf("key A profile inherited shared fields: %+v", keyA)
 	}
 
@@ -66,7 +66,7 @@ func TestResolveRoutingProfile(t *testing.T) {
 	if keyB == nil || keyB.fromKey || keyB.keyHash != internalconfig.KeyHashPrefix(routingTestKeyB) {
 		t.Fatalf("key B profile = %+v", keyB)
 	}
-	if !keyB.sticky || keyB.preferred["claude"] != "shared-claude" || keyB.selection.Primary != "priority" || keyB.fallback.Mode != "auto" {
+	if !keyB.sticky || keyB.preferred["claude"] != "shared-claude" || keyB.selection.Primary != "priority" || keyB.providers.Claude.Fallback.Mode != "auto" {
 		t.Fatalf("key B did not resolve the shared profile: %+v", keyB)
 	}
 

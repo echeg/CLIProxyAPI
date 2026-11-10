@@ -223,39 +223,38 @@ func TestClaudeFallbackCooldownAndProtection(t *testing.T) {
 		t.Fatal(*calls)
 	}
 	profileCtx := m.ensureRoutingProfile(context.Background())
-	_, target := m.claudeFallbackTarget(profileCtx, []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5(high)"}, cliproxyexecutor.Options{})
+	target := m.providerFallbackFor(profileCtx, []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5(high)"}, cliproxyexecutor.Options{}).model
 	if target != "gpt-6-astra(high)" {
 		t.Fatal(target)
 	}
 	for _, opts := range []cliproxyexecutor.Options{{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: "probe-auth"}}} {
-		if _, target := m.claudeFallbackTarget(profileCtx, []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, opts); target != "" {
+		if target := m.providerFallbackFor(profileCtx, []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, opts).model; target != "" {
 			t.Fatal("pinned request rerouted")
 		}
 	}
-	if shouldFallbackClaude(errors.New("unknown internal error")) || shouldFallbackClaude(context.DeadlineExceeded) {
+	if shouldFallbackProvider(errors.New("unknown internal error")) || shouldFallbackProvider(context.DeadlineExceeded) {
 		t.Fatal("unclassified error rerouted")
 	}
 }
 
 func fallbackProfileContext(mode, to string) context.Context {
-	return withRoutingProfile(context.Background(), &routingProfile{fallback: internalconfig.ClaudeFallbackConfig{
-		Enabled: mode != "off", Mode: mode, Mappings: []internalconfig.ClaudeFallbackMapping{{From: "claude-opus-*", To: to}},
-	}})
+	legacy := internalconfig.ClaudeFallbackConfig{Enabled: mode != "off", Mode: mode, Mappings: []internalconfig.ClaudeFallbackMapping{{From: "claude-opus-*", To: to}}}
+	return withRoutingProfile(context.Background(), &routingProfile{providers: internalconfig.RoutingProfile{ClaudeFallback: legacy}.EffectiveProviders()})
 }
 
 func TestClaudeFallbackTargetReadsContextProfile(t *testing.T) {
 	m, _, _, _ := fallbackTestManager(t, "off", nil)
 	req := cliproxyexecutor.Request{Model: "claude-opus-5"}
-	if mode, target := m.claudeFallbackTarget(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{}); mode != "" || target != "" {
-		t.Fatalf("nil profile produced fallback %q/%q", mode, target)
+	if fallback := m.providerFallbackFor(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{}); fallback.mode != "" || fallback.model != "" {
+		t.Fatalf("nil profile produced fallback %q/%q", fallback.mode, fallback.model)
 	}
 	for _, mode := range []string{"auto", "always"} {
-		gotMode, target := m.claudeFallbackTarget(fallbackProfileContext(mode, "gpt-6-sol"), []string{"claude"}, req, cliproxyexecutor.Options{})
-		if gotMode != mode || target != "gpt-6-sol" {
-			t.Fatalf("mode %s: got %q/%q", mode, gotMode, target)
+		fallback := m.providerFallbackFor(fallbackProfileContext(mode, "gpt-6-sol"), []string{"claude"}, req, cliproxyexecutor.Options{})
+		if fallback.mode != mode || fallback.model != "gpt-6-sol" {
+			t.Fatalf("mode %s: got %q/%q", mode, fallback.mode, fallback.model)
 		}
 	}
-	if _, target := m.claudeFallbackTarget(fallbackProfileContext("off", "gpt-6-sol"), []string{"claude"}, req, cliproxyexecutor.Options{}); target != "" {
+	if target := m.providerFallbackFor(fallbackProfileContext("off", "gpt-6-sol"), []string{"claude"}, req, cliproxyexecutor.Options{}).model; target != "" {
 		t.Fatalf("disabled profile produced target %q", target)
 	}
 }
@@ -406,7 +405,7 @@ func TestClaudeFallbackTargetGuards(t *testing.T) {
 		{name: "no claude provider", ctx: fallbackProfileContext("always", "gpt-6-sol"), providers: []string{"codex"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, target := m.claudeFallbackTarget(tc.ctx, tc.providers, req, cliproxyexecutor.Options{}); target != tc.want {
+			if target := m.providerFallbackFor(tc.ctx, tc.providers, req, cliproxyexecutor.Options{}).model; target != tc.want {
 				t.Fatalf("target = %q, want %q", target, tc.want)
 			}
 		})

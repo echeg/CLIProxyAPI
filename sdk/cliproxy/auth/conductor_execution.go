@@ -215,7 +215,7 @@ func (m *Manager) execute(ctx context.Context, providers []string, req cliproxye
 			preferredUpstreamErr = errExec
 		}
 		lastErr = errExec
-		if m.hasClaudeFallbackAfterError(ctx, normalized, req, opts, errExec) {
+		if m.hasProviderFallbackAfterError(ctx, normalized, req, opts, errExec) {
 			break
 		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
@@ -281,7 +281,7 @@ func (m *Manager) executeCount(ctx context.Context, providers []string, req clip
 			preferredUpstreamErr = errExec
 		}
 		lastErr = errExec
-		if m.hasClaudeFallbackAfterError(ctx, normalized, req, opts, errExec) {
+		if m.hasProviderFallbackAfterError(ctx, normalized, req, opts, errExec) {
 			break
 		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
@@ -360,7 +360,7 @@ func (m *Manager) executeStream(ctx context.Context, providers []string, req cli
 			return nil, unwrapExecutionBoundaryKeepingStop(errStream)
 		}
 		lastErr = errStream
-		if m.hasClaudeFallbackAfterError(ctx, normalized, req, opts, errStream) {
+		if m.hasProviderFallbackAfterError(ctx, normalized, req, opts, errStream) {
 			break
 		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errStream, attempt, normalized, retryModel, maxWait, homeRetryLimit, defaultRequestRetry, roundAttempted)

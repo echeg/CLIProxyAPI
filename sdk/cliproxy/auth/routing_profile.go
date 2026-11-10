@@ -20,7 +20,6 @@ type routingProfile struct {
 	sticky    bool
 	preferred map[string]string
 	selection config.SelectionConfig
-	fallback  config.ClaudeFallbackConfig
 	// providers is the effective per-provider mode and fallback policy.
 	providers config.ProvidersRoutingConfig
 	// providerPolicy is false when the provider policy is unsupported (a scheduler
@@ -58,13 +57,11 @@ func (p *routingProfile) preferredAccounts() map[string]string {
 func newRoutingProfile(profile config.RoutingProfile, keyHash string, fromKey bool) *routingProfile {
 	providers := profile.EffectiveProviders()
 	return &routingProfile{
-		keyHash:   keyHash,
-		fromKey:   fromKey,
-		sticky:    profile.SessionAffinity,
-		preferred: profile.PreferredAccounts,
-		selection: profile.EffectiveSelection(),
-		// The Codex leg runs only for target codex; the legacy view carries it.
-		fallback:       providers.Claude.Fallback.LegacyClaudeFallback(),
+		keyHash:        keyHash,
+		fromKey:        fromKey,
+		sticky:         profile.SessionAffinity,
+		preferred:      profile.PreferredAccounts,
+		selection:      profile.EffectiveSelection(),
 		providers:      providers,
 		providerPolicy: true,
 	}
@@ -173,29 +170,36 @@ const (
 	routingStageAPI = "api"
 )
 
-// routingFallbackLegKey marks the context of the Codex leg of a Claude -> Codex
-// fallback, so selections made there report the fallback stage.
+// routingFallbackLegKey marks the context of a fallback leg (the Codex leg of a
+// Claude -> Codex fallback or an API-key leg) with its target, so selections made
+// there report the fallback stage and the wrapper never chains another fallback.
 type routingFallbackLegKey struct{}
 
-func withRoutingFallbackLeg(ctx context.Context) context.Context {
+func withRoutingFallbackLeg(ctx context.Context, target string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, routingFallbackLegKey{}, true)
+	return context.WithValue(ctx, routingFallbackLegKey{}, target)
+}
+
+// routingFallbackTarget returns the target of the fallback leg running in ctx,
+// or "" outside a fallback leg.
+func routingFallbackTarget(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	target, _ := ctx.Value(routingFallbackLegKey{}).(string)
+	return target
 }
 
 func routingFallbackLeg(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	leg, _ := ctx.Value(routingFallbackLegKey{}).(bool)
-	return leg
+	return routingFallbackTarget(ctx) != ""
 }
 
 // logRoutingProfileSelection reports a selection driven by a key profile. It logs
-// only the key hash prefix and never the raw client key. A selection inside the
-// Codex fallback leg reports the fallback stage and keeps the stage that chose the
-// credential in fallback_stage.
+// only the key hash prefix and never the raw client key. A selection inside a
+// fallback leg reports the fallback stage, keeps the stage that chose the
+// credential in fallback_stage, and names the leg in fallback_target.
 func logRoutingProfileSelection(ctx context.Context, stage string, auth *Auth) {
 	profile := routingProfileFromContext(ctx)
 	if profile == nil || !profile.fromKey || auth == nil {
@@ -211,9 +215,10 @@ func logRoutingProfileSelection(ctx context.Context, stage string, auth *Auth) {
 		stage = routingStageAPI
 		fields["routing_stage"] = stage
 	}
-	if routingFallbackLeg(ctx) && stage != routingStageFallback {
+	if target := routingFallbackTarget(ctx); target != "" && stage != routingStageFallback {
 		fields["routing_stage"] = routingStageFallback
 		fields["fallback_stage"] = stage
+		fields["fallback_target"] = target
 	}
 	logEntryWithRequestID(ctx).WithFields(fields).Info("Routing profile selection")
 }
