@@ -166,10 +166,11 @@ func executeWithProviderFallback[T any](m *Manager, ctx context.Context, provide
 			"provider": fallback.provider, "source_model": req.Model, "fallback_target": fallback.target,
 			"primary_status": statusCodeFromError(primaryErr),
 		}).Infof("Routing %s request to API key fallback", fallback.provider)
-		// The same model and providers run again with the provider in mode api; the
-		// leg calls the inner execute, so it cannot fall back again.
+		// The same model runs again on the fallback provider alone, in mode api, so
+		// other providers of the request (and their subscriptions) stay out of the
+		// leg. The leg calls the inner execute, so it cannot fall back again.
 		legCtx := withRoutingFallbackLeg(withRoutingProfile(ctx, routingProfileFromContext(ctx).apiFallbackProfile(fallback.provider)), fallback.target)
-		result, errFallback = execute(legCtx, providers, req, opts)
+		result, errFallback = execute(legCtx, []string{fallback.provider}, req, opts)
 	} else {
 		logEntryWithRequestID(ctx).WithFields(log.Fields{
 			"source_model": req.Model, "fallback_model": fallback.model, "fallback_mode": fallback.mode,

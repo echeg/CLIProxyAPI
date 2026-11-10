@@ -146,7 +146,7 @@ routing:
 	if profile.Selection != (SelectionConfig{Primary: SelectionReserves, Tiebreak: SelectionFillFirst}) {
 		t.Fatalf("selection = %+v", profile.Selection)
 	}
-	if profile.ClaudeFallback.Mode != "always" || profile.ClaudeFallback.Target("claude-opus") != "gpt-x" {
+	if profile.ClaudeFallback.Mode != "always" || fallbackMappingTarget(profile.ClaudeFallback.Mappings, "claude-opus") != "gpt-x" {
 		t.Fatalf("fallback = %+v", profile.ClaudeFallback)
 	}
 

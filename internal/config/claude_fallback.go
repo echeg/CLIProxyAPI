@@ -54,12 +54,8 @@ func normalizeFallbackRules(mode string, mappings []ClaudeFallbackMapping, requi
 	return nil
 }
 
-// Target prefers an exact match, then the longest matching family prefix.
-// The caller removes reasoning suffixes before lookup.
-func (c ClaudeFallbackConfig) Target(model string) string {
-	return fallbackMappingTarget(c.Mappings, model)
-}
-
+// fallbackMappingTarget prefers an exact match, then the longest matching family
+// prefix. The caller removes reasoning suffixes before lookup.
 func fallbackMappingTarget(mappings []ClaudeFallbackMapping, model string) string {
 	var target string
 	longest := -1

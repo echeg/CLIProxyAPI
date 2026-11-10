@@ -61,7 +61,8 @@ func (m *Manager) providerPolicySelectionError(ctx context.Context, providers []
 		}
 		if policy.Mode == internalconfig.ProviderModeAPI {
 			if !hasCredential {
-				return &Error{Code: "auth_not_found", Message: fmt.Sprintf("no enabled %s API key matches routing providers.%s.api-credential %q", provider, provider, policy.APICredential)}
+				// The message reaches the client; the auth_index stays in the config.
+				return &Error{Code: "auth_not_found", Message: fmt.Sprintf("no enabled %s API key matches routing providers.%s.api-credential", provider, provider)}
 			}
 			continue
 		}

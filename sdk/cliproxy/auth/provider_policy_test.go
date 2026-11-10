@@ -71,6 +71,17 @@ func cooldownRetryAfterHeader(err error) string {
 	return cooldownErr.Headers().Get("Retry-After")
 }
 
+// providerPolicySelectors are the selectors the policy must hold under: the
+// production pipeline and the built-in selectors, which take the scheduler path.
+var providerPolicySelectors = []struct {
+	name  string
+	build func(*Manager) Selector
+}{
+	{"pipeline", func(m *Manager) Selector { return NewPipelineSelector(m.SharedSelection) }},
+	{"round-robin", func(*Manager) Selector { return &RoundRobinSelector{} }},
+	{"fill-first", func(*Manager) Selector { return &FillFirstSelector{} }},
+}
+
 func providerPolicyConfig(claude, codex internalconfig.ProviderRoutingConfig) *internalconfig.Config {
 	return &internalconfig.Config{Routing: internalconfig.RoutingConfig{Providers: internalconfig.ProvidersRoutingConfig{Claude: claude, Codex: codex}}}
 }
@@ -213,22 +224,28 @@ func TestProviderPolicyExecutionSelection(t *testing.T) {
 		{"mixed claude and codex under codex api mode", providerPolicyConfig(internalconfig.ProviderRoutingConfig{}, apiMode(keyCodex.index)), []providerPolicyTestAuth{keyClaude, oauthCodex, keyCodex}, []string{"claude", "codex"}, cliproxyexecutor.Options{}, false, keyCodex.id},
 		{"plugin scheduler keeps api keys", nil, []providerPolicyTestAuth{keyClaude}, []string{"claude"}, cliproxyexecutor.Options{}, true, keyClaude.id},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m, calls := providerPolicyTestManager(t, tc.cfg, tc.auths...)
-			if tc.plugin {
-				m.SetPluginScheduler(&fakePluginScheduler{})
-			}
-			for i := 0; i < 4; i++ {
-				if _, errExecute := m.Execute(context.Background(), tc.providers, cliproxyexecutor.Request{Model: providerPolicyTestModel}, tc.opts); errExecute != nil {
-					t.Fatalf("Execute #%d: %v", i, errExecute)
+		for _, selector := range providerPolicySelectors {
+			t.Run(tc.name+"/"+selector.name, func(t *testing.T) {
+				m, calls := providerPolicyTestManager(t, tc.cfg, tc.auths...)
+				m.SetSelector(selector.build(m))
+				if tc.plugin {
+					m.SetPluginScheduler(&fakePluginScheduler{})
 				}
-			}
-			for _, id := range *calls {
-				if id != tc.want {
-					t.Fatalf("calls = %v, want only %s", *calls, tc.want)
+				for i := 0; i < 4; i++ {
+					if _, errExecute := m.Execute(context.Background(), tc.providers, cliproxyexecutor.Request{Model: providerPolicyTestModel}, tc.opts); errExecute != nil {
+						t.Fatalf("Execute #%d: %v", i, errExecute)
+					}
 				}
-			}
-		})
+				if len(*calls) == 0 {
+					t.Fatal("no executor call")
+				}
+				for _, id := range *calls {
+					if id != tc.want {
+						t.Fatalf("calls = %v, want only %s", *calls, tc.want)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -241,18 +258,21 @@ func TestProviderPolicyExecutionErrors(t *testing.T) {
 
 	t.Run("subscription with only api keys", func(t *testing.T) {
 		for _, provider := range []string{"claude", "codex"} {
-			spec := keyClaude
-			if provider == "codex" {
-				spec = keyCodex
-			}
-			m, calls := providerPolicyTestManager(t, nil, spec)
-			_, errExecute := m.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: providerPolicyTestModel}, cliproxyexecutor.Options{})
-			var authErr *Error
-			if !errors.As(errExecute, &authErr) || authErr.Code != "auth_not_found" || !strings.Contains(authErr.Message, "no subscription credentials for "+provider) || !strings.Contains(authErr.Message, "providers."+provider+".mode: api") {
-				t.Fatalf("%s: err = %v, want the subscription policy error", provider, errExecute)
-			}
-			if len(*calls) != 0 {
-				t.Fatalf("%s: executor ran on %v", provider, *calls)
+			for _, selector := range providerPolicySelectors {
+				spec := keyClaude
+				if provider == "codex" {
+					spec = keyCodex
+				}
+				m, calls := providerPolicyTestManager(t, nil, spec)
+				m.SetSelector(selector.build(m))
+				_, errExecute := m.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: providerPolicyTestModel}, cliproxyexecutor.Options{})
+				var authErr *Error
+				if !errors.As(errExecute, &authErr) || authErr.Code != "auth_not_found" || !strings.Contains(authErr.Message, "no subscription credentials for "+provider) || !strings.Contains(authErr.Message, "providers."+provider+".mode: api") {
+					t.Fatalf("%s/%s: err = %v, want the subscription policy error", provider, selector.name, errExecute)
+				}
+				if len(*calls) != 0 {
+					t.Fatalf("%s/%s: executor ran on %v", provider, selector.name, *calls)
+				}
 			}
 		}
 	})
@@ -261,11 +281,11 @@ func TestProviderPolicyExecutionErrors(t *testing.T) {
 		m, calls := providerPolicyTestManager(t, providerPolicyConfig(apiMode("missing-index"), internalconfig.ProviderRoutingConfig{}), oauthClaude, keyClaude)
 		_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: providerPolicyTestModel}, cliproxyexecutor.Options{})
 		var authErr *Error
-		if !errors.As(errExecute, &authErr) || authErr.Code != "auth_not_found" || !strings.Contains(authErr.Message, `providers.claude.api-credential "missing-index"`) {
+		if !errors.As(errExecute, &authErr) || authErr.Code != "auth_not_found" || !strings.Contains(authErr.Message, "no enabled claude API key matches routing providers.claude.api-credential") {
 			t.Fatalf("err = %v, want the api-credential error", errExecute)
 		}
-		if strings.Contains(authErr.Message, "secret-") {
-			t.Fatalf("error leaks a credential secret: %q", authErr.Message)
+		if strings.Contains(authErr.Message, "secret-") || strings.Contains(authErr.Message, "missing-index") {
+			t.Fatalf("error leaks a credential secret or index: %q", authErr.Message)
 		}
 		if len(*calls) != 0 {
 			t.Fatalf("executor ran on %v", *calls)

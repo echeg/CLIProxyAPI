@@ -187,7 +187,7 @@ func TestEffectiveProvidersConvertsLegacy(t *testing.T) {
 	if errParse != nil {
 		t.Fatal(errParse)
 	}
-	if !cfg.Routing.Providers.IsZero() {
+	if !reflect.DeepEqual(cfg.Routing.Providers, ProvidersRoutingConfig{}) {
 		t.Fatalf("legacy-only config stored providers %+v", cfg.Routing.Providers)
 	}
 	shared := cfg.Routing.SharedProfile().EffectiveProviders()

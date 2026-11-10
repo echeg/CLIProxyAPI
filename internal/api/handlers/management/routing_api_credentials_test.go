@@ -200,7 +200,13 @@ func TestGetClaudeFallbackDerivedFromProviders(t *testing.T) {
 
 func TestConfigV8ProvidersWritePersistsAndWarnsOnUnknownCredential(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	logger := log.StandardLogger()
+	savedHooks := make(log.LevelHooks)
+	for level, hooks := range logger.Hooks {
+		savedHooks[level] = append(savedHooks[level], hooks...)
+	}
 	hook := logtest.NewGlobal()
+	t.Cleanup(func() { logger.ReplaceHooks(savedHooks) })
 	h, path := newRoutingProfilesTestHandler(t, "config-version: 8\naccess:\n  api-keys: [\""+providersWriteKey+"\"]\n")
 	registerRoutingCredentials(t, h.authManager)
 	hash := config.KeyHashPrefix(providersWriteKey)

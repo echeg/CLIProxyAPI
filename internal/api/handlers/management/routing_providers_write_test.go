@@ -166,6 +166,54 @@ func TestConfigV8LegacyClaudeFallbackWriteEdgeCases(t *testing.T) {
 		}
 	})
 
+	t.Run("partial legacy PATCH keeps the stored mode and mappings", func(t *testing.T) {
+		h, _ := newRoutingProfilesTestHandler(t, "config-version: 8\nrouting:\n  providers: {claude: "+storedClaudeBlock(config.ProviderFallbackCodex)+"}\n")
+		wantMappings := []config.ClaudeFallbackMapping{{From: "claude-*", To: "gpt-6-sol"}}
+		for _, step := range []struct {
+			body, target string
+		}{
+			{`{"enabled":false}`, config.ProviderFallbackOff},
+			{`{"enabled":true}`, config.ProviderFallbackCodex},
+		} {
+			if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config/routing/claude-fallback", step.body); rec.Code != http.StatusOK {
+				t.Fatalf("patch %s status %d: %s", step.body, rec.Code, rec.Body.String())
+			}
+			got := h.cfg.Routing.SharedProfile().EffectiveProviders().Claude
+			want := config.ProviderFallbackConfig{Target: step.target, Mode: "always", Mappings: wantMappings}
+			if got.APICredential != "claude-idx" || !reflect.DeepEqual(got.Fallback, want) {
+				t.Fatalf("after %s: claude = %+v, want fallback %+v", step.body, got, want)
+			}
+		}
+	})
+
+	t.Run("DELETE of a converted legacy path turns the fallback off", func(t *testing.T) {
+		raw := keyPrefix + "      providers: {claude: " + storedClaudeBlock(config.ProviderFallbackCodex) + "}\n  providers: {claude: " + storedClaudeBlock(config.ProviderFallbackCodex) + "}\n"
+		h, path := newRoutingProfilesTestHandler(t, raw)
+		for _, target := range []string{"/v8/management/config/routing/claude-fallback", "/v8/management/config/routing/key-profiles/" + providersWriteKey + "/claude-fallback"} {
+			if rec := serveConfigV8(t, h, http.MethodDelete, target, ""); rec.Code != http.StatusOK {
+				t.Fatalf("delete %s status %d: %s", target, rec.Code, rec.Body.String())
+			}
+		}
+		for _, profile := range []config.RoutingProfile{h.cfg.Routing.SharedProfile(), *h.cfg.Routing.KeyProfiles[providersWriteKey]} {
+			if got := profile.EffectiveProviders().Claude; got.Fallback.Target != config.ProviderFallbackOff || got.APICredential != "claude-idx" {
+				t.Fatalf("claude = %+v, want fallback off with the credential kept", got)
+			}
+		}
+		if savedRoutingNode(t, path, "providers", "claude", "fallback") != nil {
+			t.Fatal("converted fallback kept on disk")
+		}
+	})
+
+	t.Run("DELETE of a legacy path keeps an api target", func(t *testing.T) {
+		h, _ := newRoutingProfilesTestHandler(t, "config-version: 8\nrouting:\n  providers: {claude: "+storedClaudeBlock(config.ProviderFallbackAPI)+"}\n")
+		if rec := serveConfigV8(t, h, http.MethodDelete, "/v8/management/config/routing/claude-fallback", ""); rec.Code != http.StatusNotFound {
+			t.Fatalf("delete status %d: %s", rec.Code, rec.Body.String())
+		}
+		if got := h.cfg.Routing.SharedProfile().EffectiveProviders().Claude.Fallback.Target; got != config.ProviderFallbackAPI {
+			t.Fatalf("target = %q, want api", got)
+		}
+	})
+
 	t.Run("unrelated write leaves routing untouched", func(t *testing.T) {
 		raw := "config-version: 8\nserver:\n  port: 8317\nrouting:\n  claude-fallback: {enabled: true, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}\n  providers: {codex: {mode: api, api-credential: codex-idx}}\n"
 		h, path := newRoutingProfilesTestHandler(t, raw)
@@ -197,7 +245,10 @@ func TestConfigV8InvalidProvidersWriteRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, path := newRoutingProfilesTestHandler(t, raw)
-			before, _ := os.ReadFile(path)
+			before, errBefore := os.ReadFile(path)
+			if errBefore != nil {
+				t.Fatal(errBefore)
+			}
 			rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", tc.patch)
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -212,7 +263,11 @@ func TestConfigV8InvalidProvidersWriteRejected(t *testing.T) {
 			if body.Error != "invalid_config" || !strings.Contains(body.Message, tc.wantPath) || strings.Contains(rec.Body.String(), providersWriteKey) {
 				t.Fatalf("body = %s, want invalid_config at %s without the key", rec.Body.String(), tc.wantPath)
 			}
-			if after, _ := os.ReadFile(path); string(after) != string(before) {
+			after, errAfter := os.ReadFile(path)
+			if errAfter != nil {
+				t.Fatal(errAfter)
+			}
+			if string(after) != string(before) {
 				t.Fatal("rejected write changed the file")
 			}
 		})

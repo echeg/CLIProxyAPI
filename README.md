@@ -15,6 +15,11 @@ English | [中文](README_CN.md) | [日本語](README_JA.md)
 > 2. `cp config.example.yaml config.yaml`, then set `management.secret-key` and `access.api-keys`.
 >    Keep `disable-auto-update-panel` unset (or `false`) so the panel stays in sync with the UI fork.
 > 3. Run `./cli-proxy-api --config config.yaml` and open `http://127.0.0.1:8317/management.html`.
+>
+> **Upgrading:** Claude and Codex upstream API keys (`api-keys.claude`, `api-keys.codex`) are no longer
+> picked automatically. Per routing profile, set `routing.providers.<provider>.mode: api` with
+> `api-credential: <auth_index>`, or `fallback.target: api` to use the key only after the subscriptions fail.
+> See [Per-provider mode and API fallback](docs/management-api-v8.md#per-provider-mode-and-api-fallback).
 
 If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.
 

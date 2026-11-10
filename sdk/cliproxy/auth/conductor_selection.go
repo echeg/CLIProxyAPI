@@ -1925,7 +1925,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	if affinity, ok := m.Selector().(*SessionAffinitySelector); ok && affinity != nil && affinity.rebindOnNever {
+	if affinity, ok := m.Selector().(*SessionAffinitySelector); ok && affinity != nil && affinity.rebindOnNever && !sessionAffinityOff(ctx) {
 		var authErr *Error
 		if errors.As(err, &authErr) && authErr != nil && authErr.Code == "session_auth_unavailable" {
 			return 0, false
@@ -2998,9 +2998,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 // pickNextMixed selects the next credential for an execution and names the
 // routing provider policy when it is why no credential is available.
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	if !m.HomeEnabled() {
-		ctx = m.ensureRoutingProfile(ctx)
-	}
+	// Home resolves no profile, so this leaves a Home request unchanged.
+	ctx = m.ensureRoutingProfile(ctx)
 	auth, executor, provider, errPick := m.selectNextMixed(ctx, providers, model, opts, tried)
 	if errPick != nil {
 		errPick = m.providerPolicySelectionError(ctx, providers, opts, errPick)
@@ -3016,7 +3015,6 @@ func (m *Manager) selectNextMixed(ctx context.Context, providers []string, model
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
-	ctx = m.ensureRoutingProfile(ctx)
 
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath(ctx) {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)

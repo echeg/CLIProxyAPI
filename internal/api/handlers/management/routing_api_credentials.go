@@ -41,10 +41,7 @@ func routingAPICredentials(manager *coreauth.Manager) map[string][]routingAPICre
 			continue
 		}
 		// List returns clones, so assigning a missing index does not touch the manager.
-		index := strings.TrimSpace(auth.Index)
-		if index == "" {
-			index = strings.TrimSpace(auth.EnsureIndex())
-		}
+		index := strings.TrimSpace(auth.EnsureIndex())
 		out[provider] = append(out[provider], routingAPICredentialView{
 			AuthIndex: index,
 			Label:     auth.Label,

@@ -21,7 +21,7 @@ func TestClaudeFallbackConfig(t *testing.T) {
 		t.Fatal(errParse)
 	}
 	for source, target := range map[string]string{"claude-sonnet-5": "gpt-generic", "claude-opus-5": "gpt-astra", "claude-opus-special": "gpt-exact(high)", "other": ""} {
-		if got := cfg.Routing.ClaudeFallback.Target(source); got != target {
+		if got := fallbackMappingTarget(cfg.Routing.ClaudeFallback.Mappings, source); got != target {
 			t.Fatalf("target(%s) = %s, want %s", source, got, target)
 		}
 	}
@@ -41,7 +41,7 @@ func TestClaudeFallbackConfig(t *testing.T) {
 	if errLoad != nil {
 		t.Fatal(errLoad)
 	}
-	if !loaded.Routing.ClaudeFallback.Enabled || loaded.Routing.ClaudeFallback.Mode != "auto" || loaded.Routing.ClaudeFallback.Target("claude-opus-5") != "gpt-astra" {
+	if !loaded.Routing.ClaudeFallback.Enabled || loaded.Routing.ClaudeFallback.Mode != "auto" || fallbackMappingTarget(loaded.Routing.ClaudeFallback.Mappings, "claude-opus-5") != "gpt-astra" {
 		t.Fatal("fallback config lost on save")
 	}
 }

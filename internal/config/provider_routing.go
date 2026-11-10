@@ -48,16 +48,6 @@ func (f ProviderFallbackConfig) IsZero() bool {
 	return f.Target == "" && f.Mode == "" && len(f.Mappings) == 0
 }
 
-// IsZero reports whether no field of the provider block is set.
-func (p ProviderRoutingConfig) IsZero() bool {
-	return p.Mode == "" && p.APICredential == "" && p.Fallback.IsZero()
-}
-
-// IsZero reports whether the providers block is absent or empty.
-func (p ProvidersRoutingConfig) IsZero() bool {
-	return p.Claude.IsZero() && p.Codex.IsZero()
-}
-
 // Clone returns a copy of p that shares no mutable state with it.
 func (p ProvidersRoutingConfig) Clone() ProvidersRoutingConfig {
 	p.Claude.Fallback.Mappings = slices.Clone(p.Claude.Fallback.Mappings)
@@ -188,6 +178,8 @@ func normalizeProfileProviders(providers *ProvidersRoutingConfig, legacy *Claude
 		}
 		return errLegacy
 	}
+	// Normalize the stored block in place first: it trims and lower-cases the
+	// stored values, mappings included, which the effective copy below clones.
 	if _, errProviders := providers.Normalize(providersPath); errProviders != nil {
 		return errProviders
 	}

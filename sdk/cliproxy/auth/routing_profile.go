@@ -47,6 +47,14 @@ func routingProfileFromContext(ctx context.Context) *routingProfile {
 	return profile
 }
 
+// sessionAffinityOff reports whether the request's routing profile turns session
+// affinity off (a key profile without it, or the API fallback leg). Such a request
+// neither reads nor writes session bindings, in selection and in retry checks.
+func sessionAffinityOff(ctx context.Context) bool {
+	profile := routingProfileFromContext(ctx)
+	return profile != nil && !profile.sticky
+}
+
 func (p *routingProfile) preferredAccounts() map[string]string {
 	if p == nil {
 		return nil

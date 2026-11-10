@@ -95,7 +95,8 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot_delete_config"})
 			return
 		}
-		if !deleteConfigV8Path(root, parts) {
+		deletedConverted := deleteConvertedClaudeFallback(root, parts)
+		if !deleteConfigV8Path(root, parts) && !deletedConverted {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
 			return
 		}
@@ -157,7 +158,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	if !yamlRequest && c.Request.Method != http.MethodDelete {
 		preserveV8TURNSecrets(root, before)
-		mergeLegacyClaudeFallbackWrites(root, before, written)
+		mergeLegacyClaudeFallbackWrites(root, before, written, c.Request.Method == http.MethodPatch)
 	}
 	// Revisions are owned by Home and must not become ordinary editable settings.
 	for _, field := range []string{"credentials/concurrency/lifecycle-config-revision", "credentials/concurrency/observation-barrier-revision", "plugins/auth-revision"} {

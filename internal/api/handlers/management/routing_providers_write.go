@@ -16,30 +16,32 @@ import (
 //   - a claude-fallback node without providers.claude.fallback in the write is
 //     converted into providers.claude.fallback: enabled -> target codex, disabled
 //     -> target off unless the stored target is api, which is kept; mode and
-//     mappings are copied;
+//     mappings are copied. A PATCH (merge) applies the legacy fields over the
+//     stored fallback, so a partial patch such as {"enabled": false} keeps the
+//     stored mode and mappings even after the legacy node was converted;
 //   - the legacy node is dropped once providers.claude.fallback is set.
 //
 // root is the merged document, before the stored one, and patch the written
 // value placed at its config path; patch must not share nodes with root.
-func mergeLegacyClaudeFallbackWrites(root, before, patch *yaml.Node) {
+func mergeLegacyClaudeFallbackWrites(root, before, patch *yaml.Node, merge bool) {
 	written := configV8Node(patch, []string{"routing"})
 	if written == nil || written.Kind != yaml.MappingNode {
 		return
 	}
 	merged := configV8Node(root, []string{"routing"})
 	stored := configV8Node(before, []string{"routing"})
-	mergeLegacyClaudeFallbackProfile(merged, stored, written)
+	mergeLegacyClaudeFallbackProfile(merged, stored, written, merge)
 	writtenProfiles := configV8Node(written, []string{"key-profiles"})
 	if writtenProfiles == nil || writtenProfiles.Kind != yaml.MappingNode {
 		return
 	}
 	for i := 0; i+1 < len(writtenProfiles.Content); i += 2 {
 		key := []string{"key-profiles", writtenProfiles.Content[i].Value}
-		mergeLegacyClaudeFallbackProfile(configV8Node(merged, key), configV8Node(stored, key), writtenProfiles.Content[i+1])
+		mergeLegacyClaudeFallbackProfile(configV8Node(merged, key), configV8Node(stored, key), writtenProfiles.Content[i+1], merge)
 	}
 }
 
-func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node) {
+func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node, merge bool) {
 	if merged == nil || merged.Kind != yaml.MappingNode || written == nil || written.Kind != yaml.MappingNode {
 		return
 	}
@@ -49,12 +51,15 @@ func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node) {
 		}
 	}
 	if configV8Node(written, []string{"claude-fallback"}) != nil && configV8Node(written, []string{"providers", "claude", "fallback"}) == nil {
-		var legacy config.ClaudeFallbackConfig
 		var previous config.RoutingProfile
-		if node := configV8Node(merged, []string{"claude-fallback"}); node == nil || node.Decode(&legacy) != nil {
+		if stored != nil && stored.Kind == yaml.MappingNode && stored.Decode(&previous) != nil {
 			return
 		}
-		if stored != nil && stored.Kind == yaml.MappingNode && stored.Decode(&previous) != nil {
+		var legacy config.ClaudeFallbackConfig
+		if merge {
+			legacy = previous.EffectiveProviders().Claude.Fallback.LegacyClaudeFallback()
+		}
+		if node := configV8Node(merged, []string{"claude-fallback"}); node == nil || node.Decode(&legacy) != nil {
 			return
 		}
 		fallback := config.ProviderFallbackFromLegacy(legacy)
@@ -72,6 +77,32 @@ func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node) {
 	if configV8Node(merged, []string{"providers", "claude", "fallback"}) != nil {
 		deleteConfigV8Path(merged, []string{"claude-fallback"})
 	}
+}
+
+// deleteConvertedClaudeFallback handles a DELETE of a profile's legacy
+// claude-fallback path (routing/claude-fallback or
+// routing/key-profiles/<key>/claude-fallback). Deleting the legacy block used to
+// turn the Claude -> Codex fallback off, and an earlier write may have converted
+// it into providers.claude.fallback, so that block is deleted too, unless its
+// target is api, which the legacy view cannot express (the enabled: false rule).
+// It reports whether it deleted anything.
+func deleteConvertedClaudeFallback(root *yaml.Node, parts []string) bool {
+	n := len(parts)
+	isShared := n == 2 && parts[0] == "routing"
+	isKey := n == 4 && parts[0] == "routing" && parts[1] == "key-profiles"
+	if (!isShared && !isKey) || parts[n-1] != "claude-fallback" {
+		return false
+	}
+	path := append(append([]string{}, parts[:n-1]...), "providers", "claude", "fallback")
+	node := configV8Node(root, path)
+	if node == nil {
+		return false
+	}
+	var current config.ProviderFallbackConfig
+	if node.Decode(&current) != nil || strings.EqualFold(strings.TrimSpace(current.Target), config.ProviderFallbackAPI) {
+		return false
+	}
+	return deleteConfigV8Path(root, path)
 }
 
 // ensureConfigV8Mapping returns the mapping stored under key, replacing a missing

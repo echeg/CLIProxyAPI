@@ -174,7 +174,11 @@ still accepted in the shared profile and in key profiles. `enabled: true`
 means `target: codex` and `enabled: false` means `target: off`; `mode` and
 `mappings` are kept. When a profile carries both blocks,
 `providers.claude.fallback` wins and the legacy block is ignored with a
-warning. A save writes `providers` and drops the legacy block of that profile.
+warning on every load. A file that is only loaded keeps its legacy block. A
+configuration write that sends the legacy block converts it into
+`providers.claude.fallback` and removes the legacy node (see
+[Writing profiles](#writing-profiles)); delete an ignored legacy block by hand
+to stop the warning.
 See [Per-provider mode and API fallback](#per-provider-mode-and-api-fallback)
 for the `api` target.
 
@@ -210,6 +214,15 @@ carry its own `providers` block (see below).
 > subscriptions fail. With no subscription credential at all, a request fails
 > with `auth_not_found` and the message
 > `no subscription credentials for claude; set routing providers.claude.mode: api`.
+>
+> Every `api-keys.claude` and `api-keys.codex` entry counts as an API key here,
+> including Claude setup tokens (`sk-ant-oat...`) and entries with a custom
+> `base-url` gateway. A model or alias served only by such entries returns
+> `auth_not_found` until a profile selects the entry (the hint above appears only
+> when the provider has no enabled subscription credential at all). A profile
+> uses one API key per provider, so `priority`, `weight`, and `prefix` no longer
+> choose between several Claude or Codex keys. Other providers' API keys are not
+> affected.
 
 Every routing profile (the shared `routing.*` profile and each
 `routing.key-profiles.<key>`) can carry a `providers` block with a `claude` and a
@@ -275,15 +288,22 @@ profile paths use the 12-hex key hash, for example
   within the one credential. A cooling-down key returns its cooldown error with
   `Retry-After`; no other API key is ever substituted. A missing or disabled
   credential returns `auth_not_found` with
-  `no enabled claude API key matches routing providers.claude.api-credential "<auth_index>"`.
+  `no enabled claude API key matches routing providers.claude.api-credential`
+  (the message does not include the `auth_index`).
 - **`fallback.target: api`.** After a failed primary round the same model runs
   again on the same provider with only the profile's API key. The triggers match
   the Codex fallback in `auto` mode: 401, 403, 408, 429, and 5xx responses, no
   available credential, and transient connection failures; never invalid
   requests, a canceled client request, or a request stop. `fallback.mode` does
   not apply: the API target is always `auto`.
-- The API leg neither reads nor writes session bindings, so the next request of
-  the session starts from the subscriptions again.
+- The API leg runs only on the provider that owns the fallback: other providers
+  of the request are not retried in it.
+- The API leg neither reads nor writes session bindings (also under
+  `rebind-on: never`), so the next request of the session starts from the
+  subscriptions again. Exception: a Responses websocket connection whose turn
+  was served by a Codex API key over an upstream websocket stays on that key for
+  the rest of the connection, because the upstream websocket holds the
+  conversation state; a new connection starts from the subscriptions.
 - When the API key cannot be selected (cooldown, disabled, removed, unknown
   index), the client gets the primary error with its status and `Retry-After`.
 - Fallbacks do not chain: a fallback leg never falls back again. Streaming
@@ -307,7 +327,8 @@ profile paths use the 12-hex key hash, for example
 `routing_stage=api` for a credential selected under `mode: api`. Inside a
 fallback leg `routing_stage` is `fallback`, `fallback_stage` records the stage
 that chose the credential, and `fallback_target` is `codex` or `api`. The
-fallback itself logs `Routing claude request to API key fallback` (fields
+fallback itself logs `Routing <provider> request to API key fallback`
+(`claude` or `codex`; fields
 `provider`, `source_model`, `fallback_target`, `primary_status`) or
 `Routing Claude request to Codex fallback` (fields `source_model`,
 `fallback_model`, `fallback_mode`, `fallback_target`, `primary_status`). The
@@ -475,8 +496,8 @@ keys and is sent with `Cache-Control: no-store`.
     }
   ],
   "api_credentials": {
-    "claude": [{"auth_index": "claude-api-key-index", "label": "Anthropic", "base_url": "", "disabled": false}],
-    "codex": [{"auth_index": "codex-api-key-index", "label": "OpenAI", "base_url": "https://api.openai.com/v1", "disabled": false}]
+    "claude": [{"auth_index": "claude-api-key-index", "label": "claude-apikey", "base_url": "", "disabled": false}],
+    "codex": [{"auth_index": "codex-api-key-index", "label": "codex-apikey", "base_url": "https://api.openai.com/v1", "disabled": false}]
   },
   "selection_options": {
     "narrowing": ["priority", "reserves", "earliest-reset", "most-remaining"],
@@ -493,7 +514,9 @@ is `[]` rather than `null`. `claude-fallback` is the legacy view derived from
 `providers.claude.fallback` for older clients; its `enabled` is `true` only for
 `target: codex`. `api_credentials` always has a `claude` and a `codex` list of
 API-key credentials sorted by `auth_index`; `disabled` covers disabled
-credentials, and the API key itself is never included.
+credentials, and the API key itself is never included. Keys from the config
+file share a fixed label per provider (`claude-apikey`, `codex-apikey`), so
+identify them by `auth_index` and `base_url`.
 `preferred-accounts` is omitted when empty. `supported` is `false` in Home mode
 and with a scheduler plugin. Take subscription `auth_index` values from
 `GET /v8/management/credentials` and fallback target models from
@@ -560,6 +583,13 @@ and no `providers.claude.fallback`:
 - `enabled: true` sets `target: codex`. `enabled: false` sets `target: off`,
   unless the stored target is `api`, which is kept because the legacy view cannot
   express it. `mode` and `mappings` are copied in both cases.
+- A `PATCH` applies the legacy fields over the stored fallback, so a partial
+  patch such as `PATCH /v8/management/config/routing/claude-fallback`
+  `{"enabled": false}` keeps the stored `mode` and `mappings`. A `PUT` replaces
+  them.
+- `DELETE` of a profile's `claude-fallback` path also deletes its
+  `providers.claude.fallback` (the fallback is then `off`), unless the target is
+  `api`, which is kept.
 - The legacy node is removed from the file once `providers.claude.fallback` is
   set, so the file carries one spelling per profile.
 - A `PUT` of a whole profile that omits `providers` keeps the stored `providers`

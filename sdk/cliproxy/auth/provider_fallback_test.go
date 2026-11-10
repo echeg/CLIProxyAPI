@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"reflect"
@@ -184,18 +185,41 @@ func TestAPIFallbackWithoutSubscriptions(t *testing.T) {
 // waiting for the cooldown.
 func TestAPIFallbackPrefersFallbackToCooldownWait(t *testing.T) {
 	withQuotaCooldownEnabled(t)
-	for _, path := range []string{"execute", "count", "stream"} {
-		t.Run(path, func(t *testing.T) {
-			f := newAPIFallbackFixture(t, "claude", 2, nil)
-			f.primaryErr = &Error{HTTPStatus: http.StatusServiceUnavailable}
-			f.m.SetRetryConfig(3, time.Minute, 0)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			body, err := runFallbackPath(ctx, f.m, path, []string{"claude"}, cliproxyexecutor.Request{Model: apiFallbackModel}, cliproxyexecutor.Options{})
-			if err != nil || body != "api" || !reflect.DeepEqual(f.calls, []string{AuthKindOAuth, AuthKindOAuth, AuthKindAPIKey}) {
-				t.Fatalf("calls=%v body=%q err=%v", f.calls, body, err)
-			}
-		})
+	for _, provider := range []string{"claude", "codex"} {
+		for _, path := range []string{"execute", "count", "stream"} {
+			t.Run(provider+"/"+path, func(t *testing.T) {
+				f := newAPIFallbackFixture(t, provider, 2, nil)
+				f.primaryErr = &Error{HTTPStatus: http.StatusServiceUnavailable}
+				f.m.SetRetryConfig(3, time.Minute, 0)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				body, err := runFallbackPath(ctx, f.m, path, []string{provider}, cliproxyexecutor.Request{Model: apiFallbackModel}, cliproxyexecutor.Options{})
+				if err != nil || body != "api" || !reflect.DeepEqual(f.calls, []string{AuthKindOAuth, AuthKindOAuth, AuthKindAPIKey}) {
+					t.Fatalf("calls=%v body=%q err=%v", f.calls, body, err)
+				}
+			})
+		}
+	}
+}
+
+// Subscriptions that are already cooling down when the request arrives send it
+// to the API key without an attempt on them.
+func TestAPIFallbackServesWhileSubscriptionsCool(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	retry := time.Hour
+	for _, provider := range []string{"claude", "codex"} {
+		for _, path := range []string{"execute", "count", "stream"} {
+			t.Run(provider+"/"+path, func(t *testing.T) {
+				f := newAPIFallbackFixture(t, provider, 2, nil)
+				for _, id := range f.oauthIDs {
+					f.m.MarkResult(context.Background(), Result{AuthID: id, Provider: provider, Model: apiFallbackModel, Error: &Error{HTTPStatus: http.StatusTooManyRequests}, RetryAfter: &retry})
+				}
+				body, err := runFallbackPath(context.Background(), f.m, path, []string{provider}, cliproxyexecutor.Request{Model: apiFallbackModel}, cliproxyexecutor.Options{})
+				if err != nil || body != "api" || !reflect.DeepEqual(f.calls, []string{AuthKindAPIKey}) {
+					t.Fatalf("calls=%v body=%q err=%v", f.calls, body, err)
+				}
+			})
+		}
 	}
 }
 
@@ -254,11 +278,44 @@ func TestAPIFallbackLeavesSessionBindingsAlone(t *testing.T) {
 		t.Fatalf("session bound to %q, want the subscription", authID)
 	}
 
-	// A binding that points at the API key is not read by the API leg: the
-	// derived profile has session affinity off.
+	// The derived profile of the API leg has session affinity off.
 	ctx := withRoutingProfile(context.Background(), f.m.resolveRoutingProfile(context.Background()).apiFallbackProfile("claude"))
 	if profile := routingProfileFromContext(ctx); profile.sticky || profile.providers.Claude.Mode != internalconfig.ProviderModeAPI || profile.providers.Claude.Fallback.Target != internalconfig.ProviderFallbackOff {
 		t.Fatalf("derived profile = %+v", profile)
+	}
+}
+
+// Under rebind-on: never the API leg still ignores the session's binding to the
+// subscription that failed in the primary leg: a failed API key returns its own
+// error, not the bound-session retry error.
+func TestAPIFallbackIgnoresSessionBindingUnderRebindNever(t *testing.T) {
+	prevTransient := transientErrorCooldownSeconds.Load()
+	transientErrorCooldownSeconds.Store(-1)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			f := newAPIFallbackFixture(t, "claude", 1, nil)
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: NewPipelineSelector(f.m.SharedSelection), TTL: time.Hour, RebindOn: SessionAffinityRebindOnNever})
+			t.Cleanup(selector.Stop)
+			f.m.SetSelector(selector)
+			opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"api-fallback-never-session"}}}
+			req := cliproxyexecutor.Request{Model: apiFallbackModel}
+
+			if body, err := runFallbackPath(context.Background(), f.m, path, []string{"claude"}, req, opts); err != nil || body != "primary" {
+				t.Fatalf("binding request: body=%q err=%v", body, err)
+			}
+			f.primaryErr = &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "subscription down"}
+			f.apiErr = &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "api key down"}
+			f.calls, f.ids = nil, nil
+			_, err := runFallbackPath(context.Background(), f.m, path, []string{"claude"}, req, opts)
+			var authErr *Error
+			if !errors.As(err, &authErr) || authErr.Code == "session_auth_retry" || authErr.Message != "api key down" {
+				t.Fatalf("err = %#v, want the API key's own error", err)
+			}
+			if countKind(f.calls, AuthKindAPIKey) != 1 {
+				t.Fatalf("calls = %v, want one API key attempt", f.calls)
+			}
+		})
 	}
 }
 
@@ -372,6 +429,37 @@ func TestAPIFallbackStreamingBoundary(t *testing.T) {
 			}
 			if body != "api" || err != nil || f.calls[len(f.calls)-1] != AuthKindAPIKey {
 				t.Fatalf("bootstrap fallback: body=%q err=%v calls=%v", body, err, f.calls)
+			}
+		})
+	}
+}
+
+// The API leg runs only on the provider that owns the fallback: another provider
+// of the request that serves the same model stays out of the leg even when its
+// subscription is still selectable.
+func TestAPIFallbackLegRunsOnlyOnFallbackProvider(t *testing.T) {
+	prevTransient := transientErrorCooldownSeconds.Load()
+	transientErrorCooldownSeconds.Store(-1)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			f := newAPIFallbackFixture(t, "claude", 1, nil)
+			codexID := t.Name() + "-codex-oauth"
+			registry.GetGlobalRegistry().RegisterClient(codexID, "codex", []*registry.ModelInfo{{ID: apiFallbackModel}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(codexID) })
+			if _, errRegister := f.m.Register(WithSkipPersist(context.Background()), providerPolicyAuth(providerPolicyTestAuth{codexID, "codex", AuthKindOAuth, ""})); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			// Both legs fail and nothing cools down, so a leg that still had the
+			// Codex subscription in its pool would run it again.
+			f.primaryErr = &Error{HTTPStatus: http.StatusServiceUnavailable}
+			f.apiErr = &Error{HTTPStatus: http.StatusServiceUnavailable}
+			_, err := runFallbackPath(context.Background(), f.m, path, []string{"claude", "codex"}, cliproxyexecutor.Request{Model: apiFallbackModel}, cliproxyexecutor.Options{})
+			if statusCodeFromError(err) != http.StatusServiceUnavailable {
+				t.Fatalf("err = %v, want the API leg's 503", err)
+			}
+			if countKind(f.calls, AuthKindOAuth) != 2 || countKind(f.calls, AuthKindAPIKey) != 1 || f.calls[len(f.calls)-1] != AuthKindAPIKey {
+				t.Fatalf("calls = %v (ids %v), want both subscriptions once, then only the API key", f.calls, f.ids)
 			}
 		})
 	}

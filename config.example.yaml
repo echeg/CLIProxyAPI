@@ -201,17 +201,20 @@ routing:
   # Per-provider mode and fallback. Native routing only (not Home/plugins).
   # NOTE: Claude/Codex upstream API keys (api-keys.claude / api-keys.codex) are never
   # selected in the primary leg unless a profile sets mode: api for that provider.
-  # Without this block both providers use mode: subscription (OAuth subscriptions
-  # only) with fallback off.
+  # This covers every entry there, including Claude setup tokens and custom
+  # base-url gateways. Without this block both providers use mode: subscription
+  # (OAuth subscriptions only) with fallback off.
   # mode: subscription (default) | api. api uses only the API key named by
   #   api-credential (its auth_index); no other key is substituted.
   # api-credential: auth_index of an api-keys entry of the same provider; required
   #   for mode: api or fallback.target: api.
   # fallback.target: off (default) | codex (claude only) | api.
   #   codex: the Claude -> Codex subscription fallback (mode and mappings below).
-  #   api: after a failed subscription round, retry the same model with the
-  #   api-credential key only; that leg does not bind the session, so later
-  #   requests start from subscriptions again. mode: api requires target off.
+  #   api: after a failed subscription round, retry the same model on the same
+  #   provider with the api-credential key only; that leg does not bind the
+  #   session, so later requests start from subscriptions again (a Responses
+  #   websocket connection served over an upstream websocket stays on the key
+  #   until it closes). mode: api requires target off.
   # auto: use Codex after a failed Claude credential round;
   # always: immediately route matching Claude requests to Codex.
   # Fallbacks trigger on quota/cooldown, unavailable credentials, 401/403/408/5xx and
@@ -235,17 +238,18 @@ routing:
   #       target: api
   # Legacy spelling of providers.claude.fallback, still accepted:
   # enabled: true = target: codex, enabled: false = target: off. When a profile has
-  # both, providers.claude.fallback wins; saving writes providers and drops this block.
-  claude-fallback:
-    enabled: false
-    mode: auto
-    mappings:
-      - from: "claude-opus-*"
-        to: "gpt-6-astra"
-      - from: "claude-sonnet-*"
-        to: "gpt-6-sol"
-      - from: "claude-fable-*"
-        to: "gpt-6-astra"
+  # both, providers.claude.fallback wins and each load warns; a management write
+  # that sends this block converts it into providers.claude.fallback.
+  # claude-fallback:
+  #   enabled: false
+  #   mode: auto
+  #   mappings:
+  #     - from: "claude-opus-*"
+  #       to: "gpt-6-astra"
+  #     - from: "claude-sonnet-*"
+  #       to: "gpt-6-sol"
+  #     - from: "claude-fable-*"
+  #       to: "gpt-6-astra"
   # Explicit pool strategy for new selections: primary, then tiebreak.
   # Narrowing criteria keep the best group of candidates:
   #   priority (highest manual priority), reserves (lowest quota reserve level),
@@ -700,6 +704,11 @@ upstream:
 # Negative request-retry values retain the global fallback; weight belongs to each key.
 # An empty proxy-url falls back to requests.proxy-url; direct bypasses proxy settings.
 # Shared provider defaults belong to upstream; OAuth-only features remain under oauth.providers.
+# Claude and Codex keys (claude/codex groups, including setup tokens and custom
+# base-url gateways) are used in native routing only when a routing profile names
+# one in routing.providers.<provider>.api-credential with mode: api or
+# fallback.target: api. A profile uses one key per provider, so priority, weight,
+# and prefix do not choose between several Claude/Codex keys.
 # Keep differing legacy policies in separate groups or preserve them as key overrides.
 # Uncomment the api-keys root and only the provider examples you want to configure.
 # Replace placeholder keys/URLs before using them.
