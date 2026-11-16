@@ -300,10 +300,15 @@ profile paths use the 12-hex key hash, for example
   of the request are not retried in it.
 - The API leg neither reads nor writes session bindings (also under
   `rebind-on: never`), so the next request of the session starts from the
-  subscriptions again. Exception: a Responses websocket connection whose turn
-  was served by a Codex API key over an upstream websocket stays on that key for
-  the rest of the connection, because the upstream websocket holds the
-  conversation state; a new connection starts from the subscriptions.
+  subscriptions again. A Responses websocket connection whose turn was served by
+  a Codex API key over an upstream websocket pins that key, because the upstream
+  websocket holds the conversation state. The pin is kept while no subscription
+  is available, so incremental turns continue on the key without a replay. At
+  the first turn after a subscription becomes available, the pin is released: an
+  incremental turn (`previous_response_id` or `type: append`) closes the socket
+  with code `1012` ("upstream requires HTTP replay") so the client replays the
+  transcript on a new connection, and a full `response.create` is selected again
+  and served by the subscription on the same socket.
 - When the API key cannot be selected (cooldown, disabled, removed, unknown
   index), the client gets the primary error with its status and `Retry-After`.
 - Fallbacks do not chain: a fallback leg never falls back again. Streaming
@@ -314,7 +319,22 @@ profile paths use the 12-hex key hash, for example
 - The policy is skipped for executions pinned to a credential (Codex websocket
   continuations) and for requests that require their own credential kind or
   policy (the Codex leg of the Claude -> Codex fallback, Codex Alpha Search with
-  an API key).
+  an API key). The Responses websocket handler checks a pinned credential
+  against the key's current policy at the start of every turn, so a pin the
+  policy rejects (an API fallback key, or a credential after a hot-reload `mode`
+  change) is released as described above once another eligible credential is
+  available.
+- A Responses websocket turn pinned to a Codex subscription in native websocket
+  passthrough mode reaches the `api` fallback when the subscription fails and no
+  other subscription is available: a full `response.create` that fails with 401
+  or 429 fails over to the API key on the same socket, and an incremental turn
+  that fails with 429 or a quota error gets the `1012` replay close. When the API
+  key is also unavailable or `fallback.target` is `off`, the client gets the
+  original error.
+- Remaining limits: successor turns forwarded by the Codex duplex executor under
+  `codex.response-steering` stay on the pinned credential without the turn-start
+  check, and a pin in HTTP upstream mode after a local compaction turn returns the
+  error for the failing turn instead of reaching the `api` fallback.
 - Home mode and scheduler plugins keep their own selection: the provider policy
   and both fallback targets do not apply there. CLIProxyAPIHome does not
   implement the provider policy, so a cluster deployment needs matching selector
@@ -425,7 +445,9 @@ Soft levels rank only the remaining pool and only when `reserves` is one of the
 slots. Manual credential priority applies only when `priority` is one of the slots.
 Executions pinned to a credential, such as Codex websocket continuations, keep
 their credential and ignore the provider mode, preferences, reserves, and
-selection.
+selection. The Responses websocket handler still checks the pin against the
+provider mode at the start of each turn and releases a rejected pin once another
+eligible credential is available (see "Per-provider mode and API fallback").
 
 #### Legacy configuration
 
@@ -679,7 +701,9 @@ The reserve affects only new selections:
 
 A session already bound by session affinity keeps its credential after the
 reserve trips, so the session continues. Executions pinned to a credential, such
-as Codex websocket continuations, also ignore the reserve. New sessions are bound
+as Codex websocket continuations, also ignore the reserve; the Responses websocket
+turn-start check releases a pin only when the provider mode rejects it, not
+because of a reserve. New sessions are bound
 elsewhere unless the credential is the profile's preferred account under a soft
 reserve. A preferred account under a `hard` reserve counts as unavailable, while a
 `soft` reserve does not block it. The reserve is only a selection filter. It

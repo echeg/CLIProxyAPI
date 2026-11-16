@@ -220,9 +220,11 @@ routing:
   #   codex: the Claude -> Codex subscription fallback (mode and mappings below).
   #   api: after a failed subscription round, retry the same model on the same
   #   provider with the api-credential key only; that leg does not bind the
-  #   session, so later requests start from subscriptions again (a Responses
-  #   websocket connection served over an upstream websocket stays on the key
-  #   until it closes). mode: api requires target off.
+  #   session, so later requests start from subscriptions again. A Responses
+  #   websocket connection served over an upstream websocket keeps the key while
+  #   no subscription is available and releases it at the next turn once one is
+  #   (an incremental turn then gets a 1012 replay close). mode: api requires
+  #   target off.
   # auto: use Codex after a failed Claude credential round;
   # always: immediately route matching Claude requests to Codex.
   # Fallbacks trigger on quota/cooldown, unavailable credentials, 401/403/408/5xx and

@@ -127,10 +127,10 @@
   - note: clean; also removed a pre-existing `sync.Once` copy flagged by vet in `internal/pluginhost/host_test.go`
 
 ### Task 6: Update documentation and close the backlog entry
-- [ ] `docs/management-api-v8.md`: replace the websocket exception in the API-leg rules (~:303-306) with the new behavior (the pin is kept while subscriptions are unavailable and released at the next turn once one is; an incremental turn then gets the replay close), extend the pinned-execution notes (~:314, ~:426, ~:682) with the turn-start policy check and the reverse-direction failover for native websocket passthrough pins, and state the two remaining limits (duplex successor turns under `codex.response-steering`; HTTP-mode pins after local compaction return the error for the failing turn)
-- [ ] `config.example.yaml` (~:224): update the comment on the websocket behavior to match
-- [ ] `AGENTS.md`: in the `sdk/cliproxy/auth/` line, after "skipped for pinned requests", add that the Responses websocket handler releases a pin the policy rejects at turn start (`Manager.RoutingPolicyAllowsAuth`) and that `HasAlternativeTargetForModel` counts an available `api` fallback leg
-- [ ] delete `docs/backlog/websocket-pin-keeps-api-fallback-key.md`
+- [x] `docs/management-api-v8.md`: replace the websocket exception in the API-leg rules (~:303-306) with the new behavior (the pin is kept while subscriptions are unavailable and released at the next turn once one is; an incremental turn then gets the replay close), extend the pinned-execution notes (~:314, ~:426, ~:682) with the turn-start policy check and the reverse-direction failover for native websocket passthrough pins, and state the two remaining limits (duplex successor turns under `codex.response-steering`; HTTP-mode pins after local compaction return the error for the failing turn)
+- [x] `config.example.yaml` (~:224): update the comment on the websocket behavior to match
+- [x] `AGENTS.md`: in the `sdk/cliproxy/auth/` line, after "skipped for pinned requests", add that the Responses websocket handler releases a pin the policy rejects at turn start (`Manager.RoutingPolicyAllowsAuth`) and that `HasAlternativeTargetForModel` counts an available `api` fallback leg
+- [x] delete `docs/backlog/websocket-pin-keeps-api-fallback-key.md`
 
 ## Technical Details
 - **New method**:
