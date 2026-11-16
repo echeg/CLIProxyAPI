@@ -116,11 +116,15 @@
 - [x] run `go test ./sdk/api/handlers/... ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 5
 
 ### Task 5: Verify acceptance criteria
-- [ ] verify each Overview goal against the code and tests: API pin released once a subscription is available (incremental: replay close; full create: subscription), no replay loop while subscriptions cool down, pinned native-passthrough subscription failure reaches the API fallback (full create 401/429, incremental 429), hot-reload mode switch and provider-switch restoration release a rejected pin
-- [ ] verify Home and scheduler-plugin setups keep today's websocket pin behavior (policy not applied)
-- [ ] run the full suite `go test ./...` (known flaky tests in `docs/backlog/` may be re-run once; do not modify them)
-- [ ] run `gofmt -l .` (no output) and the compile check `go build -o test-output ./cmd/server && rm test-output`
-- [ ] run `go vet ./sdk/cliproxy/auth/... ./sdk/api/handlers/...` and fix findings in touched code
+- [x] verify each Overview goal against the code and tests: API pin released once a subscription is available (incremental: replay close; full create: subscription), no replay loop while subscriptions cool down, pinned native-passthrough subscription failure reaches the API fallback (full create 401/429, incremental 429), hot-reload mode switch and provider-switch restoration release a rejected pin
+  - ➕ added the full-create 401 case to `TestResponsesWebsocketPinnedSubscriptionFailureReachesAPIFallback` (only 429 was covered)
+- [x] verify Home and scheduler-plugin setups keep today's websocket pin behavior (policy not applied)
+  - note: `RoutingPolicyAllowsAuth` returns true for both (unit-tested), so the turn-start check never releases; `providerFallbackFor` is gated by `ClaudeFallbackSupported` (no Home, no plugin scheduler), so `HasAlternativeTargetForModel` adds no fallback leg there
+- [x] run the full suite `go test ./...` (known flaky tests in `docs/backlog/` may be re-run once; do not modify them)
+  - note: fixed a pre-existing failure in `internal/pluginhost` (`TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader` expected Retry-After 7, but the manager clamps quota cooldowns to `minQuotaCooldownFloor` = 10s and the terminal 429 advertises it, as `conductor_pool_cooldown_test.go:146` already asserts)
+- [x] run `gofmt -l .` (no output) and the compile check `go build -o test-output ./cmd/server && rm test-output`
+- [x] run `go vet ./sdk/cliproxy/auth/... ./sdk/api/handlers/...` and fix findings in touched code
+  - note: clean; also removed a pre-existing `sync.Once` copy flagged by vet in `internal/pluginhost/host_test.go`
 
 ### Task 6: Update documentation and close the backlog entry
 - [ ] `docs/management-api-v8.md`: replace the websocket exception in the API-leg rules (~:303-306) with the new behavior (the pin is kept while subscriptions are unavailable and released at the next turn once one is; an incremental turn then gets the replay close), extend the pinned-execution notes (~:314, ~:426, ~:682) with the turn-start policy check and the reverse-direction failover for native websocket passthrough pins, and state the two remaining limits (duplex successor turns under `codex.response-steering`; HTTP-mode pins after local compaction return the error for the failing turn)

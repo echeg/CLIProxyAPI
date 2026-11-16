@@ -447,21 +447,23 @@ func (f *policyPinFixture) pinSubscription(conn *websocket.Conn) string {
 }
 
 func TestResponsesWebsocketPinnedSubscriptionFailureReachesAPIFallback(t *testing.T) {
-	t.Run("full create fails over in place to the API key", func(t *testing.T) {
-		f := newPolicyPinFixture(t, false)
-		conn := f.dial()
-		f.pinSubscription(conn)
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusUnauthorized} {
+		t.Run(fmt.Sprintf("full create %d fails over in place to the API key", status), func(t *testing.T) {
+			f := newPolicyPinFixture(t, false)
+			conn := f.dial()
+			f.pinSubscription(conn)
 
-		f.executor.setFailStatus(f.subID, http.StatusTooManyRequests)
-		responseID := policyPinSendCompleted(t, conn, f.fullCreate("msg-2"))
+			f.executor.setFailStatus(f.subID, status)
+			responseID := policyPinSendCompleted(t, conn, f.fullCreate("msg-2"))
 
-		if got := f.executor.turns(f.apiKeyID); got != 1 {
-			t.Fatalf("API key turns = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
-		}
-		if !strings.Contains(responseID, f.apiKeyID) {
-			t.Fatalf("turn 2 response %q was not served by the API key", responseID)
-		}
-	})
+			if got := f.executor.turns(f.apiKeyID); got != 1 {
+				t.Fatalf("API key turns = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
+			}
+			if !strings.Contains(responseID, f.apiKeyID) {
+				t.Fatalf("turn 2 response %q was not served by the API key", responseID)
+			}
+		})
+	}
 
 	t.Run("incremental 429 gets the replay close", func(t *testing.T) {
 		f := newPolicyPinFixture(t, false)
