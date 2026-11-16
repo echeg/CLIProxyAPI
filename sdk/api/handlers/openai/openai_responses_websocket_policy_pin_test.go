@@ -357,6 +357,26 @@ func TestResponsesWebsocketReleasesFallbackPinOnceSubscriptionRecovers(t *testin
 			t.Fatalf("subscription turns = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
 		}
 	})
+
+	t.Run("full create without model inherits the connection model", func(t *testing.T) {
+		f := newPolicyPinFixture(t, true)
+		conn := f.dial()
+
+		policyPinSendCompleted(t, conn, f.fullCreate("msg-1"))
+		f.setSubscriptionCooldown(time.Now().Add(-time.Minute))
+		policyPinSendCompleted(t, conn, `{"type":"response.create","input":[{"type":"message","id":"msg-2"}]}`)
+
+		if got := f.executor.turns(f.apiKeyID); got != 1 {
+			t.Fatalf("API key turns = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
+		}
+		subPayloads := f.executor.payloadsFor(f.subID)
+		if len(subPayloads) != 1 {
+			t.Fatalf("subscription turns = %d, want 1; auth IDs %v", len(subPayloads), f.executor.AuthIDs())
+		}
+		if got := ojson.GetBytesNoCopy(subPayloads[0], "model").String(); got != f.model {
+			t.Fatalf("turn 2 model = %q, want inherited %q: %s", got, f.model, subPayloads[0])
+		}
+	})
 }
 
 func TestResponsesWebsocketReleasesRestoredFallbackPinAfterProviderSwitch(t *testing.T) {

@@ -789,6 +789,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if explicitRequestModelName != "" && !useUpstreamWebsocketPassthrough {
 			passthroughModelName = ""
 		}
+		// A request without model inherits the connection's model: native
+		// passthrough injects it and the incremental state merges it from
+		// lastRequest. When neither applies (a pin released or dropped after an
+		// upstream websocket turn cleared lastRequest), set it here so a full
+		// response.create selects afresh instead of failing with a missing model.
+		if !nativeWebsocketPassthrough && explicitRequestModelName == "" && requestModelName != "" && len(lastRequest) == 0 {
+			payloadDoc := ojson.NewDoc(payload)
+			if errSet := payloadDoc.Set("model", requestModelName); errSet == nil {
+				payload = payloadDoc.Bytes()
+			}
+		}
 
 		// A completed compaction response is direct evidence that the active target
 		// (whether a specific plugin executor, a specific auth on standard route, or a specific auth on provider route)
