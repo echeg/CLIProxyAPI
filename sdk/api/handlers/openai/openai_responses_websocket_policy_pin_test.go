@@ -28,13 +28,17 @@ const policyPinReleaseLogMessage = "responses websocket: releasing pinned auth r
 
 // websocketPolicyPinExecutor serves every credential of one provider and
 // records each turn per credential, so a test can attribute every turn to
-// the subscription or the API key. failStatus makes a credential fail.
+// the subscription or the API key. failStatus makes a credential fail;
+// compactionAuthID answers with a compaction item, executed as a local
+// websocket turn when compactionLocal is set.
 type websocketPolicyPinExecutor struct {
-	provider   string
-	mu         sync.Mutex
-	failStatus map[string]int
-	payloads   map[string][][]byte
-	authIDs    []string
+	provider         string
+	mu               sync.Mutex
+	failStatus       map[string]int
+	compactionAuthID string
+	compactionLocal  bool
+	payloads         map[string][][]byte
+	authIDs          []string
 }
 
 func (e *websocketPolicyPinExecutor) Identifier() string { return e.provider }
@@ -43,7 +47,7 @@ func (e *websocketPolicyPinExecutor) Execute(context.Context, *coreauth.Auth, co
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
 
-func (e *websocketPolicyPinExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *websocketPolicyPinExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	authID := ""
 	if auth != nil {
 		authID = auth.ID
@@ -56,6 +60,8 @@ func (e *websocketPolicyPinExecutor) ExecuteStream(_ context.Context, auth *core
 	e.payloads[authID] = append(e.payloads[authID], bytes.Clone(req.Payload))
 	count := len(e.authIDs)
 	failStatus := e.failStatus[authID]
+	compaction := authID != "" && authID == e.compactionAuthID
+	compactionLocal := compaction && e.compactionLocal
 	e.mu.Unlock()
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
@@ -67,9 +73,16 @@ func (e *websocketPolicyPinExecutor) ExecuteStream(_ context.Context, auth *core
 		close(chunks)
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
+	outputType := "message"
+	if compaction {
+		outputType = "compaction"
+	}
+	if compactionLocal {
+		coreexecutor.MarkLocalWebsocketTurn(ctx)
+	}
 	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(
-		`{"type":"response.completed","response":{"id":"resp-%s-%d","output":[{"type":"message","id":"out-%d"}]}}`,
-		authID, count, count,
+		`{"type":"response.completed","response":{"id":"resp-%s-%d","output":[{"type":%q,"id":"out-%d"}]}}`,
+		authID, count, outputType, count,
 	))}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
@@ -258,10 +271,22 @@ func policyPinExpectReplayClose(t *testing.T, conn *websocket.Conn, request stri
 	}
 }
 
+// policyPinLogHook records info-level entries of the standard logger and
+// restores its previous hooks and level when the test ends.
 func policyPinLogHook(t *testing.T) *logtest.Hook {
 	t.Helper()
-	hook := logtest.NewGlobal()
-	t.Cleanup(func() { log.StandardLogger().ReplaceHooks(make(log.LevelHooks)) })
+	logger := log.StandardLogger()
+	savedHooks := make(log.LevelHooks)
+	for level, hooks := range logger.Hooks {
+		savedHooks[level] = append([]log.Hook(nil), hooks...)
+	}
+	savedLevel := logger.GetLevel()
+	logger.SetLevel(log.InfoLevel)
+	hook := logtest.NewLocal(logger)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(savedHooks)
+		logger.SetLevel(savedLevel)
+	})
 	return hook
 }
 
@@ -364,6 +389,97 @@ func TestResponsesWebsocketReleasesRestoredFallbackPinAfterProviderSwitch(t *tes
 	if got := f.executor.turns(f.subID); got != 1 {
 		t.Fatalf("subscription turns after turn 3 = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
 	}
+}
+
+// disableWebsockets drops the upstream websocket attribute of authID, so its
+// turns run in HTTP upstream mode and leave no pin behind.
+func (f *policyPinFixture) disableWebsockets(authID string) {
+	f.t.Helper()
+	auth, ok := f.manager.GetByID(authID)
+	if !ok {
+		f.t.Fatalf("auth %s not found", authID)
+	}
+	attributes := make(map[string]string, len(auth.Attributes))
+	for key, value := range auth.Attributes {
+		if key != "websockets" {
+			attributes[key] = value
+		}
+	}
+	auth.Attributes = attributes
+	if _, err := f.manager.Update(context.Background(), auth); err != nil {
+		f.t.Fatalf("update %s attributes: %v", authID, err)
+	}
+}
+
+// A compaction served by the API fallback key makes that key the compaction
+// replay target of later turns. That target pins the turn like a remembered
+// pin, so it follows the routing policy too.
+func TestResponsesWebsocketCompactionReplayTargetFollowsRoutingPolicy(t *testing.T) {
+	t.Run("local compaction pin returns to the recovered subscription", func(t *testing.T) {
+		f := newPolicyPinFixture(t, true)
+		f.executor.compactionAuthID = f.apiKeyID
+		f.executor.compactionLocal = true
+		hook := policyPinLogHook(t)
+		conn := f.dial()
+
+		policyPinSendCompleted(t, conn, f.fullCreate("msg-1"))
+		if got := f.executor.turns(f.apiKeyID); got != 1 {
+			t.Fatalf("API key turns after turn 1 = %d, want 1 (fallback); auth IDs %v", got, f.executor.AuthIDs())
+		}
+
+		f.setSubscriptionCooldown(time.Now().Add(-time.Minute))
+		policyPinSendCompleted(t, conn, f.fullCreate("msg-2"))
+		if got := f.executor.turns(f.apiKeyID); got != 1 {
+			t.Fatalf("API key turns after turn 2 = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
+		}
+		if got := f.executor.turns(f.subID); got != 1 {
+			t.Fatalf("subscription turns after turn 2 = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
+		}
+		if !policyPinReleaseLogged(hook) {
+			t.Fatalf("missing log %q", policyPinReleaseLogMessage)
+		}
+	})
+
+	t.Run("HTTP-mode key compaction rebuilds the incremental turn on the subscription", func(t *testing.T) {
+		f := newPolicyPinFixture(t, true)
+		f.disableWebsockets(f.apiKeyID)
+		f.executor.compactionAuthID = f.apiKeyID
+		conn := f.dial()
+
+		responseID := policyPinSendCompleted(t, conn, f.fullCreate("msg-1"))
+		if got := f.executor.turns(f.apiKeyID); got != 1 {
+			t.Fatalf("API key turns after turn 1 = %d, want 1 (fallback); auth IDs %v", got, f.executor.AuthIDs())
+		}
+
+		f.setSubscriptionCooldown(time.Now().Add(-time.Minute))
+		policyPinSendCompleted(t, conn, policyPinIncremental(responseID, "msg-2"))
+		if got := f.executor.turns(f.apiKeyID); got != 1 {
+			t.Fatalf("API key turns after turn 2 = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
+		}
+		if got := f.executor.turns(f.subID); got != 1 {
+			t.Fatalf("subscription turns after turn 2 = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
+		}
+	})
+
+	t.Run("cooling subscription keeps the compaction replay on the key", func(t *testing.T) {
+		f := newPolicyPinFixture(t, true)
+		f.disableWebsockets(f.apiKeyID)
+		f.executor.compactionAuthID = f.apiKeyID
+		hook := policyPinLogHook(t)
+		conn := f.dial()
+
+		responseID := policyPinSendCompleted(t, conn, f.fullCreate("msg-1"))
+		policyPinSendCompleted(t, conn, policyPinIncremental(responseID, "msg-2"))
+		if got := f.executor.turns(f.apiKeyID); got != 2 {
+			t.Fatalf("API key turns = %d, want 2; auth IDs %v", got, f.executor.AuthIDs())
+		}
+		if got := f.executor.turns(f.subID); got != 0 {
+			t.Fatalf("subscription turns = %d, want 0", got)
+		}
+		if policyPinReleaseLogged(hook) {
+			t.Fatalf("unexpected log %q while the subscription cools down", policyPinReleaseLogMessage)
+		}
+	})
 }
 
 func TestResponsesWebsocketReleasesPinAfterHotReloadModeSwitch(t *testing.T) {

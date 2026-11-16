@@ -323,7 +323,11 @@ profile paths use the 12-hex key hash, for example
   against the key's current policy at the start of every turn, so a pin the
   policy rejects (an API fallback key, or a credential after a hot-reload `mode`
   change) is released as described above once another eligible credential is
-  available.
+  available. A pin in HTTP upstream mode (after a local compaction turn) needs no
+  replay close: the handler rebuilds an incremental turn from its own transcript
+  and selects a credential again. The same check applies to the credential that
+  produced a compaction the connection replays, so a compaction served by the API
+  key does not keep later turns on it.
 - A Responses websocket turn pinned to a Codex subscription in native websocket
   passthrough mode reaches the `api` fallback when the subscription fails and no
   other subscription is available: a full `response.create` that fails with 401
@@ -334,7 +338,11 @@ profile paths use the 12-hex key hash, for example
 - Remaining limits: successor turns forwarded by the Codex duplex executor under
   `codex.response-steering` stay on the pinned credential without the turn-start
   check, and a pin in HTTP upstream mode after a local compaction turn returns the
-  error for the failing turn instead of reaching the `api` fallback.
+  error for the failing turn instead of reaching the `api` fallback. Under
+  `rebind-on: never` the turn-start check does not consider the session's
+  binding: while the bound subscription cools down and another one is
+  available, each incremental turn on an upstream websocket gets the `1012`
+  replay close and the replay lands on the API key again.
 - Home mode and scheduler plugins keep their own selection: the provider policy
   and both fallback targets do not apply there. CLIProxyAPIHome does not
   implement the provider policy, so a cluster deployment needs matching selector
@@ -352,6 +360,10 @@ fallback itself logs `Routing <provider> request to API key fallback`
 `provider`, `source_model`, `fallback_target`, `primary_status`) or
 `Routing Claude request to Codex fallback` (fields `source_model`,
 `fallback_model`, `fallback_mode`, `fallback_target`, `primary_status`). The
+Responses websocket handler logs
+`responses websocket: releasing pinned auth rejected by routing policy` (fields
+`id`, the websocket session, and `auth_index`, the released credential) when it
+releases a credential the policy rejects at the start of a turn. The
 configuration diff reports `routing.providers: updated` for the shared block and
 `updated (redacted)` for key profiles; raw keys and API keys are never logged.
 

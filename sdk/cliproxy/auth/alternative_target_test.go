@@ -147,3 +147,38 @@ func TestHasAlternativeTargetForModelIgnoresCodexFallbackTarget(t *testing.T) {
 		t.Fatal("expected a codex fallback target not to count")
 	}
 }
+
+// The fallback leg follows the client key's routing profile, not only the
+// shared one.
+func TestHasAlternativeTargetForModelUsesKeyProfileFallback(t *testing.T) {
+	const keyIndex = "codex-key-idx"
+	keyOnlyFallback := &internalconfig.Config{}
+	keyOnlyFallback.Routing.Providers.Codex = internalconfig.ProviderRoutingConfig{APICredential: keyIndex}
+	keyOnlyFallback.Routing.KeyProfiles = map[string]*internalconfig.RoutingProfile{
+		routingTestKeyA: {Providers: internalconfig.ProvidersRoutingConfig{Codex: apiFallbackPolicy(keyIndex)}},
+	}
+	sharedOnlyFallback := apiFallbackConfig("codex", keyIndex)
+	sharedOnlyFallback.Routing.KeyProfiles = map[string]*internalconfig.RoutingProfile{
+		routingTestKeyA: {Providers: internalconfig.ProvidersRoutingConfig{Codex: internalconfig.ProviderRoutingConfig{APICredential: keyIndex}}},
+	}
+
+	for _, tc := range []struct {
+		name string
+		cfg  *internalconfig.Config
+		key  string
+		want bool
+	}{
+		{"key profile fallback counts for its key", keyOnlyFallback, routingTestKeyA, true},
+		{"key profile fallback ignored without the key", keyOnlyFallback, "", false},
+		{"key profile without fallback overrides shared", sharedOnlyFallback, routingTestKeyA, false},
+		{"shared fallback counts without a key", sharedOnlyFallback, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAPIFallbackFixture(t, "codex", 1, tc.cfg)
+			got := f.m.HasAlternativeTargetForModel(ginContextWithKey(tc.key), []string{"codex"}, apiFallbackModel, cliproxyexecutor.Options{}, f.oauthIDs[0])
+			if got != tc.want {
+				t.Fatalf("HasAlternativeTargetForModel = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}

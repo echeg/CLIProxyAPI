@@ -607,6 +607,26 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		pinnedAuthID = ""
 	}
+	// releasePolicyRejectedAuth reports whether a turn must leave authID because
+	// the routing profile policy no longer selects it (an API-key fallback
+	// credential, or one excluded by a hot-reloaded mode) and another target can
+	// serve the turn, and logs the release.
+	releasePolicyRejectedAuth := func(ctx context.Context, modelName string, rawJSON []byte, authID string) bool {
+		if authID == "" || h.AuthManager == nil ||
+			h.AuthManager.RoutingPolicyAllowsAuth(ctx, authID) ||
+			!h.responsesWebsocketHasAlternativeReplayTarget(ctx, modelName, rawJSON, authID) {
+			return false
+		}
+		authIndex := ""
+		if auth, ok := sessionAuthByID(authID); ok && auth != nil {
+			authIndex = auth.Index
+		}
+		log.WithFields(log.Fields{
+			"id":         passthroughSessionID,
+			"auth_index": authIndex,
+		}).Info("responses websocket: releasing pinned auth rejected by routing policy")
+		return true
+	}
 
 	for {
 		var msgType int
@@ -728,21 +748,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			}
 		}
-		// Release a pin the routing profile policy no longer selects (an API-key
-		// fallback pin, or a credential excluded by a hot-reloaded mode) once
-		// another target can serve the turn. The existing paths then replay an
-		// incremental turn or select afresh for a full response.create.
-		if pinnedAuthID != "" && h.AuthManager != nil &&
-			!h.AuthManager.RoutingPolicyAllowsAuth(executionParent, pinnedAuthID) &&
-			h.responsesWebsocketHasAlternativeReplayTarget(executionParent, requestModelName, payload, pinnedAuthID) {
-			authIndex := ""
-			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
-				authIndex = pinnedAuth.Index
-			}
-			log.WithFields(log.Fields{
-				"id":         passthroughSessionID,
-				"auth_index": authIndex,
-			}).Info("responses websocket: releasing pinned auth rejected by routing policy")
+		// Release a pin the routing profile policy rejects once another target can
+		// serve the turn. The existing paths then replay an incremental turn,
+		// rebuild it from the local transcript in HTTP mode, or select afresh for
+		// a full response.create.
+		releasedPinnedAuthID := ""
+		if releasePolicyRejectedAuth(executionParent, requestModelName, payload, pinnedAuthID) {
+			releasedPinnedAuthID = pinnedAuthID
 			forgetPinnedAuth()
 		}
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
@@ -823,6 +835,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					}
 				}
 			}
+		}
+		// The compaction replay target pins the turn too, so it follows the same
+		// policy check: a rejected target (for example the API fallback key that
+		// produced the compaction) is dropped and the turn selects afresh, with
+		// replay support judged for that selection below.
+		if observedCompactionReplayAuthID != "" && observedCompactionReplayAuthID != pinnedAuthID &&
+			(observedCompactionReplayAuthID == releasedPinnedAuthID ||
+				releasePolicyRejectedAuth(executionParent, requestModelName, payload, observedCompactionReplayAuthID)) {
+			observedCompactionReplayAuthID = ""
+			observedCompactionSupported = false
 		}
 		allowCompactionReplayBypass := observedCompactionSupported
 		if !nativeWebsocketPassthrough {
