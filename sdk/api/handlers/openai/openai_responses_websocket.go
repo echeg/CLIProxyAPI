@@ -728,6 +728,23 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			}
 		}
+		// Release a pin the routing profile policy no longer selects (an API-key
+		// fallback pin, or a credential excluded by a hot-reloaded mode) once
+		// another target can serve the turn. The existing paths then replay an
+		// incremental turn or select afresh for a full response.create.
+		if pinnedAuthID != "" && h.AuthManager != nil &&
+			!h.AuthManager.RoutingPolicyAllowsAuth(executionParent, pinnedAuthID) &&
+			h.responsesWebsocketHasAlternativeReplayTarget(executionParent, requestModelName, payload, pinnedAuthID) {
+			authIndex := ""
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
+				authIndex = pinnedAuth.Index
+			}
+			log.WithFields(log.Fields{
+				"id":         passthroughSessionID,
+				"auth_index": authIndex,
+			}).Info("responses websocket: releasing pinned auth rejected by routing policy")
+			forgetPinnedAuth()
+		}
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth) {
