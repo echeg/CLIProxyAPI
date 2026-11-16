@@ -210,19 +210,32 @@ func isFallbackSelectionError(err error) bool {
 }
 
 // Execute resolves the request's routing profile before the fallback wrapper so
-// the fallback decision and the fallback leg use the same profile.
+// the fallback decision and the fallback leg use the same profile. One in-flight scope
+// covers the whole request, fallback leg included.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	ctx = m.ensureRoutingProfile(ctx)
+	scope := m.beginInFlight("")
+	defer func() { scope.end() }()
+	ctx = contextWithInFlightScope(m.ensureRoutingProfile(ctx), scope)
 	return executeWithProviderFallback(m, ctx, providers, req, opts, m.execute)
 }
 
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	ctx = m.ensureRoutingProfile(ctx)
+	scope := m.beginInFlight("")
+	defer func() { scope.end() }()
+	ctx = contextWithInFlightScope(m.ensureRoutingProfile(ctx), scope)
 	return executeWithProviderFallback(m, ctx, providers, req, opts, m.executeCount)
 }
 
-func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	ctx = m.ensureRoutingProfile(ctx)
+func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (result *cliproxyexecutor.StreamResult, err error) {
+	scope := m.beginInFlight("")
+	defer func() {
+		if scope != nil {
+			// The scope stays open until the returned stream finishes.
+			result = wrapInFlightStreamResult(result, scope, ctx)
+			scope = nil
+		}
+	}()
+	ctx = contextWithInFlightScope(m.ensureRoutingProfile(ctx), scope)
 	// executeStream returns a matched stop rule or a terminated request as an error,
 	// like the native stream path. The fallback wrapper strips the stop marker, so
 	// record it here: only a failure that exhausted the retries renders as a stream.
@@ -232,10 +245,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		returnedAsError = isRequestStopError(errStream) || isRequestTerminatedError(errStream)
 		return result, errStream
 	}
-	result, errStream := executeWithProviderFallback(m, ctx, providers, req, opts, execute)
+	streamResult, errStream := executeWithProviderFallback(m, ctx, providers, req, opts, execute)
 	var bootstrapErr *streamBootstrapError
 	if !returnedAsError && errors.As(errStream, &bootstrapErr) && bootstrapErr != nil {
 		return streamErrorResult(bootstrapErr.Headers(), errStream), nil
 	}
-	return result, errStream
+	return streamResult, errStream
 }

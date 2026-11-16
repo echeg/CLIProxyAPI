@@ -107,7 +107,19 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 // any profile enables it. shared supplies the shared selection at Pick time for
 // requests that carry no routing profile.
 func newRoutingSelector(state routingRuntimeState, shared func() internalconfig.SelectionConfig) coreauth.Selector {
-	var selector coreauth.Selector = coreauth.NewPipelineSelector(shared)
+	return newRoutingSelectorWithExisting(state, shared, nil)
+}
+
+// newRoutingSelectorWithExisting is newRoutingSelector that reuses the pipeline behind
+// existing, so a reload that only changes the affinity wrapper keeps round-robin cursors
+// and weighted credits instead of resetting them.
+func newRoutingSelectorWithExisting(state routingRuntimeState, shared func() internalconfig.SelectionConfig, existing coreauth.Selector) coreauth.Selector {
+	var selector coreauth.Selector
+	if pipeline := coreauth.UnwrapPipelineSelector(existing); pipeline != nil {
+		selector = pipeline
+	} else {
+		selector = coreauth.NewPipelineSelector(shared)
+	}
 	if state.stickyAnywhere {
 		subagents := state.sessionAffinitySubagents
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
@@ -250,6 +262,9 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.syncPluginModelRuntime(registrationCtx)
+	if ctx.Err() == nil && s.hooks.OnConfigApplied != nil {
+		s.hooks.OnConfigApplied(s, cfg)
+	}
 	return ctx.Err() == nil
 }
 
@@ -265,7 +280,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState, s.coreManager.SharedSelection))
+		s.coreManager.SetSelector(newRoutingSelectorWithExisting(routingState, s.coreManager.SharedSelection, s.coreManager.Selector()))
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)

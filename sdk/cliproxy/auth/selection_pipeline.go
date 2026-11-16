@@ -30,6 +30,21 @@ func NewPipelineSelector(shared func() config.SelectionConfig) *PipelineSelector
 	return &PipelineSelector{sharedSelection: shared}
 }
 
+// UnwrapPipelineSelector returns the *PipelineSelector behind selector, looking through
+// a session affinity wrapper, or nil. Config reloads reuse it so round-robin cursors and
+// weighted credits survive a change of the affinity wrapper.
+func UnwrapPipelineSelector(selector Selector) *PipelineSelector {
+	if pipeline, ok := selector.(*PipelineSelector); ok {
+		return pipeline
+	}
+	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
+		if pipeline, okFallback := affinity.fallback.(*PipelineSelector); okFallback {
+			return pipeline
+		}
+	}
+	return nil
+}
+
 // pipelineCandidatesKey marks candidates that the caller already reduced to the
 // pipeline candidate set (availableForPipeline semantics), so Pick does not refilter.
 type pipelineCandidatesKey struct{}
