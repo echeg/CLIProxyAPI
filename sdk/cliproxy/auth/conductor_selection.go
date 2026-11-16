@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -2837,7 +2838,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 // HasAlternativeTargetForModel reports whether at least one eligible credential
-// other than excludedAuthID can serve model across providers.
+// other than excludedAuthID can serve model across providers. When no primary
+// candidate exists, an available API fallback leg of the routing profile
+// (fallback target api) counts too, because a fresh request would reach it.
 func (m *Manager) HasAlternativeTargetForModel(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, excludedAuthID string) bool {
 	if m == nil {
 		return false
@@ -2848,6 +2851,21 @@ func (m *Manager) HasAlternativeTargetForModel(ctx context.Context, providers []
 		return m.hasAlternativeHomeTargetForModel(ctx, model, opts, excludedAuthID)
 	}
 	ctx = m.ensureRoutingProfile(ctx)
+	if m.hasAvailableTargetForModel(ctx, providers, model, opts, excludedAuthID) {
+		return true
+	}
+	fallback := m.providerFallbackFor(ctx, providers, cliproxyexecutor.Request{Model: model}, opts)
+	if fallback.target != config.ProviderFallbackAPI {
+		return false
+	}
+	legCtx := withRoutingFallbackLeg(withRoutingProfile(ctx, routingProfileFromContext(ctx).apiFallbackProfile(fallback.provider)), fallback.target)
+	return m.hasAvailableTargetForModel(legCtx, []string{fallback.provider}, model, opts, excludedAuthID)
+}
+
+// hasAvailableTargetForModel reports whether a credential other than
+// excludedAuthID is eligible under the routing profile in ctx and currently
+// available for model across providers.
+func (m *Manager) hasAvailableTargetForModel(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, excludedAuthID string) bool {
 	normalized := m.normalizeProviders(providers)
 	providerSet := make(map[string]struct{}, len(normalized))
 	for _, provider := range normalized {
