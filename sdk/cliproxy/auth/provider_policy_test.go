@@ -410,3 +410,65 @@ func TestProviderPolicyHotReloadMovesBoundSessions(t *testing.T) {
 		})
 	}
 }
+
+func TestRoutingPolicyAllowsAuth(t *testing.T) {
+	oauth := providerPolicyTestAuth{"rpa-codex-oauth", "codex", AuthKindOAuth, "codex-oauth"}
+	key := providerPolicyTestAuth{"rpa-codex-key", "codex", AuthKindAPIKey, "codex-key"}
+	otherKey := providerPolicyTestAuth{"rpa-codex-key-2", "codex", AuthKindAPIKey, "codex-key-2"}
+	geminiKey := providerPolicyTestAuth{"rpa-gemini-key", "gemini", AuthKindAPIKey, "gemini-key"}
+
+	apiModeCfg := func() *internalconfig.Config {
+		cfg := &internalconfig.Config{}
+		withAPIModeRouting(cfg, "codex", key.index)
+		return cfg
+	}
+	homeCfg := apiFallbackConfig("codex", key.index)
+	homeCfg.Home.Enabled = true
+	keyProfileCfg := apiFallbackConfig("codex", key.index)
+	keyProfileCfg.Routing.KeyProfiles = map[string]*internalconfig.RoutingProfile{
+		routingTestKeyA: {Providers: internalconfig.ProvidersRoutingConfig{Codex: apiMode(key.index)}},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		cfg    *internalconfig.Config
+		plugin bool
+		ctx    context.Context
+		authID string
+		want   bool
+	}{
+		{"subscription mode oauth", apiFallbackConfig("codex", key.index), false, nil, oauth.id, true},
+		{"subscription mode api key", apiFallbackConfig("codex", key.index), false, nil, key.id, false},
+		{"api mode named key", apiModeCfg(), false, nil, key.id, true},
+		{"api mode other key", apiModeCfg(), false, nil, otherKey.id, false},
+		{"api mode oauth", apiModeCfg(), false, nil, oauth.id, false},
+		{"provider without policy", apiFallbackConfig("codex", key.index), false, nil, geminiKey.id, true},
+		{"unknown id", apiFallbackConfig("codex", key.index), false, nil, "rpa-missing", true},
+		{"empty id", apiFallbackConfig("codex", key.index), false, nil, "", true},
+		{"home enabled", homeCfg, false, nil, key.id, true},
+		{"plugin scheduler", apiFallbackConfig("codex", key.index), true, nil, key.id, true},
+		{"no providers block", &internalconfig.Config{}, false, nil, key.id, false},
+		{"shared profile without client key", keyProfileCfg, false, ginContextWithKey(""), key.id, false},
+		{"key profile overrides shared", keyProfileCfg, false, ginContextWithKey(routingTestKeyA), key.id, true},
+		{"key profile rejects oauth", keyProfileCfg, false, ginContextWithKey(routingTestKeyA), oauth.id, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := providerPolicyTestManager(t, tc.cfg, oauth, key, otherKey, geminiKey)
+			if tc.plugin {
+				m.SetPluginScheduler(&fakePluginScheduler{})
+			}
+			ctx := tc.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			if got := m.RoutingPolicyAllowsAuth(ctx, tc.authID); got != tc.want {
+				t.Fatalf("RoutingPolicyAllowsAuth(%q) = %t, want %t", tc.authID, got, tc.want)
+			}
+		})
+	}
+
+	var nilManager *Manager
+	if !nilManager.RoutingPolicyAllowsAuth(context.Background(), key.id) {
+		t.Fatal("nil manager rejects the credential")
+	}
+}

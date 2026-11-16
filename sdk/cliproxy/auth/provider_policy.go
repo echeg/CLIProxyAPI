@@ -25,6 +25,33 @@ func providerPolicyAllows(profile *routingProfile, auth *Auth) bool {
 	return kind != AuthKindAPIKey
 }
 
+// RoutingPolicyAllowsAuth reports whether the routing profile of the request in
+// ctx would select authID in the primary leg under its per-provider policy. It
+// returns true when no policy applies (Home, a scheduler plugin, no profile, or
+// a provider without a policy) and for an empty or unknown ID, so callers never
+// release a pin they cannot judge. Request-level restrictions (required kind,
+// credential policy, free-auth exclusion) are not applied.
+func (m *Manager) RoutingPolicyAllowsAuth(ctx context.Context, authID string) bool {
+	if m == nil {
+		return true
+	}
+	profile := routingProfileFromContext(m.ensureRoutingProfile(ctx))
+	if profile == nil || !profile.providerPolicy {
+		return true
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	auth := m.auths[authID]
+	if auth == nil {
+		return true
+	}
+	return providerPolicyAllows(profile, auth)
+}
+
 // providerPolicySelectionError replaces a generic auth_not_found with a message
 // that names the provider policy when the policy, not the pool, left the request
 // without credentials: a subscription-mode provider that has only API keys, or
