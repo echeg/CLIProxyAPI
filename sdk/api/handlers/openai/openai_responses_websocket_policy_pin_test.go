@@ -192,16 +192,22 @@ func newPolicyPinFixture(t *testing.T, subscriptionCooling bool) *policyPinFixtu
 // without waiting: a past time means the subscription has recovered.
 func (f *policyPinFixture) setSubscriptionCooldown(recoverAt time.Time) {
 	f.t.Helper()
-	auth, ok := f.manager.GetByID(f.subID)
+	f.setCooldown(f.subID, recoverAt)
+}
+
+// setCooldown puts authID's model into a cooldown that ends at recoverAt.
+func (f *policyPinFixture) setCooldown(authID string, recoverAt time.Time) {
+	f.t.Helper()
+	auth, ok := f.manager.GetByID(authID)
 	if !ok {
-		f.t.Fatalf("subscription %s not found", f.subID)
+		f.t.Fatalf("auth %s not found", authID)
 	}
 	if auth.ModelStates == nil {
 		auth.ModelStates = map[string]*coreauth.ModelState{}
 	}
 	auth.ModelStates[f.model] = &coreauth.ModelState{Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: recoverAt}
 	if _, err := f.manager.Update(context.Background(), auth); err != nil {
-		f.t.Fatalf("update subscription cooldown: %v", err)
+		f.t.Fatalf("update %s cooldown: %v", authID, err)
 	}
 }
 
@@ -402,6 +408,139 @@ func TestResponsesWebsocketReleasesPinAfterHotReloadModeSwitch(t *testing.T) {
 		}
 		if policyPinReleaseLogged(hook) {
 			t.Fatalf("unexpected log %q without a mode change", policyPinReleaseLogMessage)
+		}
+	})
+}
+
+// setCodexRouting applies a new Codex routing policy through a config reload.
+func (f *policyPinFixture) setCodexRouting(routing config.ProviderRoutingConfig) {
+	f.t.Helper()
+	reloaded := *f.cfg
+	reloaded.Routing.Providers.Codex = routing
+	f.manager.SetConfig(&reloaded)
+}
+
+// policyPinExpectError writes request and expects an error event with status.
+func policyPinExpectError(t *testing.T, conn *websocket.Conn, request string, status int) {
+	t.Helper()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(request)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	_, payload, err := conn.ReadMessage()
+	if err != nil || ojson.GetBytesNoCopy(payload, "type").String() != wsEventTypeError {
+		t.Fatalf("response = %s, err=%v, want %s", payload, err, wsEventTypeError)
+	}
+	if got := ojson.GetBytesNoCopy(payload, "status").Int(); got != int64(status) {
+		t.Fatalf("error status = %d, want %d: %s", got, status, payload)
+	}
+}
+
+// pinSubscription serves turn 1 on the subscription, which pins it over its
+// upstream websocket, and returns the completed response ID.
+func (f *policyPinFixture) pinSubscription(conn *websocket.Conn) string {
+	f.t.Helper()
+	responseID := policyPinSendCompleted(f.t, conn, f.fullCreate("msg-1"))
+	if got := f.executor.turns(f.subID); got != 1 {
+		f.t.Fatalf("subscription turns after turn 1 = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
+	}
+	return responseID
+}
+
+func TestResponsesWebsocketPinnedSubscriptionFailureReachesAPIFallback(t *testing.T) {
+	t.Run("full create fails over in place to the API key", func(t *testing.T) {
+		f := newPolicyPinFixture(t, false)
+		conn := f.dial()
+		f.pinSubscription(conn)
+
+		f.executor.setFailStatus(f.subID, http.StatusTooManyRequests)
+		responseID := policyPinSendCompleted(t, conn, f.fullCreate("msg-2"))
+
+		if got := f.executor.turns(f.apiKeyID); got != 1 {
+			t.Fatalf("API key turns = %d, want 1; auth IDs %v", got, f.executor.AuthIDs())
+		}
+		if !strings.Contains(responseID, f.apiKeyID) {
+			t.Fatalf("turn 2 response %q was not served by the API key", responseID)
+		}
+	})
+
+	t.Run("incremental 429 gets the replay close", func(t *testing.T) {
+		f := newPolicyPinFixture(t, false)
+		conn := f.dial()
+		responseID := f.pinSubscription(conn)
+
+		f.executor.setFailStatus(f.subID, http.StatusTooManyRequests)
+		policyPinExpectReplayClose(t, conn, policyPinIncremental(responseID, "msg-2"))
+
+		if got := f.executor.turns(f.apiKeyID); got != 0 {
+			t.Fatalf("API key turns = %d, want 0; auth IDs %v", got, f.executor.AuthIDs())
+		}
+	})
+}
+
+func TestResponsesWebsocketPinnedSubscriptionFailureWithoutAPIFallback(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(f *policyPinFixture)
+	}{
+		{
+			name: "API key cooling down",
+			setup: func(f *policyPinFixture) {
+				f.setCooldown(f.apiKeyID, time.Now().Add(time.Hour))
+			},
+		},
+		{
+			name: "fallback off",
+			setup: func(f *policyPinFixture) {
+				f.setCodexRouting(config.ProviderRoutingConfig{
+					APICredential: f.apiKeyID,
+					Fallback:      config.ProviderFallbackConfig{Target: config.ProviderFallbackOff},
+				})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/full create exposes the error", func(t *testing.T) {
+			f := newPolicyPinFixture(t, false)
+			conn := f.dial()
+			f.pinSubscription(conn)
+
+			tc.setup(f)
+			f.executor.setFailStatus(f.subID, http.StatusTooManyRequests)
+			policyPinExpectError(t, conn, f.fullCreate("msg-2"), http.StatusTooManyRequests)
+
+			if got := f.executor.turns(f.apiKeyID); got != 0 {
+				t.Fatalf("API key turns = %d, want 0; auth IDs %v", got, f.executor.AuthIDs())
+			}
+		})
+		t.Run(tc.name+"/incremental exposes the error", func(t *testing.T) {
+			f := newPolicyPinFixture(t, false)
+			conn := f.dial()
+			responseID := f.pinSubscription(conn)
+
+			tc.setup(f)
+			f.executor.setFailStatus(f.subID, http.StatusTooManyRequests)
+			policyPinExpectError(t, conn, policyPinIncremental(responseID, "msg-2"), http.StatusTooManyRequests)
+
+			if got := f.executor.turns(f.apiKeyID); got != 0 {
+				t.Fatalf("API key turns = %d, want 0; auth IDs %v", got, f.executor.AuthIDs())
+			}
+		})
+	}
+
+	t.Run("incremental 401 still gets the replay close", func(t *testing.T) {
+		f := newPolicyPinFixture(t, false)
+		conn := f.dial()
+		responseID := f.pinSubscription(conn)
+
+		f.setCodexRouting(config.ProviderRoutingConfig{
+			APICredential: f.apiKeyID,
+			Fallback:      config.ProviderFallbackConfig{Target: config.ProviderFallbackOff},
+		})
+		f.executor.setFailStatus(f.subID, http.StatusUnauthorized)
+		policyPinExpectReplayClose(t, conn, policyPinIncremental(responseID, "msg-2"))
+
+		if got := f.executor.turns(f.apiKeyID); got != 0 {
+			t.Fatalf("API key turns = %d, want 0; auth IDs %v", got, f.executor.AuthIDs())
 		}
 	})
 }

@@ -109,11 +109,11 @@
 - [x] run `go test ./sdk/api/handlers/... ./sdk/cliproxy/auth/...` (re-run the known flaky test once if it fails, do not modify it), gofmt, compile check - must pass before task 4
 
 ### Task 4: Reverse direction - pinned subscription failure reaches the API fallback
-- [ ] write a websocket test (setup from task 3, subscription pinned over its upstream websocket in turn 1, then the subscription upstream answers turn 2 with 429): full `response.create` turn 2 -> the API-key upstream receives the turn and the client gets `response.completed` with no error event on the same socket (proves the failover iteration at ~:1129-1145 runs unpinned and reaches the API leg); if it fails, add a ➕ task for the handler change instead of widening this one
-- [ ] write a websocket test: incremental turn 2 whose pinned subscription returns 429 -> close 1012, the API-key upstream receives nothing on this socket
-- [ ] write regression tests: the same setups with the API key cooling down or `target: off` -> the 429 error is exposed to the client as today; an incremental turn whose pinned subscription returns 401 -> close 1012 (unchanged behavior, `:1069` checks for an alternative only on 429/quota)
-- [ ] confirm `TestResponsesWebsocketPinned429ExposesErrorWhenOnlyAlternativeHasExpiredToken` and the other pinned-failure tests in `openai_responses_websocket_loss_test.go` / `openai_responses_websocket_test.go` pass unchanged
-- [ ] run `go test ./sdk/api/handlers/... ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 5
+- [x] write a websocket test (setup from task 3, subscription pinned over its upstream websocket in turn 1, then the subscription upstream answers turn 2 with 429): full `response.create` turn 2 -> the API-key upstream receives the turn and the client gets `response.completed` with no error event on the same socket (proves the failover iteration at ~:1129-1145 runs unpinned and reaches the API leg); if it fails, add a ➕ task for the handler change instead of widening this one
+- [x] write a websocket test: incremental turn 2 whose pinned subscription returns 429 -> close 1012, the API-key upstream receives nothing on this socket
+- [x] write regression tests: the same setups with the API key cooling down or `target: off` -> the 429 error is exposed to the client as today; an incremental turn whose pinned subscription returns 401 -> close 1012 (unchanged behavior, `:1069` checks for an alternative only on 429/quota)
+- [x] confirm `TestResponsesWebsocketPinned429ExposesErrorWhenOnlyAlternativeHasExpiredToken` and the other pinned-failure tests in `openai_responses_websocket_loss_test.go` / `openai_responses_websocket_test.go` pass unchanged
+- [x] run `go test ./sdk/api/handlers/... ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 5
 
 ### Task 5: Verify acceptance criteria
 - [ ] verify each Overview goal against the code and tests: API pin released once a subscription is available (incremental: replay close; full create: subscription), no replay loop while subscriptions cool down, pinned native-passthrough subscription failure reaches the API fallback (full create 401/429, incremental 429), hot-reload mode switch and provider-switch restoration release a rejected pin
