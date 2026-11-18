@@ -163,12 +163,12 @@
 - [x] run `go test -race ./sdk/cliproxy/auth/...`
 
 ### Task 7: [Final] Update documentation
-- [ ] `docs/management-api-v8.md`: add `disabled` to the YAML example of "Per-provider mode and API fallback" (~230-252) and to the key-profile default sentence (~256-259)
-- [ ] `docs/management-api-v8.md` Validation (~261-285): `disabled` is a boolean for both providers; other fields are still validated; both disabled is allowed; the fallback-into-disabled-Codex warning
-- [ ] `docs/management-api-v8.md` Runtime rules (~287+): the 403 and its two messages; the dropped provider for two-provider models; no fallback into a disabled Codex; pinned requests; Codex search, live and realtime; a disable applies to new requests and connections while an open Codex duplex websocket runs until it closes
-- [ ] `docs/management-api-v8.md` writing rules (~424-436): PATCH `false` keeps `disabled: false`, DELETE of the field path removes it
-- [ ] `docs/management-api-v8.md` Logging (~438) and "Home mode, plugins, and logging" (~747-756): the refusal log line; not enforced under Home and plugin schedulers
-- [ ] mention that `/v1/models` still lists every model
+- [x] `docs/management-api-v8.md`: add `disabled` to the YAML example of "Per-provider mode and API fallback" (~230-252) and to the key-profile default sentence (~256-259)
+- [x] `docs/management-api-v8.md` Validation (~261-285): `disabled` is a boolean for both providers; other fields are still validated; both disabled is allowed; the fallback-into-disabled-Codex warning
+- [x] `docs/management-api-v8.md` Runtime rules (~287+): the 403 and its two messages; the dropped provider for two-provider models; no fallback into a disabled Codex; pinned requests; Codex search, live and realtime; a disable applies to new requests and connections while an open Codex duplex websocket runs until it closes
+- [x] `docs/management-api-v8.md` writing rules (~424-436): PATCH `false` keeps `disabled: false`, DELETE of the field path removes it
+- [x] `docs/management-api-v8.md` Logging (~438) and "Home mode, plugins, and logging" (~747-756): the refusal log line; not enforced under Home and plugin schedulers
+- [x] mention that `/v1/models` still lists every model
 
 ## Technical Details
 

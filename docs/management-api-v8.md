@@ -231,6 +231,7 @@ Every routing profile (the shared `routing.*` profile and each
 routing:
   providers:
     claude:
+      disabled: false                  # default false; true refuses requests that need claude
       mode: subscription               # subscription (default) or api
       api-credential: "<auth_index>"   # required for mode: api or fallback.target: api
       fallback:
@@ -238,6 +239,7 @@ routing:
         mode: auto                     # auto or always; target codex only
         mappings: [{from: "claude-opus-*", to: "gpt-6-astra"}]  # target codex only
     codex:
+      disabled: false                  # default false; true refuses requests that need codex
       mode: subscription
       api-credential: "<auth_index>"
       fallback:
@@ -249,14 +251,18 @@ routing:
       providers:
         claude: {mode: api, api-credential: "<auth_index>"}
         codex: {api-credential: "<auth_index>", fallback: {target: api}, speed: ultrafast, ignore-client-tier: true}
+    "client-key-b":
+      providers:
+        claude: {disabled: true}       # a Codex-only key
 ```
 
 `api-credential` is the `auth_index` of an `api-keys.claude` or `api-keys.codex`
 entry of the same provider; take it from `api_credentials` in
 `GET /v8/management/routing/profiles`. A key profile replaces the shared profile
-completely: a key profile without `providers` runs both providers in
+completely: a key profile without `providers` runs both providers enabled in
 `subscription` mode with fallback `off`, and Codex at speed `standard` with the
-client tier respected.
+client tier respected. A shared `disabled: true` therefore does not apply to a key
+with its own profile unless that profile sets it too.
 
 #### Validation
 
@@ -278,6 +284,16 @@ profile paths use the 12-hex key hash, for example
   `providers.claude` is an error; an empty `speed` and `ignore-client-tier: false`
   are accepted there, so a profile read from `GET /v8/management/routing/profiles`
   can be written back unchanged.
+- `disabled` is a boolean, valid under both `providers.claude` and
+  `providers.codex`. The other fields of a disabled provider are kept and still
+  validated, so re-enabling restores them; an invalid `mode` or `fallback` fails
+  the load even while the provider is disabled. Disabling both providers is
+  allowed: the key then serves no Claude or Codex request.
+- `claude.fallback.target: codex` (including one converted from a legacy
+  `claude-fallback` block) together with `codex.disabled: true` is not an error,
+  so disabling Codex never blocks a save. The fallback is inactive while Codex is
+  disabled, and the load logs a warning that names the fallback path, for example
+  `routing.providers.claude.fallback: target codex is inactive while routing.providers.codex.disabled is true`.
 - An `api-credential` that matches no enabled API-key credential of that provider
   is not an error, because the key may be added later. A successful
   configuration write logs one warning per such profile with the fields
@@ -286,6 +302,37 @@ profile paths use the 12-hex key hash, for example
 
 #### Runtime rules
 
+- **`disabled: true`.** A request that needs only the disabled provider is
+  refused with `403` before any credential is selected, and no credential is
+  put into cooldown. `error.message` is exactly
+  `claude is disabled by the routing profile of this API key` when the key's own
+  profile disables the provider, and
+  `claude is disabled by the routing profile` when the shared profile does (the
+  same with `codex`). The message never contains the key or its hash. Streaming
+  (the error arrives before the stream starts), non-streaming, and count-tokens
+  requests, and every other endpoint that executes through the proxy (images,
+  compact, speech, videos), are refused the same way.
+- A model served by both providers drops the disabled one and runs on the other
+  without an error. When every provider of the request is disabled, the 403
+  names the first disabled provider of the request.
+- A disabled Codex turns off the Claude -> Codex fallback in both `auto` and
+  `always` modes: a Claude request runs on Claude only and a failed primary
+  returns its own error. A disabled Claude refuses Claude requests even when a
+  Claude -> Codex fallback is configured; the fallback settings are kept but
+  inactive.
+- A request pinned to a credential of a disabled provider is refused with the
+  same 403. A Responses websocket checks its pinned credential at the start of
+  every turn: the pin is released as described below when another credential
+  can serve the turn; otherwise the turn gets an `error` event with status `403`
+  and the refusal message, and never reaches upstream.
+- Codex Alpha Search (`/v1/alpha/search`) and Codex live and realtime
+  (`/v1/live`) select a Codex credential directly and are refused with the same
+  403 when the profile disables Codex.
+- A disable applies to new requests and connections after a hot reload. An open
+  Codex duplex websocket forwards follow-up creates and steering frames inside
+  its existing upstream stream, so it keeps running until it closes.
+- `/v1/models` is global and still lists every model, including models of a
+  disabled provider.
 - **Primary leg.** Each candidate credential is filtered by the mode of its own
   provider, so a request that selects from a mixed Claude and Codex pool applies
   both modes. `subscription` excludes API-key credentials; `api` allows only the
@@ -350,8 +397,8 @@ profile paths use the 12-hex key hash, for example
   binding: while the bound subscription cools down and another one is
   available, each incremental turn on an upstream websocket gets the `1012`
   replay close and the replay lands on the API key again.
-- Home mode and scheduler plugins keep their own selection: the provider policy
-  and both fallback targets do not apply there. CLIProxyAPIHome does not
+- Home mode and scheduler plugins keep their own selection: the provider policy,
+  `disabled`, and both fallback targets do not apply there. CLIProxyAPIHome does not
   implement the provider policy, so a cluster deployment needs matching selector
   support in Home before using these settings.
 
@@ -434,6 +481,15 @@ field:
   `DELETE /v8/management/config/routing/providers/codex/speed` (or the
   `ignore-client-tier` path, or the same path under a key profile) removes the
   field from the file.
+- `disabled` is written the same way, for example
+  `{"routing": {"key-profiles": {"client-key-b": {"providers": {"claude": {"disabled": true}}}}}}`.
+  A PATCH with `"disabled": false` re-enables the provider and keeps an explicit
+  `disabled: false` in the file.
+  `DELETE /v8/management/config/routing/providers/claude/disabled` (or the
+  `codex` path, or the same path under a key profile) removes the field. The
+  other settings of the provider are not touched by either write, and disabling
+  Codex while a Claude -> Codex fallback is configured succeeds (see
+  [Validation](#validation)).
 
 #### Logging
 
@@ -450,7 +506,11 @@ fallback itself logs `Routing <provider> request to API key fallback`
 Responses websocket handler logs
 `responses websocket: releasing pinned auth rejected by routing policy` (fields
 `id`, the websocket session, and `auth_index`, the released credential) when it
-releases a credential the policy rejects at the start of a turn. The
+releases a credential the policy rejects at the start of a turn. A request
+refused because its provider is disabled logs one info line
+`Refusing request: provider disabled by routing profile` with the fields
+`provider` and `profile` (`shared`, or the 12-hex key hash for a key's own
+profile). The
 configuration diff reports `routing.providers: updated` for the shared block and
 `updated (redacted)` for key profiles; raw keys and API keys are never logged.
 
@@ -598,8 +658,8 @@ keys and is sent with `Cache-Control: no-store`.
     "selection": {"primary": "reserves", "tiebreak": "earliest-reset"},
     "claude-fallback": {"enabled": true, "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]},
     "providers": {
-      "claude": {"mode": "subscription", "api-credential": "", "fallback": {"target": "codex", "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]}, "speed": "", "ignore-client-tier": false},
-      "codex": {"mode": "subscription", "api-credential": "", "fallback": {"target": "off", "mode": "", "mappings": []}, "speed": "fast", "ignore-client-tier": false}
+      "claude": {"disabled": false, "mode": "subscription", "api-credential": "", "fallback": {"target": "codex", "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]}, "speed": "", "ignore-client-tier": false},
+      "codex": {"disabled": false, "mode": "subscription", "api-credential": "", "fallback": {"target": "off", "mode": "", "mappings": []}, "speed": "fast", "ignore-client-tier": false}
     }
   },
   "keys": [
@@ -611,8 +671,8 @@ keys and is sent with `Cache-Control: no-store`.
         "selection": {"primary": "priority", "tiebreak": "round-robin"},
         "claude-fallback": {"enabled": false, "mode": "", "mappings": []},
         "providers": {
-          "claude": {"mode": "subscription", "api-credential": "claude-api-key-index", "fallback": {"target": "api", "mode": "", "mappings": []}, "speed": "", "ignore-client-tier": false},
-          "codex": {"mode": "api", "api-credential": "codex-api-key-index", "fallback": {"target": "off", "mode": "", "mappings": []}, "speed": "standard", "ignore-client-tier": false}
+          "claude": {"disabled": false, "mode": "subscription", "api-credential": "claude-api-key-index", "fallback": {"target": "api", "mode": "", "mappings": []}, "speed": "", "ignore-client-tier": false},
+          "codex": {"disabled": false, "mode": "api", "api-credential": "codex-api-key-index", "fallback": {"target": "off", "mode": "", "mappings": []}, "speed": "standard", "ignore-client-tier": false}
         }
       }
     }
@@ -634,7 +694,9 @@ legacy selection or the key default is shown instead of an empty object.
 filled in, a legacy `claude-fallback` block is already converted, and `mappings`
 is `[]` rather than `null`. Both sub-blocks carry `speed` and
 `ignore-client-tier`; `codex.speed` shows `standard` when the profile does not set
-it, and `claude.speed` is always `""` (see [Codex speed](#codex-speed)).
+it, and `claude.speed` is always `""` (see [Codex speed](#codex-speed)). Both
+sub-blocks always carry `disabled` (`false` unless the profile sets it), so a
+client can detect support for the switch by its presence.
 `claude-fallback` is the legacy view derived from
 `providers.claude.fallback` for older clients; its `enabled` is `true` only for
 `target: codex`. `api_credentials` always has a `claude` and a `codex` list of
@@ -750,8 +812,10 @@ Key profiles apply to native standalone routing only. Home mode resolves no
 profile and keeps its control-plane selection; it also disables these management
 endpoints. With a scheduler plugin, every request uses the shared profile, so
 global preferences and the shared Codex `speed` and `ignore-client-tier` keep
-applying there, while key profiles, the provider mode, and both fallback targets
-do not apply. `supported: false` in `GET /v8/management/routing/profiles` does not
+applying there, while key profiles, the provider mode, `disabled` (also a shared
+`disabled: true`), and both fallback targets do not apply. Neither mode refuses
+a request because of `disabled`, so a provider can be switched off per key only
+in native standalone routing. `supported: false` in `GET /v8/management/routing/profiles` does not
 turn off the shared Codex speed (see [Codex speed](#codex-speed)). CLIProxyAPIHome does not implement the
 provider policy.
 
