@@ -6,48 +6,65 @@
 - This plan moves the speed into the routing profile (the shared profile and every per-key profile) and adds a per-profile switch that decides whether a tier sent by the client is respected:
   - `providers.codex.speed`: `standard` | `fast` | `ultrafast`
   - `providers.codex.ignore-client-tier`: bool
+- The policy covers every Codex request-building path: the four `response.create` paths (HTTP and websocket, plain and streaming) and `/responses/compact`. `response.steer` control frames only get the client tier removed.
 - The global `codex.fast-mode` flag is deleted.
 - Integration: two fields on the existing per-provider policy block, one exported context accessor in `sdk/cliproxy/auth`, one replaced function in the Codex executor, no new endpoints (the existing `GET /v8/management/routing/profiles` and v8 config PATCH carry the fields).
 - The panel (CPA-Manager-Plus) gets its own plan afterwards and is not part of this one.
 
+## Success Criteria
+1. A profile with speed `ultrafast` yields `service_tier=ultrafast` on a model that advertises it, `priority` on a model that advertises only Fast, and no tier on a model without tiers.
+2. With `ignore-client-tier: true` and speed `standard`, a client request carrying `service_tier: priority` goes upstream without a tier, on `response.create`, `/responses/compact` and `response.steer`.
+3. With `ignore-client-tier: false`, the tier the client sent passes through unchanged.
+4. A key with its own profile and neither field behaves as `standard` with the client tier respected.
+5. Two keys with different settings get different tiers in one process.
+6. A changed setting applies to the next request without a restart, and a config that still contains `oauth.providers.codex.fast-mode` loads without edits.
+
 ## Decisions
-- **Context**: the design was brainstormed and approved by the user on 2026-11-18 (version 3). Direction answers from the user: the profile imposes a tier on requests without one; `ultrafast` on a model without that tier downgrades to Fast; the legacy flag is deleted instead of kept; a flag to ignore the client's tier is in scope. The remaining mechanism decisions were made from repository evidence and accepted by the user as a whole.
+- **Context**: the design was brainstormed and approved by the user on 2026-11-18 (version 3). Direction answers from the user: the profile imposes a tier on requests without one; `ultrafast` on a model without that tier downgrades to Fast; the legacy flag is deleted instead of kept; a flag to ignore the client's tier is in scope. The remaining mechanism decisions were made from repository evidence and accepted by the user as a whole. A grill round on 2026-11-18 revised the plan; see `## Decision Log`.
 - **Chosen approach**:
-  1. Config: `ProviderRoutingConfig` (`internal/config/provider_routing.go:32`) gains `Speed string` (`speed`) and `IgnoreClientTier bool` (`ignore-client-tier`). Empty speed means `standard`; the stored value stays empty and the effective view fills the default, like `mode` and `fallback.target` (`applyDefaults`, `provider_routing.go:84`). Either field under `providers.claude` is a config error. Paths: `routing.providers.codex.*` for the shared profile and `routing.key-profiles.<key>.providers.codex.*` for a key profile.
+  1. Config: `ProviderRoutingConfig` (`internal/config/provider_routing.go:32`) gains `Speed string` (`speed`) and `IgnoreClientTier bool` (`ignore-client-tier`). The stored speed stays empty when unset. The effective view fills `standard` for Codex only, in `effectiveProviders` (`provider_routing.go:149`), not in `applyDefaults`: `applyDefaults` runs for Claude too and its result is validated again (`provider_routing.go:114-115`, `:154`, `:190-191`), so a default there would make every config fail the Claude check. Under `providers.claude` a non-empty speed or a true flag is a config error; an empty speed and a false flag are accepted, so a profile read from the API can be written back unchanged. JSON tags carry no `omitempty`, like the other fields of the block. Paths: `routing.providers.codex.*` for the shared profile and `routing.key-profiles.<key>.providers.codex.*` for a key profile.
   2. Tier resolution: one function replaces `applyCodexFastModeDoc` (`internal/runtime/executor/codex_executor_request.go:589`):
      - no `service_tier` in the request -> tier from the profile speed;
      - `service_tier` present and `ignore-client-tier` false -> untouched;
-     - `service_tier` present and `ignore-client-tier` true -> the field is removed (any value, including `flex` and `auto`), then tier from the profile speed.
+     - `service_tier` present and `ignore-client-tier` true -> the field is removed, then tier from the profile speed.
      - Tier from speed: `ultrafast` -> `ultrafast` when the model's catalog entry advertises it, else `priority` when advertised, else none; `fast` -> `priority` when advertised, else none; `standard` -> none.
      - Unchanged: API-key Codex auths are never touched, also with `ignore-client-tier`; payload rules run later in the finalizer and keep precedence.
-  3. Profile access: an exported accessor in `sdk/cliproxy/auth` returns the Codex speed settings of the routing profile carried in the context. When the context has no profile (Home, direct executor calls), the executor uses the shared profile of its own config. The Claude -> Codex fallback leg uses the Codex settings of the same profile.
+     - The function runs on five paths: the four existing call sites and `executeCompact`. `response.steer` frames get only the removal step.
+     - The function sees the request after translation. The OpenAI Responses translator already maps `fast` to `priority` and drops values it does not know, such as `auto` and `flex` (`internal/translator/codex/openai/responses/codex_openai-responses_request.go:47-62`). A dropped value counts as "no tier", so the profile speed applies even with `ignore-client-tier` false. This is the behavior fast-mode has today; the plan documents it and does not change translators.
+  3. Profile access: an exported accessor in `sdk/cliproxy/auth` returns the Codex speed settings of the routing profile carried in the context. When the context has no profile (Home, direct executor calls), the executor uses the shared profile of its own config, so under Home key profiles do not apply. The Claude -> Codex fallback leg uses the Codex settings of the same profile. An open duplex websocket session keeps the profile it started with until it reconnects.
   4. Legacy flag: `codex.fast-mode` is removed (field, management path, example config, docs, tests). Its value is not migrated. A config file that still spells the key must keep loading and must keep accepting management writes.
   5. Management API: `GET /v8/management/routing/profiles` returns both fields in the effective `providers` view. Writes go through the existing v8 config PATCH. A narrow PATCH of one field must not reset the other fields of an existing profile.
 - **Rejected alternatives**: none rejected by the user with a stated reason. The alternatives of the decided mechanism forks are listed in `## Technical Details` and stay open to critique.
 - **Verified facts**:
-  - `applyCodexFastModeDoc` is called from four places: `codex_executor_execute.go:158`, `codex_executor_stream.go:81`, `codex_websockets_execute.go:79`, `codex_websockets_stream.go:924` (inside `prepareCodexWebsocketStream`, which duplex follow-up turns also use: `codex_websockets_duplex.go:612`).
-  - `X-Codex-Routing-Hint` derives its tier from the final upstream body (`applyCodexRoutingHint`, `codex_executor_request.go:620`), so it follows the new logic without changes.
-  - The private `routingProfile` (`sdk/cliproxy/auth/routing_profile.go:15`) already stores the effective `providers` block and is put in the context by the public `Execute*` (`conductor_execution.go:213`, `:295`, `:364`). Under Home the resolved profile is nil; under a scheduler plugin it is the shared profile with `providerPolicy = false` (`routing_profile.go:113-125`).
+  - `applyCodexFastModeDoc` is called from four places: `codex_executor_execute.go:158`, `codex_executor_stream.go:81`, `codex_websockets_execute.go:79`, `codex_websockets_stream.go:924` (inside `prepareCodexWebsocketStream`, which duplex follow-up turns also use: `codex_websockets_duplex.go:612`). `executeCompact` (`codex_executor_execute.go:432`) does not call it; commit 6d512af7 states "compact requests are unchanged".
+  - `X-Codex-Routing-Hint` derives its tier from the final upstream body (`applyCodexRoutingHint`, `codex_executor_request.go:620`), so it follows the new logic without changes. It is skipped for SIWC requests (`:621`), and on websockets it is a handshake header (`codex_websockets_stream.go:972`), so it describes the first turn of a connection.
+  - The private `routingProfile` (`sdk/cliproxy/auth/routing_profile.go:15`) already stores the effective `providers` block and is put in the context by the public `Execute*` (`conductor_execution.go:213`, `:295`, `:364`). Under Home the resolved profile is nil; under a scheduler plugin it is the shared profile with `providerPolicy = false` (`routing_profile.go:113-125`). `ensureRoutingProfile` keeps a profile that is already in the context (`routing_profile.go:165-167`), and a duplex session derives its context once (`codex_websockets_duplex.go:45`).
   - "A key profile replaces the shared profile entirely; no field is inherited" (`internal/config/routing_profile.go:38-39`).
-  - The load path is lenient about unknown fields (`NormalizeConfigLayout(..., false)` at `internal/config/config_load.go:83`; comment at `config_v8.go:583`: "Existing unknown fields are ignored by the runtime"). Management writes validate strictly (`ValidateV8Config`, `config_v8.go:916`, `KnownFields(true)` at `:972`) after the on-disk document was normalized with `migrate = true`, which comments unknown fields out (`commentUnknownV8Sections`, `config_v8.go:669`; `TestConfigV8CommentsUnknownLegacySectionsOnWrite`, `internal/api/handlers/management/config_v8_test.go:117`). This was read, not run, for the exact path `oauth.providers.codex.fast-mode`; Task 5 locks it with tests.
+  - The load path is lenient about unknown fields (`NormalizeConfigLayout(..., false)` at `internal/config/config_load.go:83`; comment at `config_v8.go:583`). Management writes validate strictly (`ValidateV8Config`, `config_v8.go:916`) after the on-disk document was normalized with `migrate = true`, which comments unknown fields out (`commentUnknownV8Sections`, `config_v8.go:669`; `TestConfigV8CommentsUnknownLegacySectionsOnWrite`, `internal/api/handlers/management/config_v8_test.go:117`). An unknown key under `oauth.providers.codex` is already rejected on PUT (`config_v8_test.go:231`). This was read, not run, for the exact key `fast-mode`; Task 5 locks it with tests.
+  - `TestV8ExampleLoadsAndRoundTrips` (`internal/config/config_v8_test.go:18`) validates `config.example.yaml` strictly, so the example must change in the same task as the config struct.
   - The live deployment (checked 2026-11-18) has `oauth.providers.codex.fast-mode: false`, 7 client keys, no key profiles and no payload rules. No data migration is needed.
   - The fast-mode feature is fork-only (commit 6d512af7, 2026-10-04); upstream router-for-me has no such flag.
   - Usage records already carry the requested, effective and response service tier (`internal/runtime/executor/helps/usage_helpers.go:728-730`).
-  - The duplex websocket path copies `service_tier` into response-settings snapshots separately: from the raw next request payload (`codex_websockets_duplex.go:528`) and from the prepared body (`:962`). Whether the first copy can send a client tier upstream that the policy removed is not verified; Task 4 traces it.
-  - Existing executor tests take the `priority` tier of `gpt-5.5` from the embedded catalog (`codex_executor_fast_mode_test.go:32`). Upstream commit a5e8f69e removes that tier from `gpt-5.5`, and the embedded catalog on fork `main` has no model with `ultrafast`.
+  - The `service_tier` copied into duplex response-settings snapshots (`codex_websockets_duplex.go:528`, `:962`) is never sent upstream: the snapshots are read for `instructions` (`:416`, `:442`) and for usage reporting (`:975`, `:1151`); prepared turns are built by `prepareCodexWebsocketStream` (`:612`) and local compaction goes through `e.Execute` (`codex_executor_execute.go:404`).
+  - `response.steer` frames are built from the incoming payload and only run the payload finalizer (`codex_websockets_duplex.go:735-741`); "control frames bypass response.create translations and built-in defaults" (`:764`).
+  - Existing executor tests take the `priority` tier of `gpt-5.5` from the embedded catalog (`codex_executor_fast_mode_test.go:32`). Upstream commit a5e8f69e removes that tier from `gpt-5.5`, and the embedded catalog on fork `main` has no model with `ultrafast`. `CodexClientModelSupportsServiceTier` is generic over the tier id (`internal/registry/codex_client_models.go:62-82`), so the registry needs no change.
 
 ## Context (from discovery)
 - Files/components involved:
-  - `internal/config/provider_routing.go`, `internal/config/routing_profile.go`, `internal/config/config_types.go`, `internal/config/config_yaml.go` (key-profile pruning, `shouldPruneNestedMappingKeys` at `:947`)
-  - `sdk/cliproxy/auth/routing_profile.go`, `sdk/cliproxy/auth/provider_fallback.go` (`apiFallbackProfile` at `:126`)
+  - `internal/config/provider_routing.go`, `internal/config/routing_profile.go`, `internal/config/config_types.go`, `internal/config/config_yaml.go` (pruning, `shouldPruneNestedMappingKeys` at `:947`)
+  - `sdk/cliproxy/auth/routing_profile.go`
   - `internal/runtime/executor/codex_executor_request.go`, `codex_executor_execute.go`, `codex_executor_stream.go`, `codex_websockets_execute.go`, `codex_websockets_stream.go`, `codex_websockets_duplex.go`
-  - `internal/registry/codex_client_models.go` (`CodexClientModelSupportsServiceTier` at `:62`)
-  - `internal/api/handlers/management/routing_profiles.go`, `routing_api_credentials.go` (`effectiveProvidersView` at `:60`), `routing_providers_write.go`, `config_v8.go`
+  - `internal/api/handlers/management/routing_profiles.go`, `routing_api_credentials.go` (`effectiveProvidersView` at `:60`), `config_v8.go`
   - `config.example.yaml` (`:1343-1345`), `docs/management-api-v8.md` (`:43` and the routing sections), `AGENTS.md`
 - Related patterns found:
   - per-provider validation with a provider-specific error: `provider_routing.go:143` ("fallback.target codex is only supported for claude")
   - exported context accessor in `sdk/cliproxy/auth`: `RequestScopedErrorConfigFromContext` (`conductor_request_scoped_errors.go:32`)
-  - stored-empty, effective-default values: `applyDefaults` and `EffectiveProviders` (`provider_routing.go:84`, `:163`)
+  - stored-empty, effective-default values: `effectiveProviders` and `EffectiveProviders` (`provider_routing.go:149`, `:163`)
+- Test helpers to reuse:
+  - `internal/config/provider_routing_save_test.go`: `writeLoad` (`:13`), `saveRead` (`:27`), `routingNode` (`:40`)
+  - `sdk/cliproxy/auth/routing_profile_test.go`: `ginContextWithKey` (`:25`), `routingProfileTestConfig` (`:34`)
+  - `internal/runtime/executor`: `newCodexRoutingHintServer`, `codexOAuthTestAuth` (non-SIWC), `codexAPIKeyTestAuth` (`codex_executor_routing_hint_test.go:26`, `:45`, `:53`), `newCodexWebsocketHintServer` (`codex_websockets_routing_hint_test.go:30`), the manager-driven pattern of `TestCodexDuplexSummaryCredentialFailuresThroughManager` (`codex_websockets_duplex_health_test.go:94`), the duplex tests in `codex_websockets_duplex_test.go`, the compact test at `codex_executor_compact_test.go:1365`
+  - `internal/api/handlers/management`: `newRoutingProfilesTestHandler` and the table in `TestConfigV8InvalidProvidersWriteRejected` (`routing_providers_write_test.go:322`)
 - Dependencies identified: none new. JSON goes through `github.com/MoeForge/moego/ojson` only.
 
 ## Development Approach
@@ -57,14 +74,15 @@
 - **CRITICAL: every task MUST include new/updated tests** for code changes in that task
 - **CRITICAL: all tests must pass before starting next task** - no exceptions
 - **CRITICAL: update this plan file when scope changes during implementation**
-- Follow `AGENTS.md`: comments in English, no `encoding/json`/`gjson`/`sjson`, mutate request bodies through `*ojson.Doc`, executor helpers under `internal/runtime/executor/helps/`, `nowFunc` in time-dependent tests
+- Follow `AGENTS.md`: comments in English, no `encoding/json`/`gjson`/`sjson`, mutate request bodies through `*ojson.Doc`, executor helpers under `internal/runtime/executor/helps/`, `nowFunc` in time-dependent tests, no standalone changes to `internal/translator/`
 - After Go changes in every task: `gofmt -w` on touched files, then `go build -o test-output ./cmd/server && rm test-output`
 - Do not merge upstream as part of this plan
 
 ## Testing Strategy
 - **Unit tests**: required for every task. Run the touched packages per task, for example `go test ./internal/config/... ./sdk/cliproxy/auth/... ./internal/runtime/executor/... ./internal/api/handlers/management/...`
 - **Full suite**: `go test ./...` in the verification task. Known flaky tests listed in `docs/backlog/` may be re-run once; do not modify them.
-- **Catalog in executor tests**: tests must not depend on which tiers the embedded catalog gives to a real model. They use a fixture with three models (ultrafast + priority, priority only, no tiers).
+- **Catalog in executor tests**: tests must not depend on which tiers the embedded catalog gives to a real model. They install a fixture lookup with three models (ultrafast + priority, priority only, no tiers) through the package-level variable added in Task 3.
+- **Shape of executor tests**: the full combination table runs against the resolution function on an `*ojson.Doc`; each transport gets one end-to-end smoke case. All call sites share one function, so crossing the table with every transport adds no coverage.
 - **E2E tests**: the project has no UI e2e tests; none are added.
 
 ## Progress Tracking
@@ -91,25 +109,42 @@
 - 2026-11-18 brainstorm: **accepted** - no retry and no downgrade when upstream rejects ultrafast for an account without the entitlement; evidence: the error shape is unknown, and usage already records the tiers (`helps/usage_helpers.go:728`).
 - 2026-11-18 brainstorm: **accepted** - executor tests use a fixture catalog instead of the embedded one; evidence: `codex_executor_fast_mode_test.go:32` depends on a tier upstream removed in a5e8f69e.
 - 2026-11-18 brainstorm: **accepted** - backend plan now, panel plan second, upstream merge not included; evidence: loopai runs one plan per repository.
+- 2026-11-18 grill: **accepted** - `/responses/compact` gets the full rule (client tier removed under the flag, profile speed injected) as a fifth call site in Task 3, and `response.steer` frames get only the removal in Task 4.
+- 2026-11-18 grill: **accepted** - the `standard` default is filled for Codex only in `effectiveProviders`, `applyDefaults` stays untouched, and the Claude check accepts an empty speed and a false flag (Task 1) - decided by grill: `applyDefaults` runs for Claude and its result is re-validated (`provider_routing.go:114-115`, `:154`, `:190-191`), so the original wording would fail every config load.
+- 2026-11-18 grill: **accepted** - the new JSON tags carry no `omitempty`, and Task 6 tests that a profile body from GET can be sent back as a PATCH - decided by grill: the existing tags of the block have none (`provider_routing.go:33-35`) and `effectiveProvidersView` returns the struct unchanged (`routing_api_credentials.go:60-69`).
+- 2026-11-18 grill: **accepted** - Task 4 no longer traces the duplex snapshots; the result is recorded under Verified facts and the task keeps the regression tests - decided by grill: the snapshot tier is read only for instructions and usage reporting (`codex_websockets_duplex.go:416`, `:442`, `:975`, `:1151`).
+- 2026-11-18 grill: **accepted** - `config.example.yaml` edits moved into Task 1 (new fields) and Task 5 (removal), and both tasks run `TestV8ExampleLoadsAndRoundTrips` - decided by grill: that test validates the example strictly (`config_v8_test.go:18-32`), so it would fail between Task 5 and the documentation task.
+- 2026-11-18 grill: **accepted** - the two-key, context-precedence and hot-reload checks are one manager-driven test in `internal/runtime/executor` (Task 3); the manager-level tests and the `apiFallbackProfile` case of Task 2 and the "confirm Clone..." checkbox of Task 1 are dropped - decided by grill: the fixture variable is unexported so `test/` cannot install it, executor tests already drive a `Manager` (`codex_websockets_duplex_health_test.go:94`), `withRoutingProfile` is unexported, and per-key resolution with a fresh config snapshot is existing behavior (`sdk/cliproxy/auth/routing_profile.go:117`, `:131`).
+- 2026-11-18 grill: **accepted** - the executor combination table runs against the function on an `*ojson.Doc`, with one smoke case per transport (Task 3) - decided by grill: every call site calls the same function.
+- 2026-11-18 grill: **accepted** - the registry `ultrafast` test is dropped - decided by grill: `CodexClientModelSupportsServiceTier` is generic over the tier id (`internal/registry/codex_client_models.go:62-82`) and the plan does not change it.
+- 2026-11-18 grill: **accepted** - Task 5 drops the "PUT returns 400" test and loads one case (`fast-mode: true`); the old test file is rewritten instead of deleted - decided by grill: an unknown key under `oauth.providers.codex` is already rejected in `config_v8_test.go:231`, and the value is not migrated, so `true` and `false` take the same path.
+- 2026-11-18 grill: **accepted** - Task 6 loses its two "confirm" checkboxes, merges the GET and PATCH tests, and adds the rejected writes to the existing table - decided by grill: the view and merge code is field-agnostic (`routing_api_credentials.go:60-66`) and the table exists at `routing_providers_write_test.go:322`.
+- 2026-11-18 grill: **accepted** - Task 1 tests clearing a field of the shared profile through the save path, with a conditional pruning fix - decided by grill: `shouldPruneNestedMappingKeys` prunes only key-profile subtrees (`internal/config/config_yaml.go:947-967`).
+- 2026-11-18 grill: **accepted** - the tasks name the existing test helpers (section "Test helpers to reuse") - decided by grill: the helpers exist at the cited lines.
+- 2026-11-18 grill: **accepted** - a `## Success Criteria` section lists the six criteria, and Task 7 maps each to a test instead of re-verifying by hand - decided by grill: the plan referred to numbered criteria it never listed.
+- 2026-11-18 grill: **accepted** - translator normalization of the client tier is documented and covered by one test, with no translator change - decided by grill: the translator drops `auto`/`flex` before the executor runs (`codex_openai-responses_request.go:47-62`), fast-mode behaves this way today, and `AGENTS.md` forbids standalone translator changes.
+- 2026-11-18 grill: **accepted** - the docs state that Home ignores key profiles and that an open duplex session keeps its starting profile - decided by grill: `routing_profile.go:114-116`, `:165-167` and `codex_websockets_duplex.go:45`.
+- 2026-11-18 grill: **accepted** - websocket hint assertions are scoped to a fresh connection and the fixture auth is the non-SIWC `codexOAuthTestAuth` - decided by grill: the hint is a handshake header (`codex_websockets_stream.go:972`) and is skipped for SIWC (`codex_executor_request.go:621`).
+- 2026-11-18 grill: **accepted** - Post-Completion checks that the active catalog advertises the expected tiers before a live result is interpreted - decided by grill: the lookup needs an exact advertised tier (`codex_client_models.go:62`) and the catalog refresh can be disabled (`internal/registry/catalog_sources.go:61`).
 
 ## Implementation Steps
 
 ### Task 1: Add `speed` and `ignore-client-tier` to the provider routing config
 - [ ] in `internal/config/provider_routing.go` add constants `CodexSpeedStandard`, `CodexSpeedFast`, `CodexSpeedUltrafast` and the fields `Speed string` (`yaml:"speed,omitempty" json:"speed"`) and `IgnoreClientTier bool` (`yaml:"ignore-client-tier,omitempty" json:"ignore-client-tier"`) on `ProviderRoutingConfig`
-- [ ] in `normalize` trim and lower-case `Speed`, keep the stored value empty when unset, and validate the effective value: unknown values return `"<path>.speed has unsupported value %q"`
-- [ ] in `normalize` reject a non-empty `Speed` or a true `IgnoreClientTier` for a provider other than `codex` with `"<path>.speed is only supported for codex"` / `"<path>.ignore-client-tier is only supported for codex"`
-- [ ] make `applyDefaults` fill `Speed` with `standard` so `EffectiveProviders` and the management view return a concrete value
-- [ ] confirm `Clone`, `SharedProfile`, `effectiveProviders` and `apiFallbackProfile` (`sdk/cliproxy/auth/provider_fallback.go:126`) carry both fields without extra code; add code only where a field is dropped
-- [ ] write tests in `internal/config`: table for `normalize` (valid values, case and whitespace, unknown value, both Claude errors, defaults in the effective view, stored value stays empty)
-- [ ] write tests for the YAML round trip: shared profile and key profile keep both fields on save; clearing a field in a key profile removes it from the file (key-profile pruning, `config_yaml.go:947`); a config without the fields saves byte-identical
-- [ ] run `go test ./internal/config/...`, gofmt, compile check - must pass before task 2
+- [ ] in `normalize` trim and lower-case `Speed` and validate the stored value: empty or one of the three constants, otherwise `"<path>.speed has unsupported value %q"`
+- [ ] in `normalize` reject, for a provider other than `codex`, a non-empty `Speed` (`"<path>.speed is only supported for codex"`) and a true `IgnoreClientTier` (`"<path>.ignore-client-tier is only supported for codex"`); an empty speed and a false flag stay valid there
+- [ ] leave `applyDefaults` unchanged; in `effectiveProviders` (`provider_routing.go:149`) set `out.Codex.Speed` to `standard` when it is empty, so the Claude block stays empty through the second validation at `:190-191`
+- [ ] document both fields in the `routing.providers.codex` and `routing.key-profiles` examples of `config.example.yaml`, including the downgrade rule and the subscription-only scope
+- [ ] write a table test for `normalize`: valid values, case and whitespace, unknown value, both Claude errors, Claude with an empty speed and a false flag accepted, stored value stays empty
+- [ ] write a test that a config without the new fields passes `normalizeProfileProviders` for the shared profile and a key profile, and that `EffectiveProviders` returns `standard` for Codex and an empty speed for Claude
+- [ ] write save tests with `writeLoad`, `saveRead` and `routingNode`: a key profile keeps both fields; a config without them saves byte-identical; clearing a field of a key profile removes it from the file
+- [ ] write a save test that clears `routing.providers.codex.speed` and `ignore-client-tier` on the shared profile, saves, reloads, and finds the keys gone; if a cleared key survives, extend `shouldPruneNestedMappingKeys` (`internal/config/config_yaml.go:947`) to these two keys under `routing.providers.codex`
+- [ ] run `go test ./internal/config/...` (includes `TestV8ExampleLoadsAndRoundTrips`), gofmt, compile check - must pass before task 2
 
 ### Task 2: Export the Codex speed settings of the request's routing profile
 - [ ] in `sdk/cliproxy/auth/routing_profile.go` add an exported accessor (for example `CodexSpeedFromContext(ctx context.Context) (speed string, ignoreClientTier bool, ok bool)`) that reads `routingProfileFromContext(ctx).providers.Codex`; `ok` is false when the context carries no profile
 - [ ] the accessor must not depend on `providerPolicy`: a scheduler-plugin profile (`providerPolicy = false`) still returns the shared profile's settings
-- [ ] write tests: no profile in the context, a key profile, the shared profile, a scheduler-plugin profile, and a profile derived by `apiFallbackProfile`
-- [ ] write a manager-level test: two client keys with different key profiles executed through `Manager.Execute` with a capturing fake executor see different values in the executor context, and a key without a profile sees the shared values
-- [ ] write a manager-level test for hot reload: after the manager's runtime config is replaced, the next execution sees the new values
+- [ ] write accessor tests with `ginContextWithKey` and `routingProfileTestConfig`: no profile in the context, a key profile, the shared profile, and a profile with `providerPolicy = false`
 - [ ] run `go test ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 3
 
 ### Task 3: Resolve the Codex service tier from the profile in the executor
@@ -117,49 +152,48 @@
 - [ ] read the settings through the Task 2 accessor; when it reports no profile, use `cfg.Routing.SharedProfile().EffectiveProviders().Codex`; stop reading `cfg.Codex.FastMode`
 - [ ] route the catalog lookup through a package-level function variable that defaults to `registry.CodexClientModelSupportsServiceTier`, so tests can install a fixture without mutating the global catalog
 - [ ] update the four call sites (`codex_executor_execute.go:158`, `codex_executor_stream.go:81`, `codex_websockets_execute.go:79`, `codex_websockets_stream.go:924`) and their comments; the call stays before the payload-rule finalizer
-- [ ] replace `codex_executor_fast_mode_test.go` with a table test over speed x fixture model x client tier x `ignore-client-tier` for the HTTP non-stream, HTTP stream, websocket execute and websocket stream paths, asserting the upstream body and `X-Codex-Routing-Hint`
-- [ ] write tests for the unchanged rules: API-key auth is untouched in every combination, a payload filter on `service_tier` still wins, a payload override still wins
-- [ ] write a test that the context profile takes precedence over the config's shared profile (an external test package or `test/` that drives `Manager.Execute` with the real Codex executor against an `httptest` upstream for two client keys)
-- [ ] write a registry test that `CodexClientModelSupportsServiceTier` reports `ultrafast` for a catalog loaded with `loadCodexClientModelsFromBytes`, restoring the original catalog afterwards
-- [ ] run `go test ./internal/runtime/executor/... ./internal/registry/... ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 4
+- [ ] add the call to `executeCompact` (`codex_executor_execute.go:432`) after `ApplyRequestThinkingDoc` and before the payload finalizer, so `/responses/compact` follows the same rule
+- [ ] rewrite `codex_executor_fast_mode_test.go`: a table test that calls the function on an `*ojson.Doc` over speed x fixture model x client tier (absent, `priority`, `ultrafast`) x `ignore-client-tier` x auth kind (OAuth, API key), with the settings set on `cfg.Routing.Providers.Codex`
+- [ ] write one end-to-end smoke case per transport (HTTP non-stream, HTTP stream, websocket execute, websocket stream) with `newCodexRoutingHintServer` / `newCodexWebsocketHintServer` and `codexOAuthTestAuth`, asserting the upstream body and `X-Codex-Routing-Hint`; assert the websocket hint on a fresh connection only
+- [ ] write compact tests modelled on `codex_executor_compact_test.go:1365`: the flag strips a client `service_tier`, speed `fast` injects `priority`, an API-key auth is untouched
+- [ ] write tests that payload rules still win on a create path and on compact: a filter on `service_tier` removes the injected tier, an override replaces it
+- [ ] write a test for translator normalization: an OpenAI Responses request with `service_tier: "auto"` and `ignore-client-tier` false goes upstream with the profile's tier
+- [ ] write a manager-driven test in `internal/runtime/executor` (pattern of `TestCodexDuplexSummaryCredentialFailuresThroughManager`): `cliproxyauth.NewManager`, the real Codex executor, `SetConfig`, key contexts built like `ginContextWithKey`; two keys with different key profiles and one key without a profile get different tiers, the key settings differ from the shared ones, and after `SetConfig` with a changed speed the next `Execute` uses the new value
+- [ ] run `go test ./internal/runtime/executor/... ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 4
 
-### Task 4: Keep an ignored client tier out of the duplex websocket path
-- [ ] trace every use of the `service_tier` copied into response-settings snapshots in `codex_websockets_duplex.go` (written at `:528` from the raw next request payload and at `:962` from the prepared body; read around `:408-450`, `:520-585`, `:746-753`, `:926`) and record in this plan which copies can reach an upstream payload
-- [ ] where a snapshot can send a tier upstream that did not pass through the Task 3 function, take the tier from the prepared body or apply the same function, so a client tier removed by `ignore-client-tier` cannot return and a profile speed is not lost
-- [ ] write a duplex regression test: with `ignore-client-tier` true and speed `standard`, a client turn carrying `service_tier: priority` and its follow-up or compaction request go upstream without a tier
-- [ ] write a duplex test for the opposite setting: with `ignore-client-tier` false the client tier of each turn is sent as before
+### Task 4: Apply the client-tier removal to duplex steering and lock the duplex path
+- [ ] in `codex_websockets_duplex.go` (`:735-741`) delete `service_tier` from the `response.steer` document before `FinalizePayloadDoc` when the auth is not an API key and the profile's `ignore-client-tier` is true; do not inject a speed tier into steer frames
+- [ ] write a duplex test in `codex_websockets_duplex_test.go`: with `ignore-client-tier` true and speed `standard`, a client turn carrying `service_tier: priority` and its follow-up turn reach the upstream socket without a tier (assert on the captured frames)
+- [ ] write a duplex test for steering: a `response.steer` frame carrying `service_tier` reaches upstream without it when the flag is true and unchanged when the flag is false
 - [ ] run `go test ./internal/runtime/executor/...`, gofmt, compile check - must pass before task 5
 
 ### Task 5: Remove `codex.fast-mode`
-- [ ] delete the `FastMode` field (`internal/config/config_types.go:362-364`) and `internal/api/handlers/management/config_codex_fast_mode_test.go`; `grep -rn -iE 'FastMode|fast-mode'` over Go sources must then match only Claude and Devin code
-- [ ] write a load test: a v8 config containing `oauth.providers.codex.fast-mode: false` (and one with `true`) loads through `config.LoadConfig`, keeps its other `oauth.providers.codex` settings, and yields speed `standard` for the shared profile
+- [ ] delete the `FastMode` field (`internal/config/config_types.go:362-364`) and the `fast-mode` block in `config.example.yaml` (`:1343-1345`); `grep -rn -iE 'FastMode|fast-mode'` over Go sources must then match only Claude and Devin code
+- [ ] rewrite `internal/api/handlers/management/config_codex_fast_mode_test.go` into the leftover-key tests below, reusing its router setup (`:25-27`)
+- [ ] write a load test: a v8 config containing `oauth.providers.codex.fast-mode: true` loads through `config.LoadConfig`, keeps its other `oauth.providers.codex` settings, and yields speed `standard` for the shared profile
 - [ ] write a management test: on a config file that still contains the key, a PATCH of an unrelated field returns 200, the saved file has no active `fast-mode` key, and its other settings are preserved
 - [ ] if either test shows the leftover key breaking load or writes, drop the key explicitly in `NormalizeConfigLayout` with one warning that names `routing.providers.codex.speed`, and keep both tests
-- [ ] write a management test: `PUT /v8/management/config/oauth/providers/codex/fast-mode` now returns 400
-- [ ] run `go test ./internal/config/... ./internal/api/handlers/management/...`, gofmt, compile check - must pass before task 6
+- [ ] run `go test ./internal/config/... ./internal/api/handlers/management/...` (includes `TestV8ExampleLoadsAndRoundTrips`), gofmt, compile check - must pass before task 6
 
-### Task 6: Serve and accept the fields through the management API
-- [ ] confirm `GET /v8/management/routing/profiles` returns `speed` (with the `standard` default) and `ignore-client-tier` under `providers.codex` for the shared profile and each key profile through `effectiveProvidersView` (`routing_api_credentials.go:60`); add code only if a field is missing
-- [ ] confirm the write helpers in `routing_providers_write.go` and `mergeLegacyClaudeFallbackWrites` do not drop the new fields when a `providers` block is written
-- [ ] write tests for GET: defaults, explicit values on the shared profile, explicit values on a key profile
-- [ ] write tests for PATCH on the shared profile: setting `routing.providers.codex.speed` alone keeps `mode`, `api-credential`, `fallback` and the Claude block; clearing it returns the view to `standard`
-- [ ] write tests for PATCH on an existing key profile: setting only `providers.codex.speed` or only `providers.codex.ignore-client-tier` keeps `session-affinity`, `preferred-accounts`, `selection` and the rest of `providers`
-- [ ] write tests for rejected writes: an unknown speed value, `speed` under `providers.claude`, `ignore-client-tier` under `providers.claude`
+### Task 6: Lock the management API behavior for the new fields
+- [ ] write a GET test for `/v8/management/routing/profiles` with `newRoutingProfilesTestHandler`: Codex shows `speed: standard` and `ignore-client-tier: false` by default, explicit values appear for the shared profile and a key profile, and the Claude block shows an empty speed
+- [ ] write a PATCH test: setting only `providers.codex.speed` (and, separately, only `ignore-client-tier`) on the shared profile and on an existing key profile changes the GET view and the saved file while `session-affinity`, `preferred-accounts`, `selection` and the rest of `providers` stay intact; clearing the field with `null` removes it from the file and returns the view to `standard`
+- [ ] write a round-trip test: the profile body returned by GET is sent back as a PATCH and returns 200
+- [ ] add three cases to `TestConfigV8InvalidProvidersWriteRejected` (`routing_providers_write_test.go:322`): an unknown speed value, `speed` under `providers.claude`, `ignore-client-tier: true` under `providers.claude`
+- [ ] fix the management code only where one of these tests fails
 - [ ] run `go test ./internal/api/handlers/management/... ./internal/config/...`, gofmt, compile check - must pass before task 7
 
 ### Task 7: Verify acceptance criteria
-- [ ] verify criterion 1: speed `ultrafast` gives `ultrafast` on the fixture model that advertises it, `priority` on the priority-only model, and no tier on the model without tiers
-- [ ] verify criteria 2 and 3: `ignore-client-tier` true with speed `standard` strips a client `service_tier: priority`; false passes it through unchanged
-- [ ] verify criteria 4 and 5: a key profile without the fields behaves as `standard` with the client tier respected; two keys with different settings get different tiers in one process
-- [ ] verify criterion 6: a PATCH changes the behavior of the next request without a restart, and the live config shape (with the leftover `fast-mode: false`) loads without edits
+- [ ] for each of the six items in `## Success Criteria`, name the test that proves it in a short list under `## Technical Details`; add a test where one is missing
 - [ ] run the full suite `go test ./...` (known flaky tests in `docs/backlog/` may be re-run once; do not modify them)
 - [ ] run `gofmt -l .` (no output) and the compile check `go build -o test-output ./cmd/server && rm test-output`
 - [ ] run `go vet` on the touched packages and fix findings in touched code
 
 ### Task 8: Update documentation
-- [ ] `config.example.yaml`: remove the `fast-mode` block (`:1343-1345`) and document `speed` and `ignore-client-tier` in the `routing.providers.codex` and `routing.key-profiles` examples, including the downgrade rule and the subscription-only scope
-- [ ] `docs/management-api-v8.md`: remove the `/config/oauth/providers/codex/fast-mode` row (`:43`), add both fields to the routing profile sections and the `GET /routing/profiles` description, and state that a PATCH for a key without a profile creates a profile holding only the written fields, so a client must send a full profile when it creates one
+- [ ] `docs/management-api-v8.md`: remove the `/config/oauth/providers/codex/fast-mode` row (`:43`) and add both fields to the routing profile sections and the `GET /routing/profiles` description
+- [ ] `docs/management-api-v8.md`: describe the behavior a client must know: a PATCH for a key without a profile creates a profile holding only the written fields, so a full profile must be sent when one is created; `/responses/compact` follows the same rule and `response.steer` only loses the client tier; a tier the translator drops (`auto`, `flex`) counts as absent; Home ignores key profiles; an open duplex websocket session keeps its starting profile until it reconnects
 - [ ] `AGENTS.md`: add one sentence to the `sdk/cliproxy/auth` paragraph naming the accessor and the rule that the Codex executor reads the speed policy from the context profile
+- [ ] re-read the `config.example.yaml` comments written in Tasks 1 and 5 against the final behavior and correct them if they drifted; re-run `go test ./internal/config/...` when the file changes
 
 ## Technical Details
 
@@ -179,6 +213,15 @@
 5. Choose the tier: `ultrafast` -> first advertised of [`ultrafast`, `priority`]; `fast` -> `priority` when advertised; `standard` -> none.
 6. Set `service_tier` when a tier was chosen. Payload rules run afterwards.
 
+### Where the rule runs
+| Path | Removal under the flag | Speed injection |
+|---|---|---|
+| HTTP `response.create`, plain and streaming | yes | yes |
+| Websocket `response.create`, plain and streaming, duplex follow-up turns | yes | yes |
+| `/responses/compact` | yes | yes |
+| `response.steer` control frames | yes | no |
+| Codex API-key auths, any path | no | no |
+
 ### Decision table (from the brainstorm)
 | Decision | Chosen | Alternatives not taken |
 |---|---|---|
@@ -196,6 +239,7 @@
 ### Non-goals
 - Speed or the flag for Claude
 - Handling an upstream rejection of ultrafast
+- Carrying the client's original tier past translator normalization
 - Merging upstream router-for-me (v8.0.77)
 - Panel work and ultrafast pricing in monitoring (panel backlog: `docs/backlog/ultrafast-service-tier-priced-as-standard.md` in CPA-Manager-Plus)
 
@@ -203,9 +247,11 @@
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
 **Manual verification**:
+- Before any live check, confirm that the active Codex catalog advertises `ultrafast` for `gpt-6.2-sol` and `priority` for `gpt-6.2-astra`. A missing advertisement is a catalog problem (disabled refresh, embedded catalog without the upstream merge), not an entitlement problem.
 - After deploy, send one request for `gpt-6.2-sol` through a key whose profile has `speed: ultrafast` and check the usage record: requested, effective and response tier. Then watch whether the credential entered a cooldown. An account whose plan lacks Ultrafast may answer with an error; the shape of that error decides whether a follow-up plan is needed.
 - Repeat with `gpt-6.2-astra` and confirm the request went out with `priority`.
 - Send a request with a client `service_tier` through a profile with `ignore-client-tier: true` and confirm the usage record shows the profile's tier.
+- Compaction now uses the profile speed, so it spends the limit at the fast rate; watch the usage after the first long session.
 
 **External system updates**:
 - The live config keeps `fast-mode: false` until the first management write comments it out; no manual edit is required.
