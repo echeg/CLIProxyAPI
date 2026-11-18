@@ -119,7 +119,11 @@ func TestProvidersRoutingWarnsOnIgnoredAPIFallbackFields(t *testing.T) {
 	want := "routing.key-profiles." + KeyHashPrefix(providersTestKey) + ".providers.claude.fallback: mode and mappings are ignored"
 	var warned bool
 	for _, entry := range hook.AllEntries() {
-		if line, _ := entry.String(); strings.Contains(line, providersTestKey) {
+		line, errLine := entry.String()
+		if errLine != nil {
+			t.Fatal(errLine)
+		}
+		if strings.Contains(line, providersTestKey) {
 			t.Fatalf("log line leaks the raw key: %s", line)
 		}
 		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, want) {
@@ -269,7 +273,11 @@ func TestProvidersWinOverLegacyClaudeFallback(t *testing.T) {
 			}
 			var warned bool
 			for _, entry := range hook.AllEntries() {
-				if line, _ := entry.String(); strings.Contains(line, providersTestKey) {
+				line, errLine := entry.String()
+				if errLine != nil {
+					t.Fatal(errLine)
+				}
+				if strings.Contains(line, providersTestKey) {
 					t.Fatalf("log line leaks the raw key: %s", line)
 				}
 				if entry.Level == log.WarnLevel && strings.Contains(entry.Message, wantPath) {
@@ -464,7 +472,11 @@ func TestProvidersRoutingWarnsOnFallbackIntoDisabledCodex(t *testing.T) {
 			}
 			var warned bool
 			for _, entry := range hook.AllEntries() {
-				if line, _ := entry.String(); strings.Contains(line, providersTestKey) {
+				line, errLine := entry.String()
+				if errLine != nil {
+					t.Fatal(errLine)
+				}
+				if strings.Contains(line, providersTestKey) {
 					t.Fatalf("log line leaks the raw key: %s", line)
 				}
 				if entry.Level == log.WarnLevel && entry.Message == tc.want {

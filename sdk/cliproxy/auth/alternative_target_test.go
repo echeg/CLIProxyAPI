@@ -182,3 +182,34 @@ func TestHasAlternativeTargetForModelUsesKeyProfileFallback(t *testing.T) {
 		})
 	}
 }
+
+// A disabled provider has no fallback leg: with Claude disabled the API leg of
+// Codex counts, as a fresh request would reach it, not the API leg of Claude.
+func TestHasAlternativeTargetForModelSkipsDisabledProviderFallback(t *testing.T) {
+	codexOAuth := providerPolicyTestAuth{"alt-disabled-codex-oauth", "codex", AuthKindOAuth, ""}
+	codexKey := providerPolicyTestAuth{"alt-disabled-codex-key", "codex", AuthKindAPIKey, "codex-key-idx"}
+	claudeKey := providerPolicyTestAuth{"alt-disabled-claude-key", "claude", AuthKindAPIKey, "claude-key-idx"}
+	for _, tc := range []struct {
+		name          string
+		codexFallback bool
+		want          bool
+	}{
+		{"codex api leg counts", true, true},
+		{"no codex fallback", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &internalconfig.Config{}
+			cfg.Routing.Providers.Claude = apiFallbackPolicy(claudeKey.index)
+			cfg.Routing.Providers.Claude.Disabled = true
+			cfg.Routing.Providers.Codex = internalconfig.ProviderRoutingConfig{APICredential: codexKey.index}
+			if tc.codexFallback {
+				cfg.Routing.Providers.Codex = apiFallbackPolicy(codexKey.index)
+			}
+			m, _ := providerPolicyTestManager(t, cfg, codexOAuth, codexKey, claudeKey)
+			got := m.HasAlternativeTargetForModel(context.Background(), []string{"claude", "codex"}, providerPolicyTestModel, cliproxyexecutor.Options{}, codexOAuth.id)
+			if got != tc.want {
+				t.Fatalf("HasAlternativeTargetForModel = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}

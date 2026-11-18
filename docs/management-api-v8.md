@@ -191,6 +191,11 @@ for the `api` target.
 - `always` sends mapped models straight to Codex.
 - The Codex leg uses Codex OAuth credentials only. Pinned requests and requests
   that require a non-OAuth credential are never rerouted.
+- A profile with `providers.codex.disabled: true` never runs the Codex leg, in
+  `auto` or `always` mode, and a profile with `providers.claude.disabled: true`
+  refuses Claude requests instead of rerouting them (see
+  [Runtime rules](#runtime-rules)). The fallback settings are kept, and the
+  legacy `enabled` view below still reports `true`.
 
 `GET /v8/management/routing/claude-fallback` returns
 `{"supported": bool, "settings": {...}, "models": {"claude": [...], "codex": [...]}}`
@@ -330,7 +335,9 @@ profile paths use the 12-hex key hash, for example
   403 when the profile disables Codex.
 - A disable applies to new requests and connections after a hot reload. An open
   Codex duplex websocket forwards follow-up creates and steering frames inside
-  its existing upstream stream, so it keeps running until it closes.
+  its existing upstream stream, so it keeps running until it closes. The hangup
+  of an open realtime call (`/v1/realtime/calls/{id}/hangup`) still reaches its
+  credential, so the call can be ended.
 - `/v1/models` is global and still lists every model, including models of a
   disabled provider.
 - **Primary leg.** Each candidate credential is filtered by the mode of its own
@@ -373,7 +380,8 @@ profile paths use the 12-hex key hash, for example
 - The policy is skipped for executions pinned to a credential (Codex websocket
   continuations) and for requests that require their own credential kind or
   policy (the Codex leg of the Claude -> Codex fallback, Codex Alpha Search with
-  an API key). The Responses websocket handler checks a pinned credential
+  an API key). `disabled` is the exception: it still refuses those requests
+  (see `disabled: true` above). The Responses websocket handler checks a pinned credential
   against the key's current policy at the start of every turn, so a pin the
   policy rejects (an API fallback key, or a credential after a hot-reload `mode`
   change) is released as described above once another eligible credential is
@@ -516,8 +524,11 @@ configuration diff reports `routing.providers: updated` for the shared block and
 
 ### Per-key routing profiles and selection pipeline
 
-Every client key in `access.api-keys` can have its own routing profile. A profile
-has five stages, applied in this order to each request:
+Every client key in `access.api-keys` can have its own routing profile. Before
+the first stage, a provider with `disabled: true` is dropped from the request, and
+a request left with no provider is refused with `403` (see
+[Runtime rules](#runtime-rules)). A profile then has five stages, applied in this
+order to each request:
 
 1. **Provider mode** (`providers.<provider>.mode`): `subscription` keeps only
    Claude/Codex subscriptions in the candidate pool, `api` keeps only the
@@ -605,7 +616,8 @@ Soft levels rank only the remaining pool and only when `reserves` is one of the
 slots. Manual credential priority applies only when `priority` is one of the slots.
 Executions pinned to a credential, such as Codex websocket continuations, keep
 their credential and ignore the provider mode, preferences, reserves, and
-selection. The Responses websocket handler still checks the pin against the
+selection. A pin to a credential of a disabled provider is refused (see
+[Runtime rules](#runtime-rules)). The Responses websocket handler still checks the pin against the
 provider mode at the start of each turn and releases a rejected pin once another
 eligible credential is available (see "Per-provider mode and API fallback").
 

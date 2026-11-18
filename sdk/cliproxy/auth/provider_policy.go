@@ -16,8 +16,7 @@ import (
 // disables. It is request-scoped, so no credential cools down, and its Error()
 // is the client-facing message without an error-code prefix.
 type providerDisabledError struct {
-	provider string
-	message  string
+	message string
 }
 
 func (e *providerDisabledError) Error() string {
@@ -52,7 +51,7 @@ func refuseDisabledProvider(ctx context.Context, profile *routingProfile, provid
 		profileName = profile.keyHash
 	}
 	logEntryWithRequestID(ctx).WithFields(log.Fields{"provider": provider, "profile": profileName}).Info("Refusing request: provider disabled by routing profile")
-	return &providerDisabledError{provider: provider, message: message}
+	return &providerDisabledError{message: message}
 }
 
 // refuseDisabledSelection resolves the routing profile of a direct auth selection

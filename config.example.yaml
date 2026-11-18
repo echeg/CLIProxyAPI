@@ -206,9 +206,10 @@ routing:
   # to the selection. Empty map means automatic selection for both providers.
   # Native standalone routing only; Home and scheduler plugins own their own selection.
   preferred-accounts: {} # Example: {codex: "auth-index", claude: "auth-index"}
-  # Per-provider mode, fallback and Codex speed. mode and fallback apply to native
-  # routing only (not Home/plugins); speed and ignore-client-tier also apply under
-  # Home and scheduler plugins, from the shared profile only.
+  # Per-provider on/off switch, mode, fallback and Codex speed. disabled, mode and
+  # fallback apply to native routing only (not Home/plugins); speed and
+  # ignore-client-tier also apply under Home and scheduler plugins, from the shared
+  # profile only.
   # NOTE: Claude/Codex upstream API keys (api-keys.claude / api-keys.codex) are never
   # selected in the primary leg unless a profile sets mode: api for that provider.
   # This covers every entry there, including Claude setup tokens and custom
@@ -248,8 +249,18 @@ routing:
   #   there is used as sent.
   # A non-empty speed or ignore-client-tier: true under providers.claude is a
   # config error.
+  # disabled (claude and codex, default false): true refuses every request that
+  #   needs the provider with 403 "<provider> is disabled by the routing profile"
+  #   (" of this API key" for a key profile) before any credential is selected, so
+  #   no credential cools down and no fallback runs. Pinned requests, Codex search
+  #   and live/realtime are refused too. A model served by both providers runs on
+  #   the enabled one. The other fields are kept and still validated, so false
+  #   restores them. codex.disabled turns off the Claude -> Codex fallback (the load
+  #   warns). Applies to new requests and connections; an open Codex websocket
+  #   runs until it closes.
   # providers:
   #   claude:
+  #     disabled: false
   #     mode: subscription
   #     api-credential: "auth-index"
   #     fallback:
@@ -259,6 +270,7 @@ routing:
   #         - from: "claude-opus-*"
   #           to: "gpt-6-astra"
   #   codex:
+  #     disabled: false
   #     mode: subscription
   #     api-credential: "auth-index"
   #     fallback:
@@ -296,8 +308,9 @@ routing:
   # A key profile is a full copy: it replaces session-affinity, preferred-accounts,
   # selection and providers (or legacy claude-fallback) for that key, and nothing is
   # inherited from the shared fields above (an empty selection means {reserves,
-  # round-robin}; no providers means subscription mode with fallback off and Codex
-  # speed standard with the client tier respected). Keys
+  # round-robin}; no providers means both providers enabled in subscription mode
+  # with fallback off and Codex speed standard with the client tier respected; a
+  # shared disabled: true does not carry over). Keys
   # without a profile use the shared fields. On load, profiles for keys missing from
   # access.api-keys are dropped with a warning; the v8 management config write
   # rejects them with 400.
@@ -326,6 +339,10 @@ routing:
   #           mappings:
   #             - from: "claude-opus-*"
   #               to: "gpt-6-astra"
+  #   "your-api-key-3": # Codex only
+  #     providers:
+  #       claude:
+  #         disabled: true
   # Codex/Claude OAuth credentials can keep part of their subscription quota for tools
   # outside the proxy. Add a top-level "quota_reserve" next to "priority" in the auth JSON:
   #   "quota_reserve": {"percent": 25, "mode": "soft"}

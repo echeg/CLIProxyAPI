@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -29,8 +30,9 @@ type providerFallback struct {
 
 // providerFallbackFor resolves the fallback of the request's routing profile for
 // the first listed provider that has one, claude before codex. A pinned request
-// and a fallback leg never fall back, so fallbacks do not chain, and a profile
-// that disables Codex gets no Claude -> Codex fallback.
+// and a fallback leg never fall back, so fallbacks do not chain. A disabled
+// provider has no fallback, and a profile that disables Codex gets no
+// Claude -> Codex fallback.
 func (m *Manager) providerFallbackFor(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) providerFallback {
 	if !m.ClaudeFallbackSupported() || pinnedAuthIDFromMetadata(opts.Metadata) != "" || routingFallbackLeg(ctx) {
 		return providerFallback{}
@@ -42,19 +44,21 @@ func (m *Manager) providerFallbackFor(ctx context.Context, providers []string, r
 	normalized := m.normalizeProviders(providers)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	for _, provider := range []string{"claude", "codex"} {
-		if !containsProvider(normalized, provider) {
-			continue
-		}
 		policy := profile.providers.Codex
 		if provider == "claude" {
 			policy = profile.providers.Claude
+		}
+		// The entry gate already drops a disabled provider from executed requests;
+		// HasAlternativeTargetForModel passes the unfiltered list.
+		if !containsProvider(normalized, provider) || policy.Disabled {
+			continue
 		}
 		var fallback providerFallback
 		switch policy.Fallback.Target {
 		case config.ProviderFallbackCodex:
 			// A disabled Codex keeps the Claude fallback settings but never runs
 			// the leg; the leg calls the inner execute and skips the entry gate.
-			if codex, ok := profile.providerMode("codex"); provider == "claude" && !(ok && codex.Disabled) {
+			if provider == "claude" && !profile.providers.Codex.Disabled {
 				fallback = codexFallbackFor(policy.Fallback, eligibility, req, opts)
 			}
 		case config.ProviderFallbackAPI:
@@ -156,22 +160,12 @@ func (m *Manager) filterDisabledProviders(ctx context.Context, providers []strin
 		policy, ok := profile.providerMode(provider)
 		return ok && policy.Disabled
 	}
-	filtered := providers
-	firstDisabled := ""
-	for i, provider := range providers {
-		if !disabled(provider) {
-			if firstDisabled != "" {
-				filtered = append(filtered, provider)
-			}
-			continue
+	if i := slices.IndexFunc(providers, disabled); i >= 0 {
+		firstDisabled := providers[i]
+		providers = slices.DeleteFunc(slices.Clone(providers), disabled)
+		if len(providers) == 0 {
+			return nil, refuseDisabledProvider(ctx, profile, firstDisabled)
 		}
-		if firstDisabled == "" {
-			firstDisabled = provider
-			filtered = append(make([]string, 0, len(providers)-1), providers[:i]...)
-		}
-	}
-	if len(providers) > 0 && len(filtered) == 0 {
-		return nil, refuseDisabledProvider(ctx, profile, firstDisabled)
 	}
 	if pinnedID := pinnedAuthIDFromMetadata(opts.Metadata); pinnedID != "" {
 		m.mu.RLock()
@@ -185,7 +179,7 @@ func (m *Manager) filterDisabledProviders(ctx context.Context, providers []strin
 			return nil, refuseDisabledProvider(ctx, profile, pinnedProvider)
 		}
 	}
-	return filtered, nil
+	return providers, nil
 }
 
 func executeWithProviderFallback[T any](m *Manager, ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, execute func(context.Context, []string, cliproxyexecutor.Request, cliproxyexecutor.Options) (T, error)) (T, error) {

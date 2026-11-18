@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -720,6 +721,8 @@ func TestDisabledProviderFiltersRequestProviders(t *testing.T) {
 	}{
 		{"claude disabled runs codex", true, false, []string{"claude", "codex"}, disabledCodexOAuth.id, ""},
 		{"codex disabled runs claude", false, true, []string{"codex", "claude"}, disabledClaudeOAuth.id, ""},
+		{"claude disabled after codex runs codex", true, false, []string{"codex", "claude"}, disabledCodexOAuth.id, ""},
+		{"codex disabled after claude runs claude", false, true, []string{"claude", "codex"}, disabledClaudeOAuth.id, ""},
 		{"mixed case names are compared normalized", true, false, []string{" Claude ", "codex"}, disabledCodexOAuth.id, ""},
 		{"both disabled names the first", true, true, []string{"claude", "codex"}, "", disabledKeyMessage},
 		{"both disabled names codex first", true, true, []string{"codex", "claude"}, "", "codex is disabled by the routing profile of this API key"},
@@ -745,12 +748,42 @@ func TestDisabledProviderFiltersRequestProviders(t *testing.T) {
 				}
 				return
 			}
+			if len(*calls) != 3 {
+				t.Fatalf("calls = %v, want three", *calls)
+			}
 			for _, id := range *calls {
 				if id != tc.want {
 					t.Fatalf("calls = %v, want only %s", *calls, tc.want)
 				}
 			}
 		})
+	}
+}
+
+// The selection filter also rejects auths of a disabled provider, so the request
+// tests above cannot tell what the entry gate passes on; check it directly.
+func TestFilterDisabledProvidersKeepsOrderAndInput(t *testing.T) {
+	keyProfile := disabledProviders(true, false)
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile))
+	ctx := m.ensureRoutingProfile(ginContextWithKey(routingTestKeyA))
+	for _, tc := range []struct {
+		in, want []string
+	}{
+		{nil, nil},
+		{[]string{"codex", "gemini"}, []string{"codex", "gemini"}},
+		{[]string{"codex", "claude"}, []string{"codex"}},
+		{[]string{"gemini", "claude", "codex"}, []string{"gemini", "codex"}},
+		{[]string{"claude", "gemini", " Claude ", "codex"}, []string{"gemini", "codex"}},
+	} {
+		in := slices.Clone(tc.in)
+		got, err := m.filterDisabledProviders(ctx, in, cliproxyexecutor.Options{})
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("filterDisabledProviders(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+		if !reflect.DeepEqual(in, tc.in) {
+			t.Fatalf("filterDisabledProviders modified the caller slice: %q, want %q", in, tc.in)
+		}
 	}
 }
 
@@ -898,10 +931,12 @@ func TestDirectSelectionWithCodexEnabled(t *testing.T) {
 		key := disabledProviders(true, true)
 		m, _ := providerPolicyTestManager(t, disabledProviderConfig(disabledProviders(true, true), &key), disabledClaudeOAuth, disabledCodexOAuth)
 		m.SetPluginScheduler(&fakePluginScheduler{})
-		_, err := m.SelectAuthByKind(ginContextWithKey(routingTestKeyA), "codex", providerPolicyTestModel, AuthKindOAuth, cliproxyexecutor.Options{})
-		var disabledErr *providerDisabledError
-		if errors.As(err, &disabledErr) {
-			t.Fatalf("plugin scheduler refused the selection: %v", err)
+		selected, err := m.SelectAuthByKind(ginContextWithKey(routingTestKeyA), "codex", providerPolicyTestModel, AuthKindOAuth, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("plugin scheduler selection: %v", err)
+		}
+		if selected == nil || selected.ID != disabledCodexOAuth.id {
+			t.Fatalf("plugin scheduler selected %v, want %s", selected, disabledCodexOAuth.id)
 		}
 	})
 }
@@ -943,6 +978,41 @@ func TestClaudeFallbackSkipsDisabledCodex(t *testing.T) {
 				t.Fatalf("calls = %v, want [claude]", *calls)
 			}
 		})
+	}
+}
+
+// A disabled Claude refuses Claude requests even with a Claude -> Codex
+// fallback: the user chose that disabled means refused, never translated.
+func TestDisabledClaudeNeverFallsBackToCodex(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, profile := range []struct {
+		name    string
+		ctx     context.Context
+		message string
+	}{
+		{"shared", context.Background(), disabledSharedMessage},
+		{"key", ginContextWithKey(routingTestKeyA), disabledKeyMessage},
+	} {
+		for _, mode := range []string{"auto", "always"} {
+			for _, path := range []string{"execute", "count", "stream"} {
+				t.Run(profile.name+"/"+mode+"/"+path, func(t *testing.T) {
+					m, calls, _, _ := fallbackTestManager(t, "off", &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"})
+					cfg := codexFallbackIntoDisabledConfig(mode, false)
+					cfg.Routing.Providers.Claude.Disabled = true
+					if profile.name == "key" {
+						cfg.APIKeys = []string{routingTestKeyA}
+						cfg.Routing.KeyProfiles = map[string]*internalconfig.RoutingProfile{routingTestKeyA: {Providers: cfg.Routing.Providers}}
+						cfg.Routing.Providers = internalconfig.ProvidersRoutingConfig{}
+					}
+					m.SetConfig(cfg)
+					_, err := runFallbackPath(profile.ctx, m, path, []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, cliproxyexecutor.Options{})
+					assertProviderDisabledError(t, err, profile.message)
+					if len(*calls) != 0 {
+						t.Fatalf("calls = %v, want none", *calls)
+					}
+				})
+			}
+		}
 	}
 }
 

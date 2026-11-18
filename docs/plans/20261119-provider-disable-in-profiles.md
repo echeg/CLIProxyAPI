@@ -88,7 +88,7 @@
 ## Decision Log
 - 2026-11-19 brainstorm: **accepted** - config field `providers.<p>.disabled: true` with `yaml:"disabled,omitempty"`, valid for claude and codex; evidence: byte-stable saves `provider_routing.go:142-143`, kept-but-ignored pattern `:167-170`.
 - 2026-11-19 brainstorm: **accepted** - gate at the start of `executeWithProviderFallback`, before the fallback decision; evidence: `provider_fallback.go:215-254` (every public entry), `conductor_selection.go:121` (the selection filter is skipped for pinned and required-kind requests).
-- 2026-11-19 brainstorm: **accepted** - refusal is `NewRequestScopedError(msg, 403)` with a message naming the provider and whether the shared or the key profile disabled it, never the key or its hash; evidence: `errors.go:167`.
+- 2026-11-19 brainstorm: **accepted** - refusal is `NewRequestScopedError(msg, 403)` with a message naming the provider and whether the shared or the key profile disabled it, never the key or its hash; evidence: `errors.go:167`. Superseded in part by the grill entry below: implemented as the `providerDisabledError` type so the message has no `request_scoped: ` prefix.
 - 2026-11-19 brainstorm: **accepted** - a request whose model is served by both providers drops the disabled one silently and runs on the other.
 - 2026-11-19 brainstorm: **accepted** - `providerFallbackFor` builds no Claude -> Codex fallback when Codex is disabled; normalization logs a warning for that combination instead of failing; evidence: `provider_fallback.go:186` (the leg bypasses the wrapper), `provider_routing.go:167-170`.
 - 2026-11-19 brainstorm: **accepted** - the other fields of a disabled provider are still validated; both providers disabled is allowed.

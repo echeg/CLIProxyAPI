@@ -55,6 +55,56 @@ func TestHandleHangupForwardsPinnedOAuthCall(t *testing.T) {
 	}
 }
 
+// A disable applies to new calls only, so the hangup of a call opened before
+// Codex was disabled still reaches upstream and ends the session.
+func TestHandleHangupForwardsOpenCallAfterCodexDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const ownerKey = "owner-key"
+	manager := auth.NewManager(nil, nil, nil)
+	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{ownerKey}}}
+	cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{
+		ownerKey: {Providers: config.ProvidersRoutingConfig{Codex: config.ProviderRoutingConfig{Disabled: true}}},
+	}
+	manager.SetConfig(cfg)
+	executor := &captureExecutor{
+		statusCode:   http.StatusOK,
+		responseBody: io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
+	}
+	manager.RegisterExecutor(executor)
+	registerCredential(t, manager, &auth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	})
+	handler := NewHandler(manager, nil)
+	handler.sessions.put("call-123", liveSession{
+		authID:         "codex-oauth",
+		model:          defaultLiveModel,
+		ownerPrincipal: ownerKey,
+		ownerProvider:  "static",
+	})
+
+	router := gin.New()
+	router.POST("/v1/realtime/calls/:call_id/hangup", func(c *gin.Context) {
+		c.Set("userApiKey", ownerKey)
+		c.Set("accessProvider", "static")
+		c.Next()
+	}, handler.HandleHangup)
+	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls/call-123/hangup", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if executor.request == nil || executor.request.URL.String() != "https://api.openai.com/v1/realtime/calls/call-123/hangup" {
+		t.Fatalf("upstream request = %#v", executor.request)
+	}
+	if _, ok := handler.sessions.peek("call-123"); ok {
+		t.Fatal("successful hangup retained session")
+	}
+}
+
 func TestHandleHangupForwardsUnauthorizedHomeResponseWithoutRefresh(t *testing.T) {
 	const upstreamError = `{"error":{"message":"access token expired"}}`
 	gin.SetMode(gin.TestMode)

@@ -85,6 +85,13 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 			},
 		}
 		selection, selectedAuth, errSelect := h.selectOAuth(ctx, session.model, selectionOpts)
+		if auth.IsProviderDisabledError(errSelect) {
+			// A disable applies to new calls only: the hangup of an open call still
+			// reaches its own credential, so the upstream call ends.
+			if pinned, ok := h.authManager.GetByID(session.authID); ok && !pinned.Disabled {
+				selectedAuth, errSelect = pinned, nil
+			}
+		}
 		if errSelect != nil {
 			writeSelectionError(c, errSelect)
 			return
