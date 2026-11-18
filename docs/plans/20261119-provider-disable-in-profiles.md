@@ -149,11 +149,11 @@
 - [x] run `go test ./sdk/cliproxy/auth/... ./sdk/api/...` and `go test -race ./sdk/cliproxy/auth/...` - must pass before task 5
 
 ### Task 5: Lock the management API behavior for `disabled`
-- [ ] no view change is needed: `disabled` reaches `GET /v8/management/routing/profiles` through `effectiveProvidersView` (`internal/api/handlers/management/routing_profiles.go:38-46`); the GET tests below cover it
-- [ ] create `internal/api/handlers/management/routing_provider_disabled_test.go`, modeled on `routing_codex_speed_test.go`: GET shows `disabled: false` by default in both provider blocks of the shared profile and of a key profile, and `true` after a write; `PATCH /v8/management/config` with `routing.key-profiles.<key>.providers.claude.disabled: true` succeeds and reads back; PATCH with `disabled: false` re-enables (the file keeps `disabled: false`); `DELETE /v8/management/config/routing/providers/claude/disabled` and the key-profile path remove the key; sibling provider settings survive each write
-- [ ] write a test that a PATCH disabling Codex while a Claude -> Codex fallback is configured succeeds (no 422)
-- [ ] extend `TestConfigV8RoutingProfileGetBodyPatchesBack` (`routing_codex_speed_test.go:171`) so the `providers` block taken from the GET view, with `disabled` set, is PATCHed back under `routing.providers` and under `routing.key-profiles.<key>.providers`, and the effective settings and unrelated profiles stay unchanged
-- [ ] run `go test ./internal/api/...` - must pass before task 6
+- [x] no view change is needed: `disabled` reaches `GET /v8/management/routing/profiles` through `effectiveProvidersView` (`internal/api/handlers/management/routing_profiles.go:38-46`); the GET tests below cover it
+- [x] create `internal/api/handlers/management/routing_provider_disabled_test.go`, modeled on `routing_codex_speed_test.go`: GET shows `disabled: false` by default in both provider blocks of the shared profile and of a key profile, and `true` after a write; `PATCH /v8/management/config` with `routing.key-profiles.<key>.providers.claude.disabled: true` succeeds and reads back; PATCH with `disabled: false` re-enables (the file keeps `disabled: false`); `DELETE /v8/management/config/routing/providers/claude/disabled` and the key-profile path remove the key; sibling provider settings survive each write
+- [x] write a test that a PATCH disabling Codex while a Claude -> Codex fallback is configured succeeds (no 422)
+- [x] extend `TestConfigV8RoutingProfileGetBodyPatchesBack` (`routing_codex_speed_test.go:171`, now with whole-body, shared-providers and key-providers subtests and a second unrelated key profile) so the `providers` block taken from the GET view, with `disabled` set, is PATCHed back under `routing.providers` and under `routing.key-profiles.<key>.providers`, and the effective settings and unrelated profiles stay unchanged
+- [x] run `go test ./internal/api/...` - must pass before task 6
 
 ### Task 6: Verify acceptance criteria
 - [ ] confirm each Success Criterion maps to a test from Tasks 1-5; add any missing one

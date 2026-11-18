@@ -168,44 +168,84 @@ func TestConfigV8CodexSpeedPatchKeepsProfile(t *testing.T) {
 	}
 }
 
+// routingRoundTripOtherKey has a profile that no providers-block write targets.
+const routingRoundTripOtherKey = "client-key-b-secret"
+
 func TestConfigV8RoutingProfileGetBodyPatchesBack(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	raw := "config-version: 8\naccess:\n  api-keys: [\"" + providersWriteKey + "\"]\nrouting:\n" +
+	raw := "config-version: 8\naccess:\n  api-keys: [\"" + providersWriteKey + "\", \"" + routingRoundTripOtherKey + "\"]\nrouting:\n" +
 		"  session-affinity: true\n" +
 		"  selection: {primary: priority, tiebreak: round-robin}\n" +
-		"  providers: {claude: {api-credential: claude-idx, fallback: {target: api}}, codex: {speed: ultrafast, ignore-client-tier: true}}\n" +
+		"  providers: {claude: {api-credential: claude-idx, fallback: {target: api}, disabled: true}, codex: {speed: ultrafast, ignore-client-tier: true}}\n" +
 		"  key-profiles:\n" +
 		"    \"" + providersWriteKey + "\":\n" +
 		"      preferred-accounts: {codex: codex-9}\n" +
-		"      providers: {claude: {fallback: {target: codex, mode: always, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}}, codex: {speed: fast}}\n"
-	h, _ := newRoutingProfilesTestHandler(t, raw)
+		"      providers: {claude: {fallback: {target: codex, mode: always, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}}, codex: {speed: fast, disabled: true}}\n" +
+		"    \"" + routingRoundTripOtherKey + "\":\n" +
+		"      providers: {claude: {disabled: true}, codex: {mode: api, api-credential: codex-idx}}\n"
 
-	before, rec := getRoutingProfiles(t, h)
-	var body struct {
+	type getBody struct {
 		Shared map[string]any `json:"shared"`
 		Keys   []struct {
 			Key     string         `json:"key"`
 			Profile map[string]any `json:"profile"`
 		} `json:"keys"`
 	}
-	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
-		t.Fatal(errDecode)
+	// roundTrip GETs the profiles, PATCHes back the routing section built from
+	// the raw GET body, and requires the effective profiles to stay unchanged.
+	roundTrip := func(t *testing.T, build func(body getBody) map[string]any) {
+		t.Helper()
+		h, _ := newRoutingProfilesTestHandler(t, raw)
+		before, rec := getRoutingProfiles(t, h)
+		if !before.Shared.Providers.Claude.Disabled || len(before.Keys) != 2 || !codexSpeedProfile(t, before, "key").Providers.Codex.Disabled {
+			t.Fatalf("fixture not loaded as expected: %+v", before)
+		}
+		var body getBody
+		if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+			t.Fatal(errDecode)
+		}
+		patch, errMarshal := json.Marshal(map[string]any{"routing": build(body)})
+		if errMarshal != nil {
+			t.Fatal(errMarshal)
+		}
+		if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", string(patch)); rec.Code != http.StatusOK {
+			t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+		}
+		after, _ := getRoutingProfiles(t, h)
+		if !reflect.DeepEqual(after.Shared, before.Shared) || !reflect.DeepEqual(after.Keys, before.Keys) {
+			t.Fatalf("round trip changed the profiles:\nbefore %+v\nafter  %+v", before, after)
+		}
 	}
-	routing := body.Shared
-	keyProfiles := map[string]any{}
-	for _, key := range body.Keys {
-		keyProfiles[key.Key] = key.Profile
-	}
-	routing["key-profiles"] = keyProfiles
-	patch, errMarshal := json.Marshal(map[string]any{"routing": routing})
-	if errMarshal != nil {
-		t.Fatal(errMarshal)
-	}
-	if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", string(patch)); rec.Code != http.StatusOK {
-		t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
-	}
-	after, _ := getRoutingProfiles(t, h)
-	if !reflect.DeepEqual(after.Shared, before.Shared) || !reflect.DeepEqual(after.Keys, before.Keys) {
-		t.Fatalf("round trip changed the profiles:\nbefore %+v\nafter  %+v", before, after)
-	}
+
+	t.Run("whole body", func(t *testing.T) {
+		roundTrip(t, func(body getBody) map[string]any {
+			routing := body.Shared
+			keyProfiles := map[string]any{}
+			for _, key := range body.Keys {
+				keyProfiles[key.Key] = key.Profile
+			}
+			routing["key-profiles"] = keyProfiles
+			return routing
+		})
+	})
+
+	t.Run("shared providers block", func(t *testing.T) {
+		roundTrip(t, func(body getBody) map[string]any {
+			return map[string]any{"providers": body.Shared["providers"]}
+		})
+	})
+
+	t.Run("key providers block", func(t *testing.T) {
+		roundTrip(t, func(body getBody) map[string]any {
+			for _, key := range body.Keys {
+				if key.Key == providersWriteKey {
+					return map[string]any{"key-profiles": map[string]any{
+						providersWriteKey: map[string]any{"providers": key.Profile["providers"]},
+					}}
+				}
+			}
+			t.Fatalf("key profile missing: %+v", body.Keys)
+			return nil
+		})
+	})
 }
