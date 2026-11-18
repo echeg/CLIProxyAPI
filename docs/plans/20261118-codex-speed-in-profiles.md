@@ -177,12 +177,13 @@
 - [x] run `go test ./internal/config/... ./internal/api/handlers/management/...` (includes `TestV8ExampleLoadsAndRoundTrips`), gofmt, compile check - must pass before task 6
 
 ### Task 6: Lock the management API behavior for the new fields
-- [ ] write a GET test for `/v8/management/routing/profiles` with `newRoutingProfilesTestHandler`: Codex shows `speed: standard` and `ignore-client-tier: false` by default, explicit values appear for the shared profile and a key profile, and the Claude block shows an empty speed
-- [ ] write a PATCH test: setting only `providers.codex.speed` (and, separately, only `ignore-client-tier`) on the shared profile and on an existing key profile changes the GET view and the saved file while `session-affinity`, `preferred-accounts`, `selection` and the rest of `providers` stay intact; clearing the field with `null` removes it from the file and returns the view to `standard`
-- [ ] write a round-trip test: the profile body returned by GET is sent back as a PATCH and returns 200
-- [ ] add three cases to `TestConfigV8InvalidProvidersWriteRejected` (`routing_providers_write_test.go:322`): an unknown speed value, `speed` under `providers.claude`, `ignore-client-tier: true` under `providers.claude`
-- [ ] fix the management code only where one of these tests fails
-- [ ] run `go test ./internal/api/handlers/management/... ./internal/config/...`, gofmt, compile check - must pass before task 7
+- [x] write a GET test for `/v8/management/routing/profiles` with `newRoutingProfilesTestHandler`: Codex shows `speed: standard` and `ignore-client-tier: false` by default, explicit values appear for the shared profile and a key profile, and the Claude block shows an empty speed
+- [x] write a PATCH test: setting only `providers.codex.speed` (and, separately, only `ignore-client-tier`) on the shared profile and on an existing key profile changes the GET view and the saved file while `session-affinity`, `preferred-accounts`, `selection` and the rest of `providers` stay intact; clearing the field with `null` removes it from the file and returns the view to `standard`
+  - ⚠️ the v8 PATCH keeps an explicit `null` by design (`mergeConfigV8Patch`, `config_v8.go:385`: "DELETE is the explicit field-removal operation"), so a `null` PATCH stores `speed: null`, which loads as empty and returns the view to `standard`; the test locks that and checks that DELETE of the field path removes it from the file. No management change was made.
+- [x] write a round-trip test: the profile body returned by GET is sent back as a PATCH and returns 200
+- [x] add three cases to `TestConfigV8InvalidProvidersWriteRejected` (`routing_providers_write_test.go:322`): an unknown speed value, `speed` under `providers.claude`, `ignore-client-tier: true` under `providers.claude`
+- [x] fix the management code only where one of these tests fails
+- [x] run `go test ./internal/api/handlers/management/... ./internal/config/...`, gofmt, compile check - must pass before task 7
 
 ### Task 7: Verify acceptance criteria
 - [ ] for each of the six items in `## Success Criteria`, name the test that proves it in a short list under `## Technical Details`; add a test where one is missing
@@ -193,6 +194,7 @@
 ### Task 8: Update documentation
 - [ ] `docs/management-api-v8.md`: remove the `/config/oauth/providers/codex/fast-mode` row (`:43`) and add both fields to the routing profile sections and the `GET /routing/profiles` description
 - [ ] `docs/management-api-v8.md`: describe the behavior a client must know: a PATCH for a key without a profile creates a profile holding only the written fields, so a full profile must be sent when one is created; `/responses/compact` follows the same rule and `response.steer` only loses the client tier; a tier the translator drops (`auto`, `flex`) counts as absent; Home ignores key profiles; an open duplex websocket session keeps its starting profile until it reconnects
+- [ ] ➕ `docs/management-api-v8.md`: state that a PATCH with `null` for `speed` or `ignore-client-tier` stores `null` (read as the default) and that DELETE of the field path removes it from the file
 - [ ] `AGENTS.md`: add one sentence to the `sdk/cliproxy/auth` paragraph naming the accessor and the rule that the Codex executor reads the speed policy from the context profile
 - [ ] re-read the `config.example.yaml` comments written in Tasks 1 and 5 against the final behavior and correct them if they drifted; re-run `go test ./internal/config/...` when the file changes
 

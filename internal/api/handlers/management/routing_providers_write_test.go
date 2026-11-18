@@ -333,6 +333,9 @@ func TestConfigV8InvalidProvidersWriteRejected(t *testing.T) {
 		{"codex target on codex", `{"routing":{"providers":{"codex":{"mode":"subscription","fallback":{"target":"codex"}}}}}`, "routing.providers.codex.fallback.target"},
 		{"api fallback without credential", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"codex":{"fallback":{"target":"api"}}}}}}}`, "routing.key-profiles." + hash + ".providers.codex.api-credential"},
 		{"api mode with a fallback", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"claude":{"mode":"api"}}}}}}`, "routing.key-profiles." + hash + ".providers.claude.fallback.target"},
+		{"unknown codex speed", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"codex":{"speed":"turbo"}}}}}}`, "routing.key-profiles." + hash + ".providers.codex.speed"},
+		{"speed under claude", `{"routing":{"providers":{"claude":{"speed":"fast"}}}}`, "routing.providers.claude.speed"},
+		{"ignore-client-tier under claude", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"claude":{"ignore-client-tier":true}}}}}}`, "routing.key-profiles." + hash + ".providers.claude.ignore-client-tier"},
 		{"legacy enable under api mode", `{"routing":{"providers":{"claude":{"mode":"api","api-credential":"claude-idx"}},"claude-fallback":{"enabled":true,"mappings":[{"from":"claude-*","to":"gpt-6-sol"}]}}}`, "routing.providers.claude.fallback.target"},
 	}
 	for _, tc := range cases {
