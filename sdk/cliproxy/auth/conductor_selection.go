@@ -2605,6 +2605,10 @@ func (m *Manager) SelectAuthExcluding(ctx context.Context, provider, model strin
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
+	ctx, errDisabled := m.refuseDisabledSelection(ctx, provider)
+	if errDisabled != nil {
+		return nil, errDisabled
+	}
 	selected, _, errPick := m.pickNextLegacy(ctx, provider, model, opts, tried)
 	if errPick != nil {
 		return nil, unwrapExecutionBoundaryError(errPick)
@@ -2633,6 +2637,10 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 	if requiredKind == "" {
 		return nil, &Error{Code: "invalid_auth_kind", Message: "required auth kind is invalid", HTTPStatus: http.StatusBadRequest}
 	}
+	ctx, errDisabled := m.refuseDisabledSelection(ctx, provider)
+	if errDisabled != nil {
+		return nil, errDisabled
+	}
 
 	selectionCtx := withRequiredAuthKind(ctx, requiredKind)
 	selected, _, errPick := m.pickNextLegacy(selectionCtx, provider, model, opts, nil)
@@ -2657,8 +2665,9 @@ func (m *Manager) SelectAuthWithCredentialPolicy(ctx context.Context, provider, 
 	if policy == "" {
 		return nil, &Error{Code: "invalid_credential_policy", Message: "credential policy is invalid", HTTPStatus: http.StatusBadRequest}
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, errDisabled := m.refuseDisabledSelection(ctx, provider)
+	if errDisabled != nil {
+		return nil, errDisabled
 	}
 	selectionCtx := withCredentialPolicy(ctx, policy)
 	selected, _, errPick := m.pickNextLegacy(selectionCtx, provider, model, opts, nil)

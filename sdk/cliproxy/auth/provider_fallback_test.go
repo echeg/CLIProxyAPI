@@ -799,3 +799,92 @@ func TestDisabledProviderNotEnforcedWithoutProviderPolicy(t *testing.T) {
 		}
 	})
 }
+
+// directSelections runs every public direct-selection method for provider, as
+// Codex search (credential policy) and live/realtime (by kind) use them.
+func directSelections(m *Manager, provider string) map[string]func(context.Context) (*Auth, error) {
+	return map[string]func(context.Context) (*Auth, error){
+		"SelectAuthExcluding": func(ctx context.Context) (*Auth, error) {
+			return m.SelectAuthExcluding(ctx, provider, providerPolicyTestModel, cliproxyexecutor.Options{}, nil)
+		},
+		"SelectAuthByKind": func(ctx context.Context) (*Auth, error) {
+			return m.SelectAuthByKind(ctx, provider, providerPolicyTestModel, AuthKindOAuth, cliproxyexecutor.Options{})
+		},
+		"SelectAuthWithCredentialPolicy": func(ctx context.Context) (*Auth, error) {
+			return m.SelectAuthWithCredentialPolicy(ctx, provider, providerPolicyTestModel, CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+		},
+	}
+}
+
+func TestDisabledProviderRefusesDirectSelection(t *testing.T) {
+	const codexKeyMessage = "codex is disabled by the routing profile of this API key"
+	const codexSharedMessage = "codex is disabled by the routing profile"
+	for _, tc := range []struct {
+		name    string
+		shared  internalconfig.ProvidersRoutingConfig
+		key     internalconfig.ProvidersRoutingConfig
+		ctx     context.Context
+		message string
+		profile string
+	}{
+		{"key profile", internalconfig.ProvidersRoutingConfig{}, disabledProviders(false, true), ginContextWithKey(routingTestKeyA), codexKeyMessage, internalconfig.KeyHashPrefix(routingTestKeyA)},
+		{"shared profile", disabledProviders(false, true), internalconfig.ProvidersRoutingConfig{}, ginContextWithKey(routingTestKeyB), codexSharedMessage, "shared"},
+		{"shared profile without a key", disabledProviders(false, true), internalconfig.ProvidersRoutingConfig{}, context.Background(), codexSharedMessage, "shared"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := tc.key
+			m, _ := providerPolicyTestManager(t, disabledProviderConfig(tc.shared, &key), disabledClaudeOAuth, disabledCodexOAuth)
+			for name, selectAuth := range directSelections(m, "codex") {
+				hook := newStandardLogHook(t)
+				selected, err := selectAuth(tc.ctx)
+				if selected != nil {
+					t.Fatalf("%s selected %s, want a refusal", name, selected.ID)
+				}
+				assertProviderDisabledError(t, err, tc.message)
+				entries := disabledRefusalEntries(hook)
+				if len(entries) != 1 || entries[0].Data["provider"] != "codex" || entries[0].Data["profile"] != tc.profile {
+					t.Fatalf("%s refusal log entries = %d %v, want one with profile=%s", name, len(entries), hook.AllEntries(), tc.profile)
+				}
+			}
+			assertNoAuthFailures(t, m)
+		})
+	}
+}
+
+func TestDirectSelectionWithCodexEnabled(t *testing.T) {
+	// Claude disabled does not affect a Codex selection; a key profile that keeps
+	// Codex enabled replaces a shared Codex disable.
+	for _, tc := range []struct {
+		name   string
+		shared internalconfig.ProvidersRoutingConfig
+		key    internalconfig.ProvidersRoutingConfig
+	}{
+		{"claude disabled", internalconfig.ProvidersRoutingConfig{}, disabledProviders(true, false)},
+		{"key profile replaces shared disable", disabledProviders(false, true), internalconfig.ProvidersRoutingConfig{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := tc.key
+			m, _ := providerPolicyTestManager(t, disabledProviderConfig(tc.shared, &key), disabledClaudeOAuth, disabledCodexOAuth)
+			for name, selectAuth := range directSelections(m, "codex") {
+				selected, err := selectAuth(ginContextWithKey(routingTestKeyA))
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				if selected == nil || selected.ID != disabledCodexOAuth.id {
+					t.Fatalf("%s selected %v, want %s", name, selected, disabledCodexOAuth.id)
+				}
+			}
+		})
+	}
+
+	t.Run("plugin scheduler", func(t *testing.T) {
+		key := disabledProviders(true, true)
+		m, _ := providerPolicyTestManager(t, disabledProviderConfig(disabledProviders(true, true), &key), disabledClaudeOAuth, disabledCodexOAuth)
+		m.SetPluginScheduler(&fakePluginScheduler{})
+		_, err := m.SelectAuthByKind(ginContextWithKey(routingTestKeyA), "codex", providerPolicyTestModel, AuthKindOAuth, cliproxyexecutor.Options{})
+		var disabledErr *providerDisabledError
+		if errors.As(err, &disabledErr) {
+			t.Fatalf("plugin scheduler refused the selection: %v", err)
+		}
+	})
+}

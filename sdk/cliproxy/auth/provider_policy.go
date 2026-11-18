@@ -46,6 +46,20 @@ func refuseDisabledProvider(ctx context.Context, profile *routingProfile, provid
 	return &providerDisabledError{provider: provider, message: message}
 }
 
+// refuseDisabledSelection resolves the routing profile of a direct auth selection
+// (Codex search, live and realtime pick an auth without executeWithProviderFallback)
+// and refuses it when that profile disables provider. The returned context carries
+// the resolved profile. Home and plugin schedulers never refuse because
+// providerMode reports no policy there.
+func (m *Manager) refuseDisabledSelection(ctx context.Context, provider string) (context.Context, error) {
+	ctx = m.ensureRoutingProfile(ctx)
+	profile := routingProfileFromContext(ctx)
+	if policy, ok := profile.providerMode(provider); ok && policy.Disabled {
+		return ctx, refuseDisabledProvider(ctx, profile, provider)
+	}
+	return ctx, nil
+}
+
 // providerPolicyAllows applies the per-provider mode of the routing profile:
 // subscription mode keeps API-key credentials out of the pool, api mode allows
 // only the API-key credential named by api-credential. Providers without a

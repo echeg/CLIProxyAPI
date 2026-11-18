@@ -134,10 +134,10 @@
 - [x] run `go test ./sdk/cliproxy/auth/... ./sdk/api/...` - must pass before task 3
 
 ### Task 3: Refuse direct auth selection for a disabled provider
-- [ ] in `SelectAuthExcluding`, `SelectAuthByKind` and `SelectAuthWithCredentialPolicy` (`sdk/cliproxy/auth/conductor_selection.go:2604`, `:2628`, `:2652`), resolve the profile with `ensureRoutingProfile` and return the Task 2 refusal (same message and log line) before picking when the requested provider is disabled; Home and plugin schedulers are unchanged because `providerMode` reports no policy there
-- [ ] write Manager-level tests: each of the three methods refuses `codex` under a key profile and under the shared profile with the exact message, and still selects when Codex is enabled
-- [ ] write handler tests: `/v1/alpha/search` (see `internal/api/server_codex_search_siwc_test.go`) and `/v1/live` (see `internal/client/codex/live/live_test.go`) return 403 for a key whose profile disables Codex
-- [ ] run `go test ./sdk/cliproxy/auth/... ./internal/api/... ./internal/client/codex/...` - must pass before task 4
+- [x] in `SelectAuthExcluding`, `SelectAuthByKind` and `SelectAuthWithCredentialPolicy` (`sdk/cliproxy/auth/conductor_selection.go:2604`, `:2628`, `:2652`), resolve the profile with `ensureRoutingProfile` and return the Task 2 refusal (same message and log line) before picking when the requested provider is disabled; Home and plugin schedulers are unchanged because `providerMode` reports no policy there (implemented as `Manager.refuseDisabledSelection` in `provider_policy.go`)
+- [x] write Manager-level tests: each of the three methods refuses `codex` under a key profile and under the shared profile with the exact message, and still selects when Codex is enabled
+- [x] write handler tests: `/v1/alpha/search` (see `internal/api/server_codex_search_siwc_test.go`) and `/v1/live` (see `internal/client/codex/live/live_test.go`) return 403 for a key whose profile disables Codex
+- [x] run `go test ./sdk/cliproxy/auth/... ./internal/api/... ./internal/client/codex/...` - must pass before task 4
 
 ### Task 4: Keep fallbacks and pinned websocket auths away from a disabled provider
 - [ ] in `providerFallbackFor`, build no Claude -> Codex fallback when the profile disables Codex (covers `auto`, `always` and `hasProviderFallbackAfterError`)
