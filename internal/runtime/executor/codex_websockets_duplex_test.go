@@ -655,3 +655,166 @@ func TestCodexDuplexNativeAliasContinuationUsesRealModel(t *testing.T) {
 		}
 	}
 }
+
+// runCodexDuplexTierSession drives a duplex session against an upstream that
+// answers each response.create or response.steer frame and records every frame
+// it reads. With holdFirst the first response stays open until a steer
+// arrives. onEvent sends client frames and reports when the session is done.
+func runCodexDuplexTierSession(t *testing.T, cfg *config.Config, initial []byte, holdFirst bool, onEvent func(event, id string, input chan<- core.WebsocketInput) bool) [][]byte {
+	t.Helper()
+	frames := make(chan []byte, 8)
+	serverDone := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(serverDone)
+		conn, errUpgrade := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// This deadline bounds test failures only.
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		created := 0
+		for {
+			_, frame, errRead := conn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			frames <- frame
+			var events []string
+			switch ojson.GetBytes(frame, "type").String() {
+			case "response.create":
+				created++
+				id := fmt.Sprintf("r%d", created)
+				events = append(events,
+					`{"type":"response.created","response":{"id":"`+id+`","output":[]}}`,
+					`{"type":"response.completed","response":{"id":"`+id+`","output":[]}}`)
+				if holdFirst && created == 1 {
+					// Steering needs an open response; completion follows the steer.
+					events = events[:1]
+				}
+			case "response.steer":
+				events = append(events,
+					`{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}`,
+					`{"type":"response.completed","response":{"id":"r1","output":[]}}`)
+			}
+			for _, event := range events {
+				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
+					t.Errorf("write event: %v", errWrite)
+					return
+				}
+			}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	input := make(chan core.WebsocketInput, 4)
+	ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
+	exec := NewCodexWebsocketsExecutor(cfg)
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	auth := codexOAuthTestAuth(server.URL)
+	auth.ID = "codex-duplex-tier"
+	req := core.Request{Model: tierFixtureUltrafastModel, Payload: initial}
+	opts := core.Options{SourceFormat: sdktranslator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: "duplex-tier"}}
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for done := false; !done; {
+		select {
+		case chunk, ok := <-result.Chunks:
+			if !ok {
+				t.Fatal("stream ended before the session finished")
+			}
+			if chunk.Err != nil {
+				t.Fatal(chunk.Err)
+			}
+			done = onEvent(ojson.GetBytes(chunk.Payload, "type").String(), ojson.GetBytes(chunk.Payload, "response.id").String(), input)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	cancel()
+	for range result.Chunks {
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream did not close")
+	}
+	close(frames)
+	var got [][]byte
+	for frame := range frames {
+		got = append(got, frame)
+	}
+	return got
+}
+
+func codexDuplexTierConfig(ignoreClientTier bool) *config.Config {
+	cfg := codexSpeedTestConfig(config.CodexSpeedStandard, ignoreClientTier)
+	cfg.Codex.ResponseSteering = true
+	return cfg
+}
+
+// With ignore-client-tier and speed standard, the client tier is removed from
+// the first turn and from the follow-up turn of a duplex session.
+func TestCodexDuplexIgnoreClientTierOnCreateTurns(t *testing.T) {
+	useCodexServiceTierFixture(t)
+	initial := []byte(`{"model":"gpt-fixture-ultrafast","service_tier":"priority","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 1"}]}]}`)
+	frames := runCodexDuplexTierSession(t, codexDuplexTierConfig(true), initial, false, func(event, id string, input chan<- core.WebsocketInput) bool {
+		if event != "response.completed" {
+			return false
+		}
+		if id == "r1" {
+			input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","model":"gpt-fixture-ultrafast","previous_response_id":"r1","service_tier":"priority","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 2"}]}]}`)}
+			return false
+		}
+		return id == "r2"
+	})
+	if len(frames) != 2 {
+		t.Fatalf("upstream frames = %d, want 2: %q", len(frames), frames)
+	}
+	for i, frame := range frames {
+		if got := ojson.GetBytes(frame, "type").String(); got != "response.create" {
+			t.Fatalf("frame %d type = %q, want response.create: %s", i, got, frame)
+		}
+		if tier := ojson.GetBytes(frame, "service_tier"); tier.Exists() {
+			t.Fatalf("frame %d service_tier = %s, want none: %s", i, tier.Raw, frame)
+		}
+	}
+}
+
+// response.steer frames lose the client tier only under ignore-client-tier and
+// never get a tier from the profile speed.
+func TestCodexDuplexSteerClientTier(t *testing.T) {
+	useCodexServiceTierFixture(t)
+	for _, tc := range []struct {
+		name             string
+		ignoreClientTier bool
+		wantTier         string
+	}{
+		{name: "ignored", ignoreClientTier: true},
+		{name: "respected", ignoreClientTier: false, wantTier: "ultrafast"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initial := []byte(`{"model":"gpt-fixture-ultrafast","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+			frames := runCodexDuplexTierSession(t, codexDuplexTierConfig(tc.ignoreClientTier), initial, true, func(event, id string, input chan<- core.WebsocketInput) bool {
+				if event == "response.created" && id == "r1" {
+					input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","previous_response_id":"r1","service_tier":"ultrafast","input":[{"role":"user","content":[{"type":"input_text","text":"STEER_OK"}]}]}`)}
+				}
+				return event == "response.completed" && id == "r1"
+			})
+			if len(frames) != 2 || ojson.GetBytes(frames[1], "type").String() != "response.steer" {
+				t.Fatalf("upstream frames = %q, want create then steer", frames)
+			}
+			if tier := ojson.GetBytes(frames[0], "service_tier"); tier.Exists() {
+				t.Fatalf("create service_tier = %s, want none for speed standard", tier.Raw)
+			}
+			if got := ojson.GetBytes(frames[1], "service_tier").String(); got != tc.wantTier {
+				t.Fatalf("steer service_tier = %q, want %q: %s", got, tc.wantTier, frames[1])
+			}
+		})
+	}
+}

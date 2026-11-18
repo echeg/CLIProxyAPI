@@ -163,10 +163,10 @@
 - [x] run `go test ./internal/runtime/executor/... ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 4
 
 ### Task 4: Apply the client-tier removal to duplex steering and lock the duplex path
-- [ ] in `codex_websockets_duplex.go` (`:735-741`) delete `service_tier` from the `response.steer` document before `FinalizePayloadDoc` when the auth is not an API key and the profile's `ignore-client-tier` is true; do not inject a speed tier into steer frames
-- [ ] write a duplex test in `codex_websockets_duplex_test.go`: with `ignore-client-tier` true and speed `standard`, a client turn carrying `service_tier: priority` and its follow-up turn reach the upstream socket without a tier (assert on the captured frames)
-- [ ] write a duplex test for steering: a `response.steer` frame carrying `service_tier` reaches upstream without it when the flag is true and unchanged when the flag is false
-- [ ] run `go test ./internal/runtime/executor/...`, gofmt, compile check - must pass before task 5
+- [x] in `codex_websockets_duplex.go` (`:735-741`) delete `service_tier` from the `response.steer` document before `FinalizePayloadDoc` when the auth is not an API key and the profile's `ignore-client-tier` is true; do not inject a speed tier into steer frames
+- [x] write a duplex test in `codex_websockets_duplex_test.go`: with `ignore-client-tier` true and speed `standard`, a client turn carrying `service_tier: priority` and its follow-up turn reach the upstream socket without a tier (assert on the captured frames)
+- [x] write a duplex test for steering: a `response.steer` frame carrying `service_tier` reaches upstream without it when the flag is true and unchanged when the flag is false
+- [x] run `go test ./internal/runtime/executor/...`, gofmt, compile check - must pass before task 5
 
 ### Task 5: Remove `codex.fast-mode`
 - [ ] delete the `FastMode` field (`internal/config/config_types.go:362-364`) and the `fast-mode` block in `config.example.yaml` (`:1343-1345`); `grep -rn -iE 'FastMode|fast-mode'` over Go sources must then match only Claude and Devin code

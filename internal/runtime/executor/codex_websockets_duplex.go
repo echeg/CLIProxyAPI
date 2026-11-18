@@ -736,6 +736,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					if codexUseSIWCForRequest(ctx, auth, steerHeaders) {
 						thinking.StripConfigurationUpdatesDoc(steerDoc)
 					}
+					removeCodexClientServiceTierDoc(streamCtx, e.cfg, auth, steerDoc)
 					steerCtx := helps.WithPayloadFinalizer(streamCtx, helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", steerReq.Payload, steerReq, steerOpts))
 					helps.FinalizePayloadDoc(steerCtx, steerDoc)
 					_ = steerDoc.Set("type", "response.steer")
@@ -761,8 +762,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					}
 					metadataMu.Unlock()
 					// Control frames bypass response.create translations and built-in defaults.
-					// Except for SIWC configuration_update stripping, unknown fields and unsupported
-					// input are left to upstream validation.
+					// Except for SIWC configuration_update stripping and the profile's client-tier
+					// removal, unknown fields and unsupported input are left to upstream validation.
 					if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
 						fail(fmt.Errorf("websocket credential is no longer enabled"))
 						return

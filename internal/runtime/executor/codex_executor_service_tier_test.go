@@ -416,3 +416,33 @@ func TestCodexProfileSpeedThroughManager(t *testing.T) {
 	assertCapturedServiceTier(t, execute(keyUltrafast, ""), "ultrafast")
 	assertCapturedServiceTier(t, execute(keyStandard, ""), "")
 }
+
+// Control frames only lose the client tier; they never get the profile speed,
+// and API-key auths keep the tier.
+func TestRemoveCodexClientServiceTierDoc(t *testing.T) {
+	useCodexServiceTierFixture(t)
+	for _, tc := range []struct {
+		name             string
+		ignoreClientTier bool
+		apiKey           bool
+		body             string
+		wantTier         string
+	}{
+		{name: "ignored", ignoreClientTier: true, body: `{"service_tier":"priority"}`},
+		{name: "respected", body: `{"service_tier":"priority"}`, wantTier: "priority"},
+		{name: "api key untouched", ignoreClientTier: true, apiKey: true, body: `{"service_tier":"priority"}`, wantTier: "priority"},
+		{name: "no speed injection", ignoreClientTier: true, body: `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := codexOAuthTestAuth("http://unused")
+			if tc.apiKey {
+				auth = codexAPIKeyTestAuth("http://unused")
+			}
+			doc := ojson.NewDoc([]byte(tc.body))
+			removeCodexClientServiceTierDoc(context.Background(), codexSpeedTestConfig(config.CodexSpeedUltrafast, tc.ignoreClientTier), auth, doc)
+			if got := doc.Get("service_tier").String(); got != tc.wantTier {
+				t.Fatalf("service_tier = %q, want %q: %s", got, tc.wantTier, doc.Bytes())
+			}
+		})
+	}
+}

@@ -641,6 +641,18 @@ func applyCodexServiceTierDoc(ctx context.Context, cfg *config.Config, auth *cli
 	}
 }
 
+// removeCodexClientServiceTierDoc removes a client service_tier from a
+// subscription control frame (response.steer) when the routing profile ignores
+// client tiers. Control frames never get a tier from the profile speed.
+func removeCodexClientServiceTierDoc(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, doc *ojson.Doc) {
+	if doc == nil || codexAuthUsesAPIKey(auth) {
+		return
+	}
+	if _, ignoreClientTier := codexSpeedSettings(ctx, cfg); ignoreClientTier {
+		_ = doc.Delete("service_tier")
+	}
+}
+
 const codexRoutingHintHeader = "X-Codex-Routing-Hint"
 
 // applyCodexRoutingHint sends the routing hint native Codex attaches to every
