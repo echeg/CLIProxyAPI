@@ -31,7 +31,7 @@ Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectorie
 
 ## Codex Service Tier
 
-`codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.5`.
+`codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.5`. The tier counts as the client tier for the routing profile's Codex speed, so a profile with `ignore-client-tier: true` removes it.
 
 ```yaml
 plugins:

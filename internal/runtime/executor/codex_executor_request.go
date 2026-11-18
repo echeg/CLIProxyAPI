@@ -623,15 +623,16 @@ func codexServiceTierForSpeed(speed, baseModel string) string {
 // applyCodexServiceTierDoc applies the routing profile's Codex speed policy to a
 // subscription request. A tier sent by the client is kept unless the profile
 // ignores client tiers, in which case it is removed. A request without a tier
-// then gets the tier of the profile speed. Codex API-key auths are never
-// changed, and payload rules applied afterwards keep precedence.
+// then gets the tier of the profile speed; a null or blank service_tier counts
+// as no tier. Codex API-key auths are never changed, and payload rules applied
+// afterwards keep precedence.
 func applyCodexServiceTierDoc(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, baseModel string, doc *ojson.Doc) {
 	if doc == nil || codexAuthUsesAPIKey(auth) {
 		return
 	}
 	speed, ignoreClientTier := codexSpeedSettings(ctx, cfg)
-	if doc.Get("service_tier").Exists() {
-		if !ignoreClientTier {
+	if clientTier := doc.Get("service_tier"); clientTier.Exists() {
+		if !ignoreClientTier && clientTier.Type == ojson.String && strings.TrimSpace(clientTier.String()) != "" {
 			return
 		}
 		_ = doc.Delete("service_tier")

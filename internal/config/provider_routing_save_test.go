@@ -275,4 +275,48 @@ routing:
 			t.Fatalf("key codex changed: %+v", got)
 		}
 	})
+
+	t.Run("hand-written defaults survive an unrelated save", func(t *testing.T) {
+		const withDefaults = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    codex:
+      speed: ""
+      # kept on purpose
+      ignore-client-tier: false
+`
+		path, cfg := writeLoad(t, withDefaults)
+		saved := saveRead(t, path, cfg)
+		for _, node := range []string{"routing.providers.codex.speed", "routing.providers.codex.ignore-client-tier"} {
+			if routingNode(t, saved, node) == nil {
+				t.Fatalf("save dropped the default %s:\n%s", node, saved)
+			}
+		}
+		if !strings.Contains(saved, "# kept on purpose") {
+			t.Fatalf("save dropped the comment:\n%s", saved)
+		}
+	})
+
+	t.Run("clearing a block that holds only the fields removes the emptied mappings", func(t *testing.T) {
+		const onlySpeed = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    codex:
+      speed: fast
+`
+		path, cfg := writeLoad(t, onlySpeed)
+		cfg.Routing.Providers.Codex.Speed = ""
+		saved := saveRead(t, path, cfg)
+		if node := routingNode(t, saved, "routing.providers"); node != nil {
+			t.Fatalf("cleared block left routing.providers behind:\n%s", saved)
+		}
+		_, loaded := writeLoad(t, saved)
+		if got := loaded.Routing.SharedProfile().EffectiveProviders().Codex; got.Speed != CodexSpeedStandard || got.IgnoreClientTier {
+			t.Fatalf("shared effective codex = %+v", got)
+		}
+	})
 }

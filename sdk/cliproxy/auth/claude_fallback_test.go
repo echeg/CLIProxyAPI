@@ -546,3 +546,41 @@ func TestClaudeFallbackHonorsRequestScopedStop(t *testing.T) {
 		}
 	}
 }
+
+// codexSpeedProbeExecutor records the Codex speed settings the Codex executor
+// would read from the request context.
+type codexSpeedProbeExecutor struct {
+	claudeFallbackExecutor
+	speed  string
+	ignore bool
+	ok     bool
+}
+
+func (e *codexSpeedProbeExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.speed, e.ignore, e.ok = CodexSpeedFromContext(ctx)
+	return cliproxyexecutor.Response{}, nil
+}
+
+// The Claude -> Codex fallback leg keeps the key's routing profile, so the Codex
+// executor reads that profile's speed settings, not the shared ones.
+func TestClaudeFallbackLegCarriesCodexSpeed(t *testing.T) {
+	m, _, _, _ := fallbackTestManager(t, "off", nil)
+	probe := &codexSpeedProbeExecutor{claudeFallbackExecutor: claudeFallbackExecutor{provider: "codex"}}
+	m.RegisterExecutor(probe)
+
+	const key = "sk-fallback-speed"
+	profile := &internalconfig.RoutingProfile{}
+	profile.Providers.Claude.Fallback = internalconfig.ProviderFallbackConfig{Target: internalconfig.ProviderFallbackCodex, Mode: "always", Mappings: []internalconfig.ClaudeFallbackMapping{{From: "claude-opus-*", To: "gpt-6-astra"}}}
+	profile.Providers.Codex = internalconfig.ProviderRoutingConfig{Speed: internalconfig.CodexSpeedUltrafast, IgnoreClientTier: true}
+	cfg := &internalconfig.Config{SDKConfig: internalconfig.SDKConfig{APIKeys: []string{key}}}
+	cfg.Routing.Providers.Codex.Speed = internalconfig.CodexSpeedFast
+	cfg.Routing.KeyProfiles = map[string]*internalconfig.RoutingProfile{key: profile}
+	m.SetConfig(cfg)
+
+	if _, err := m.Execute(ginContextWithKey(key), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if !probe.ok || probe.speed != internalconfig.CodexSpeedUltrafast || !probe.ignore {
+		t.Fatalf("fallback leg speed=%q ignore=%t ok=%t, want the key profile's ultrafast with ignore", probe.speed, probe.ignore, probe.ok)
+	}
+}

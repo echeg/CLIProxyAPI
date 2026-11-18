@@ -384,7 +384,14 @@ and then:
 - The tier is resolved after protocol translation. The OpenAI Responses
   translator maps `fast` to `priority` and drops tiers it does not know, such as
   `auto` and `flex`. A dropped tier counts as absent, so the profile speed applies
-  to it even with `ignore-client-tier: false`.
+  to it even with `ignore-client-tier: false`. A `null` or empty `service_tier`
+  counts as absent too.
+- `/responses/compact` is not translated, so its client tier is used as sent: an
+  `auto` there is a client tier and is kept unless `ignore-client-tier` is `true`.
+- Plugin request normalizers run during translation, so a tier a plugin sets
+  (for example the `codex-service-tier` example plugin) counts as the client tier:
+  `ignore-client-tier: true` removes it. To force a tier regardless of the
+  profile, use a payload rule.
 - Payload rules run afterwards and keep precedence over the profile.
 - An upstream rejection of `ultrafast` (for example, an account without the
   entitlement) is handled like any other upstream error; the proxy never lowers
@@ -397,11 +404,12 @@ and then:
   changed profile applies after the client reconnects. HTTP requests and new
   connections pick up a changed profile on hot reload without a restart.
 - Home mode ignores key profiles: every request uses the Codex settings of the
-  shared profile. Under a scheduler plugin every request uses the shared profile
-  too.
+  shared profile in the configuration Home delivers. Under a scheduler plugin
+  every request uses the shared profile too.
 - A config file that still contains `oauth.providers.codex.fast-mode` keeps
   loading. The value is ignored and not migrated, and the next management write
-  comments the key out.
+  comments the key out. A write to `/config/oauth/providers/codex/fast-mode`
+  returns 400.
 
 Write the fields through `PATCH /v8/management/config` like any other profile
 field:
@@ -468,7 +476,8 @@ A key without a profile uses the shared profile: the global
 `routing.providers` fields (or the legacy `routing.claude-fallback`). A key with a
 profile uses it completely. Nothing is inherited from the shared fields: an
 omitted block means off or empty, an omitted `providers` means `subscription`
-mode with fallback `off`, and an omitted `selection` means
+mode with fallback `off` and Codex speed `standard` with the client tier
+respected, and an omitted `selection` means
 `{primary: reserves, tiebreak: round-robin}`.
 
 ```yaml

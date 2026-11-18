@@ -20,6 +20,11 @@ English | [中文](README_CN.md) | [日本語](README_JA.md)
 > picked automatically. Per routing profile, set `routing.providers.<provider>.mode: api` with
 > `api-credential: <auth_index>`, or `fallback.target: api` to use the key only after the subscriptions fail.
 > See [Per-provider mode and API fallback](docs/management-api-v8.md#per-provider-mode-and-api-fallback).
+>
+> **Upgrading:** `oauth.providers.codex.fast-mode` was removed. A leftover key still loads but is ignored
+> and not migrated. Set `routing.providers.codex.speed: fast` (or `ultrafast`) on the shared profile or a
+> key profile instead; writes to the old path return 400. The profile speed also applies to `/responses/compact`.
+> See [Codex speed](docs/management-api-v8.md#codex-speed).
 
 If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.
 

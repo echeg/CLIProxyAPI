@@ -23,3 +23,5 @@ plugins:
 ```
 
 `fast` is a boolean field. Set it to `true` to enable priority service tier shaping for matching Codex `gpt-5.5` requests.
+
+The tier this plugin sets counts as the client tier for the routing profile's Codex speed policy: a profile with `ignore-client-tier: true` removes it, and with `false` it is kept instead of the profile speed. See [Codex speed](../../../docs/management-api-v8.md#codex-speed).

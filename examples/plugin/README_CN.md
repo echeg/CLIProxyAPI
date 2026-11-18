@@ -30,7 +30,7 @@
 
 ## Codex Service Tier
 
-`codex-service-tier` 声明请求规整能力。当 `fast` 为 `true` 时，如果 `req.ToFormat` 为 `codex` 且 `req.Model` 为 `gpt-5.5`，它会将 `service_tier` 设置为 `priority`。
+`codex-service-tier` 声明请求规整能力。当 `fast` 为 `true` 时，如果 `req.ToFormat` 为 `codex` 且 `req.Model` 为 `gpt-5.5`，它会将 `service_tier` 设置为 `priority`。该 tier 会被路由配置的 Codex speed 视为客户端 tier，因此设置了 `ignore-client-tier: true` 的配置会将其移除。
 
 ```yaml
 plugins:

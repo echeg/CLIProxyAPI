@@ -13,6 +13,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -656,11 +657,15 @@ func TestCodexDuplexNativeAliasContinuationUsesRealModel(t *testing.T) {
 	}
 }
 
+// codexDuplexTierStart opens the duplex stream of runCodexDuplexTierSession.
+type codexDuplexTierStart func(ctx context.Context, exec *CodexWebsocketsExecutor, auth *cliproxyauth.Auth, req core.Request, opts core.Options) (*core.StreamResult, error)
+
 // runCodexDuplexTierSession drives a duplex session against an upstream that
 // answers each response.create or response.steer frame and records every frame
 // it reads. With holdFirst the first response stays open until a steer
 // arrives. onEvent sends client frames and reports when the session is done.
-func runCodexDuplexTierSession(t *testing.T, cfg *config.Config, initial []byte, holdFirst bool, onEvent func(event, id string, input chan<- core.WebsocketInput) bool) [][]byte {
+// A nil start calls the executor directly.
+func runCodexDuplexTierSession(t *testing.T, cfg *config.Config, initial []byte, holdFirst bool, start codexDuplexTierStart, onEvent func(event, id string, input chan<- core.WebsocketInput) bool) [][]byte {
 	t.Helper()
 	frames := make(chan []byte, 8)
 	serverDone := make(chan struct{})
@@ -718,7 +723,12 @@ func runCodexDuplexTierSession(t *testing.T, cfg *config.Config, initial []byte,
 	auth.ID = "codex-duplex-tier"
 	req := core.Request{Model: tierFixtureUltraModel, Payload: initial}
 	opts := core.Options{SourceFormat: sdktranslator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: "duplex-tier"}}
-	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if start == nil {
+		start = func(ctx context.Context, exec *CodexWebsocketsExecutor, auth *cliproxyauth.Auth, req core.Request, opts core.Options) (*core.StreamResult, error) {
+			return exec.ExecuteStream(ctx, auth, req, opts)
+		}
+	}
+	result, err := start(ctx, exec, auth, req, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,23 +762,27 @@ func runCodexDuplexTierSession(t *testing.T, cfg *config.Config, initial []byte,
 	return got
 }
 
-func codexDuplexTierConfig(ignoreClientTier bool) *config.Config {
-	cfg := codexSpeedTestConfig(config.CodexSpeedStandard, ignoreClientTier)
+func codexDuplexTierConfig(speed string, ignoreClientTier bool) *config.Config {
+	cfg := codexSpeedTestConfig(speed, ignoreClientTier)
 	cfg.Codex.ResponseSteering = true
 	return cfg
 }
 
-// With ignore-client-tier and speed standard, the client tier is removed from
-// the first turn and from the follow-up turn of a duplex session.
-func TestCodexDuplexIgnoreClientTierOnCreateTurns(t *testing.T) {
-	useCodexServiceTierFixture(t)
-	initial := []byte(`{"model":"gpt-fixture-ultrafast","service_tier":"priority","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 1"}]}]}`)
-	frames := runCodexDuplexTierSession(t, codexDuplexTierConfig(true), initial, false, func(event, id string, input chan<- core.WebsocketInput) bool {
+// codexDuplexTierTurns runs a duplex session of two response.create turns that
+// both carry clientTier (none when empty) and returns the upstream frames.
+func codexDuplexTierTurns(t *testing.T, cfg *config.Config, clientTier string) [][]byte {
+	t.Helper()
+	tierField := ""
+	if clientTier != "" {
+		tierField = `"service_tier":"` + clientTier + `",`
+	}
+	initial := []byte(`{"model":"gpt-fixture-ultrafast",` + tierField + `"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 1"}]}]}`)
+	frames := runCodexDuplexTierSession(t, cfg, initial, false, nil, func(event, id string, input chan<- core.WebsocketInput) bool {
 		if event != "response.completed" {
 			return false
 		}
 		if id == "r1" {
-			input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","model":"gpt-fixture-ultrafast","previous_response_id":"r1","service_tier":"priority","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 2"}]}]}`)}
+			input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","model":"gpt-fixture-ultrafast","previous_response_id":"r1",` + tierField + `"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 2"}]}]}`)}
 			return false
 		}
 		return id == "r2"
@@ -780,27 +794,56 @@ func TestCodexDuplexIgnoreClientTierOnCreateTurns(t *testing.T) {
 		if got := ojson.GetBytes(frame, "type").String(); got != "response.create" {
 			t.Fatalf("frame %d type = %q, want response.create: %s", i, got, frame)
 		}
-		if tier := ojson.GetBytes(frame, "service_tier"); tier.Exists() {
-			t.Fatalf("frame %d service_tier = %s, want none: %s", i, tier.Raw, frame)
-		}
+	}
+	return frames
+}
+
+// The first turn and the follow-up turn of a duplex session follow the profile:
+// the client tier is removed under ignore-client-tier, kept without it, and a
+// turn without a tier gets the profile speed.
+func TestCodexDuplexProfileTierOnCreateTurns(t *testing.T) {
+	useCodexServiceTierFixture(t)
+	for _, tc := range []struct {
+		name             string
+		speed            string
+		ignoreClientTier bool
+		clientTier       string
+		wantTier         string
+	}{
+		{name: "client tier removed under the flag", speed: config.CodexSpeedStandard, ignoreClientTier: true, clientTier: "priority"},
+		{name: "client tier kept without the flag", speed: config.CodexSpeedStandard, clientTier: "priority", wantTier: "priority"},
+		{name: "profile speed fills a missing tier", speed: config.CodexSpeedFast, wantTier: "priority"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			frames := codexDuplexTierTurns(t, codexDuplexTierConfig(tc.speed, tc.ignoreClientTier), tc.clientTier)
+			for _, frame := range frames {
+				assertCapturedServiceTier(t, ojson.GetBytes(frame, "service_tier"), tc.wantTier)
+			}
+		})
 	}
 }
 
 // response.steer frames lose the client tier only under ignore-client-tier and
-// never get a tier from the profile speed.
+// never get a tier from the profile speed. Payload rules run after the removal,
+// so a configured tier still reaches the upstream steer frame.
 func TestCodexDuplexSteerClientTier(t *testing.T) {
 	useCodexServiceTierFixture(t)
+	steerRule := []config.PayloadModelRule{{Name: "*", Match: []map[string]any{{"type": "response.steer"}}}}
 	for _, tc := range []struct {
 		name             string
 		ignoreClientTier bool
+		payload          config.PayloadConfig
 		wantTier         string
 	}{
 		{name: "ignored", ignoreClientTier: true},
 		{name: "respected", ignoreClientTier: false, wantTier: "ultrafast"},
+		{name: "payload override wins over removal", ignoreClientTier: true, payload: config.PayloadConfig{Override: []config.PayloadRule{{Models: steerRule, Params: map[string]any{"service_tier": "flex"}}}}, wantTier: "flex"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			cfg := codexDuplexTierConfig(config.CodexSpeedStandard, tc.ignoreClientTier)
+			cfg.Payload = tc.payload
 			initial := []byte(`{"model":"gpt-fixture-ultrafast","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
-			frames := runCodexDuplexTierSession(t, codexDuplexTierConfig(tc.ignoreClientTier), initial, true, func(event, id string, input chan<- core.WebsocketInput) bool {
+			frames := runCodexDuplexTierSession(t, cfg, initial, true, nil, func(event, id string, input chan<- core.WebsocketInput) bool {
 				if event == "response.created" && id == "r1" {
 					input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","previous_response_id":"r1","service_tier":"ultrafast","input":[{"role":"user","content":[{"type":"input_text","text":"STEER_OK"}]}]}`)}
 				}
@@ -817,4 +860,77 @@ func TestCodexDuplexSteerClientTier(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A duplex session started through the manager reads the key profile from its
+// context on every frame and keeps that profile when the config changes
+// mid-session. The executor config (standard, client tier respected) would keep
+// the client's ultrafast everywhere.
+func TestCodexDuplexKeyProfileThroughManager(t *testing.T) {
+	useCodexServiceTierFixture(t)
+	const clientKey = "sk-duplex-speed"
+	managerConfig := func(speed string, ignoreClientTier bool) *config.Config {
+		cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{clientKey}, DisableImageGeneration: config.DisableImageGenerationAll}}
+		profile := &config.RoutingProfile{}
+		profile.Providers.Codex.Speed = speed
+		profile.Providers.Codex.IgnoreClientTier = ignoreClientTier
+		cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{clientKey: profile}
+		return cfg
+	}
+	// throughManager runs the session for clientKey through a manager whose key
+	// profile is fast with ignore-client-tier, and stores the manager in *manager.
+	throughManager := func(t *testing.T, manager **cliproxyauth.Manager) codexDuplexTierStart {
+		return func(ctx context.Context, exec *CodexWebsocketsExecutor, auth *cliproxyauth.Auth, req core.Request, opts core.Options) (*core.StreamResult, error) {
+			m := cliproxyauth.NewManager(nil, nil, nil)
+			m.RegisterExecutor(exec)
+			m.SetConfig(managerConfig(config.CodexSpeedFast, true))
+			auth.Status = cliproxyauth.StatusActive
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				return nil, errRegister
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: tierFixtureUltraModel}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			*manager = m
+			ctx = context.WithValue(ctx, "gin", codexSpeedGinContext(clientKey).Value("gin"))
+			return m.ExecuteStream(ctx, []string{"codex"}, req, opts)
+		}
+	}
+	executorConfig := codexDuplexTierConfig(config.CodexSpeedStandard, false)
+	initial := []byte(`{"model":"gpt-fixture-ultrafast","service_tier":"ultrafast","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 1"}]}]}`)
+
+	t.Run("follow-up turn keeps the starting profile", func(t *testing.T) {
+		var manager *cliproxyauth.Manager
+		frames := runCodexDuplexTierSession(t, executorConfig, initial, false, throughManager(t, &manager), func(event, id string, input chan<- core.WebsocketInput) bool {
+			if event != "response.completed" {
+				return false
+			}
+			if id == "r1" {
+				manager.SetConfig(managerConfig(config.CodexSpeedStandard, false))
+				input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","model":"gpt-fixture-ultrafast","previous_response_id":"r1","service_tier":"ultrafast","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 2"}]}]}`)}
+				return false
+			}
+			return id == "r2"
+		})
+		if len(frames) != 2 {
+			t.Fatalf("upstream frames = %d, want 2: %q", len(frames), frames)
+		}
+		for _, frame := range frames {
+			assertCapturedServiceTier(t, ojson.GetBytes(frame, "service_tier"), "priority")
+		}
+	})
+
+	t.Run("steer frame loses the client tier", func(t *testing.T) {
+		var manager *cliproxyauth.Manager
+		frames := runCodexDuplexTierSession(t, executorConfig, initial, true, throughManager(t, &manager), func(event, id string, input chan<- core.WebsocketInput) bool {
+			if event == "response.created" && id == "r1" {
+				input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","previous_response_id":"r1","service_tier":"ultrafast","input":[{"role":"user","content":[{"type":"input_text","text":"STEER_OK"}]}]}`)}
+			}
+			return event == "response.completed" && id == "r1"
+		})
+		if len(frames) != 2 || ojson.GetBytes(frames[1], "type").String() != "response.steer" {
+			t.Fatalf("upstream frames = %q, want create then steer", frames)
+		}
+		assertCapturedServiceTier(t, ojson.GetBytes(frames[0], "service_tier"), "priority")
+		assertCapturedServiceTier(t, ojson.GetBytes(frames[1], "service_tier"), "")
+	})
 }

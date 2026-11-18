@@ -118,6 +118,28 @@ func TestApplyCodexServiceTierDocNilConfigKeepsBody(t *testing.T) {
 	}
 }
 
+// A null, blank or non-string service_tier is not a client tier: the profile
+// speed replaces it even when client tiers are respected. API-key auths keep it.
+func TestApplyCodexServiceTierDocBlankClientTierCountsAsAbsent(t *testing.T) {
+	useCodexServiceTierFixture(t)
+	for _, raw := range []string{`null`, `""`, `"  "`, `1`} {
+		t.Run(raw, func(t *testing.T) {
+			body := `{"model":"gpt-fixture-ultrafast","service_tier":` + raw + `}`
+			doc := ojson.NewDocString(body)
+			applyCodexServiceTierDoc(context.Background(), codexSpeedTestConfig(config.CodexSpeedFast, false), codexOAuthTestAuth("http://example.invalid"), tierFixtureUltraModel, doc)
+			if got := doc.Get("service_tier"); got.Type != ojson.String || got.String() != "priority" {
+				t.Fatalf("service_tier = %s, want \"priority\"", got.Raw)
+			}
+
+			doc = ojson.NewDocString(body)
+			applyCodexServiceTierDoc(context.Background(), codexSpeedTestConfig(config.CodexSpeedFast, false), codexAPIKeyTestAuth("http://example.invalid"), tierFixtureUltraModel, doc)
+			if got := doc.String(); got != body {
+				t.Fatalf("api-key body = %s, want unchanged", got)
+			}
+		})
+	}
+}
+
 // One end-to-end case per HTTP transport: the profile tier reaches the upstream
 // body and the routing hint, and a client tier is removed under the flag.
 func TestCodexExecutorProfileSpeedHTTP(t *testing.T) {

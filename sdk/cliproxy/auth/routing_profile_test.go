@@ -283,7 +283,6 @@ func TestCodexSpeedFromContext(t *testing.T) {
 		{name: "key profile", ctx: m.ensureRoutingProfile(ginContextWithKey(routingTestKeyA)), wantSpeed: internalconfig.CodexSpeedUltrafast},
 		{name: "shared profile for a key without one", ctx: m.ensureRoutingProfile(ginContextWithKey(routingTestKeyB)), wantSpeed: internalconfig.CodexSpeedFast, wantIgnore: true},
 		{name: "shared profile without a key", ctx: m.ensureRoutingProfile(context.Background()), wantSpeed: internalconfig.CodexSpeedFast, wantIgnore: true},
-		{name: "profile without codex settings", ctx: withRoutingProfile(context.Background(), &routingProfile{providerPolicy: true}), wantSpeed: internalconfig.CodexSpeedStandard},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

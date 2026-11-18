@@ -206,7 +206,9 @@ routing:
   # to the selection. Empty map means automatic selection for both providers.
   # Native standalone routing only; Home and scheduler plugins own their own selection.
   preferred-accounts: {} # Example: {codex: "auth-index", claude: "auth-index"}
-  # Per-provider mode and fallback. Native routing only (not Home/plugins).
+  # Per-provider mode, fallback and Codex speed. mode and fallback apply to native
+  # routing only (not Home/plugins); speed and ignore-client-tier also apply under
+  # Home and scheduler plugins, from the shared profile only.
   # NOTE: Claude/Codex upstream API keys (api-keys.claude / api-keys.codex) are never
   # selected in the primary leg unless a profile sets mode: api for that provider.
   # This covers every entry there, including Claude setup tokens and custom
@@ -240,7 +242,9 @@ routing:
   # ignore-client-tier (codex only, default false): true removes the service_tier the
   #   client sent before speed applies (response.steer frames only lose the client
   #   tier). false keeps a client tier unchanged. A tier the translator drops (for
-  #   example auto or flex) counts as absent, so speed applies to it.
+  #   example auto or flex) and a null or empty tier count as absent, so speed
+  #   applies to them. /responses/compact is not translated, so a client tier
+  #   there is used as sent.
   # Setting either field under providers.claude is a config error.
   # providers:
   #   claude:
