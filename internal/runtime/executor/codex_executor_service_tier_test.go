@@ -20,9 +20,9 @@ import (
 // Fixture catalog models: the tests must not depend on which tiers the embedded
 // Codex catalog gives to a real model.
 const (
-	tierFixtureUltrafastModel = "gpt-fixture-ultrafast" // advertises ultrafast and priority
-	tierFixturePriorityModel  = "gpt-fixture-priority"  // advertises priority only
-	tierFixtureStandardModel  = "gpt-fixture-standard"  // advertises no tier
+	tierFixtureUltraModel    = "gpt-fixture-ultrafast" // advertises ultrafast and priority
+	tierFixturePriorityModel = "gpt-fixture-priority"  // advertises priority only
+	tierFixtureStandardModel = "gpt-fixture-standard"  // advertises no tier
 )
 
 // useCodexServiceTierFixture installs the fixture catalog lookup for one test.
@@ -32,7 +32,7 @@ func useCodexServiceTierFixture(t *testing.T) {
 	previous := codexModelSupportsServiceTier
 	codexModelSupportsServiceTier = func(slug, tier string) bool {
 		switch slug {
-		case tierFixtureUltrafastModel:
+		case tierFixtureUltraModel:
 			return tier == "ultrafast" || tier == "priority"
 		case tierFixturePriorityModel:
 			return tier == "priority"
@@ -56,10 +56,10 @@ func TestApplyCodexServiceTierDoc(t *testing.T) {
 	speedTier := map[string]map[string]string{
 		"":                         {},
 		config.CodexSpeedStandard:  {},
-		config.CodexSpeedFast:      {tierFixtureUltrafastModel: "priority", tierFixturePriorityModel: "priority"},
-		config.CodexSpeedUltrafast: {tierFixtureUltrafastModel: "ultrafast", tierFixturePriorityModel: "priority"},
+		config.CodexSpeedFast:      {tierFixtureUltraModel: "priority", tierFixturePriorityModel: "priority"},
+		config.CodexSpeedUltrafast: {tierFixtureUltraModel: "ultrafast", tierFixturePriorityModel: "priority"},
 	}
-	models := []string{tierFixtureUltrafastModel, tierFixturePriorityModel, tierFixtureStandardModel}
+	models := []string{tierFixtureUltraModel, tierFixturePriorityModel, tierFixtureStandardModel}
 	clientTiers := []string{"", "priority", "ultrafast"}
 
 	for speed, tiers := range speedTier {
@@ -112,7 +112,7 @@ func TestApplyCodexServiceTierDocNilConfigKeepsBody(t *testing.T) {
 	useCodexServiceTierFixture(t)
 	body := `{"model":"gpt-fixture-ultrafast","service_tier":"priority"}`
 	doc := ojson.NewDocString(body)
-	applyCodexServiceTierDoc(context.Background(), nil, codexOAuthTestAuth("http://example.invalid"), tierFixtureUltrafastModel, doc)
+	applyCodexServiceTierDoc(context.Background(), nil, codexOAuthTestAuth("http://example.invalid"), tierFixtureUltraModel, doc)
 	if got := doc.String(); got != body {
 		t.Fatalf("body = %s, want unchanged", got)
 	}
@@ -134,7 +134,7 @@ func TestCodexExecutorProfileSpeedHTTP(t *testing.T) {
 
 			executor := NewCodexExecutor(codexSpeedTestConfig(config.CodexSpeedUltrafast, true))
 			payload := []byte(`{"model":"gpt-fixture-ultrafast","service_tier":"priority","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
-			req := cliproxyexecutor.Request{Model: tierFixtureUltrafastModel, Payload: payload}
+			req := cliproxyexecutor.Request{Model: tierFixtureUltraModel, Payload: payload}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: stream}
 			runCodexTestRequest(t, executor, codexOAuthTestAuth(server.URL), req, opts)
 
@@ -166,7 +166,7 @@ func TestCodexWebsocketsProfileSpeed(t *testing.T) {
 			auth := codexOAuthTestAuth(server.URL)
 			auth.ID = "codex-oauth-speed-" + name
 			req := cliproxyexecutor.Request{
-				Model:   tierFixtureUltrafastModel,
+				Model:   tierFixtureUltraModel,
 				Payload: []byte(`{"model":"gpt-fixture-ultrafast","service_tier":"ultrafast","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
 			}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: stream}
@@ -243,7 +243,7 @@ func TestCodexExecutorCompactProfileSpeed(t *testing.T) {
 				payload = `{"model":"gpt-fixture-ultrafast","service_tier":"` + tc.clientTier + `","input":[{"type":"message","role":"user","content":"history"},{"type":"compaction_trigger"}]}`
 			}
 			executor := NewCodexExecutor(codexSpeedTestConfig(tc.speed, tc.ignoreClientTier))
-			if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{Model: tierFixtureUltrafastModel, Payload: []byte(payload)}, cliproxyexecutor.Options{
+			if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{Model: tierFixtureUltraModel, Payload: []byte(payload)}, cliproxyexecutor.Options{
 				SourceFormat: sdktranslator.FromString("openai-response"),
 				Alt:          "responses/compact",
 			}); err != nil {
@@ -281,7 +281,7 @@ func TestCodexProfileSpeedPayloadRulesWin(t *testing.T) {
 				cfg.Payload = tc.payload
 				executor := NewCodexExecutor(cfg)
 				payload := []byte(`{"model":"gpt-fixture-ultrafast","input":[{"type":"message","role":"user","content":"history"}]}`)
-				if _, err := executor.Execute(context.Background(), codexOAuthTestAuth(server.URL), cliproxyexecutor.Request{Model: tierFixtureUltrafastModel, Payload: payload}, cliproxyexecutor.Options{
+				if _, err := executor.Execute(context.Background(), codexOAuthTestAuth(server.URL), cliproxyexecutor.Request{Model: tierFixtureUltraModel, Payload: payload}, cliproxyexecutor.Options{
 					SourceFormat: sdktranslator.FromString("openai-response"),
 					Alt:          alt,
 				}); err != nil {
@@ -383,7 +383,7 @@ func TestCodexProfileSpeedThroughManager(t *testing.T) {
 	if _, err := manager.Register(context.Background(), account); err != nil {
 		t.Fatalf("Register error: %v", err)
 	}
-	registry.GetGlobalRegistry().RegisterClient(accountID, "codex", []*registry.ModelInfo{{ID: tierFixtureUltrafastModel}})
+	registry.GetGlobalRegistry().RegisterClient(accountID, "codex", []*registry.ModelInfo{{ID: tierFixtureUltraModel}})
 	defer registry.GetGlobalRegistry().UnregisterClient(accountID)
 
 	execute := func(key, clientTier string) ojson.Result {
@@ -395,7 +395,7 @@ func TestCodexProfileSpeedThroughManager(t *testing.T) {
 		mu.Lock()
 		before := len(tiers)
 		mu.Unlock()
-		if _, err := manager.Execute(codexSpeedGinContext(key), []string{"codex"}, cliproxyexecutor.Request{Model: tierFixtureUltrafastModel, Payload: []byte(payload)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}); err != nil {
+		if _, err := manager.Execute(codexSpeedGinContext(key), []string{"codex"}, cliproxyexecutor.Request{Model: tierFixtureUltraModel, Payload: []byte(payload)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}); err != nil {
 			t.Fatalf("Execute(%s) error: %v", key, err)
 		}
 		mu.Lock()

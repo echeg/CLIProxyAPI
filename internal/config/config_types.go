@@ -359,9 +359,6 @@ type CodexConfig struct {
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
 	// upstream model/account/socket for their entire lifetime. Default is false.
 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
-	// FastMode requests the priority service tier for Codex subscription requests that do not
-	// choose a tier, limited to models whose Codex client catalog advertises it. Default is false.
-	FastMode bool `yaml:"fast-mode" json:"fast-mode"`
 	// SignInWithChatGPTIdentifier configures the identifier (agent_name_hint and User-Agent prefix)
 	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
 	// Defaults to "CLIProxyAPI".

@@ -716,7 +716,7 @@ func runCodexDuplexTierSession(t *testing.T, cfg *config.Config, initial []byte,
 	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 	auth := codexOAuthTestAuth(server.URL)
 	auth.ID = "codex-duplex-tier"
-	req := core.Request{Model: tierFixtureUltrafastModel, Payload: initial}
+	req := core.Request{Model: tierFixtureUltraModel, Payload: initial}
 	opts := core.Options{SourceFormat: sdktranslator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: "duplex-tier"}}
 	result, err := exec.ExecuteStream(ctx, auth, req, opts)
 	if err != nil {
