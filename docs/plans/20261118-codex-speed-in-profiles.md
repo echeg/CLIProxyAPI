@@ -186,10 +186,11 @@
 - [x] run `go test ./internal/api/handlers/management/... ./internal/config/...`, gofmt, compile check - must pass before task 7
 
 ### Task 7: Verify acceptance criteria
-- [ ] for each of the six items in `## Success Criteria`, name the test that proves it in a short list under `## Technical Details`; add a test where one is missing
-- [ ] run the full suite `go test ./...` (known flaky tests in `docs/backlog/` may be re-run once; do not modify them)
-- [ ] run `gofmt -l .` (no output) and the compile check `go build -o test-output ./cmd/server && rm test-output`
-- [ ] run `go vet` on the touched packages and fix findings in touched code
+- [x] for each of the six items in `## Success Criteria`, name the test that proves it in a short list under `## Technical Details`; add a test where one is missing
+  - criterion 4 had no end-to-end case: `TestCodexProfileSpeedThroughManager` gained a key whose profile sets neither field, and its reload step now also turns on the shared `ignore-client-tier`
+- [x] run the full suite `go test ./...` (known flaky tests in `docs/backlog/` may be re-run once; do not modify them)
+- [x] run `gofmt -l .` (no output) and the compile check `go build -o test-output ./cmd/server && rm test-output`
+- [x] run `go vet` on the touched packages and fix findings in touched code
 
 ### Task 8: Update documentation
 - [ ] `docs/management-api-v8.md`: remove the `/config/oauth/providers/codex/fast-mode` row (`:43`) and add both fields to the routing profile sections and the `GET /routing/profiles` description
@@ -224,6 +225,14 @@
 | `/responses/compact` | yes | yes |
 | `response.steer` control frames | yes | no |
 | Codex API-key auths, any path | no | no |
+
+### Success criteria coverage
+1. Ultrafast downgrade: `TestApplyCodexServiceTierDoc` (speed `ultrafast` rows over the three fixture models), end to end in `TestCodexExecutorProfileSpeedHTTP` and `TestCodexProfileSpeedThroughManager` (`internal/runtime/executor/codex_executor_service_tier_test.go`).
+2. Client tier removed under the flag: `TestApplyCodexServiceTierDoc` (speed `standard` with `ignore` rows) for `response.create`; `TestCodexDuplexIgnoreClientTierOnCreateTurns` for websocket create and follow-up turns; `TestCodexExecutorCompactProfileSpeed` ("flag strips client tier") for `/responses/compact`; `TestCodexDuplexSteerClientTier` and `TestRemoveCodexClientServiceTierDoc` for `response.steer`.
+3. Client tier respected without the flag: `TestApplyCodexServiceTierDoc` (rows without `ignore`), `TestCodexExecutorCompactProfileSpeed` ("client tier kept without flag"), `TestCodexDuplexSteerClientTier` (flag false).
+4. Key profile without either field: `TestProvidersRoutingCodexSpeedDefaults` (`internal/config`), `TestCodexSpeedFromContext` ("key profile without codex settings is not inherited", `sdk/cliproxy/auth`), and end to end the `keyNoCodex` key in `TestCodexProfileSpeedThroughManager` (added in Task 7). That key keeps `standard` and the client tier while the shared profile is `ultrafast` with `ignore-client-tier`.
+5. Two keys with different tiers in one process: `TestCodexProfileSpeedThroughManager`.
+6. Hot reload and the leftover key: `TestCodexProfileSpeedThroughManager` (the `SetConfig` step, no restart), `TestConfigV8LeftoverCodexFastModeLoads` and `TestConfigV8LeftoverCodexFastModeAcceptsWrites` (`internal/api/handlers/management/config_codex_fast_mode_test.go`).
 
 ### Decision table (from the brainstorm)
 | Decision | Chosen | Alternatives not taken |

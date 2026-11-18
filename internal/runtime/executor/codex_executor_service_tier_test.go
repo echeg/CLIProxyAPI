@@ -335,8 +335,9 @@ func codexSpeedGinContext(key string) context.Context {
 
 // The manager resolves the profile of the inbound client key and the executor
 // reads the speed from it: two keys with their own profiles and a key without
-// one get different tiers in one process, the context profile wins over the
-// executor config, and a changed speed applies to the next request.
+// one get different tiers in one process, a key profile without Codex settings
+// inherits nothing from the shared profile, the context profile wins over the
+// executor config, and a changed setting applies to the next request.
 func TestCodexProfileSpeedThroughManager(t *testing.T) {
 	useCodexServiceTierFixture(t)
 	var mu sync.Mutex
@@ -355,19 +356,24 @@ func TestCodexProfileSpeedThroughManager(t *testing.T) {
 		keyUltrafast = "sk-speed-ultrafast"
 		keyStandard  = "sk-speed-standard"
 		keyShared    = "sk-speed-shared"
+		keyNoCodex   = "sk-speed-no-codex"
 		accountID    = "codex-speed-manager-account"
 	)
-	buildConfig := func(sharedSpeed string) *config.Config {
+	buildConfig := func(sharedSpeed string, sharedIgnore bool) *config.Config {
 		cfg := &config.Config{SDKConfig: config.SDKConfig{
-			APIKeys:                []string{keyUltrafast, keyStandard, keyShared},
+			APIKeys:                []string{keyUltrafast, keyStandard, keyShared, keyNoCodex},
 			DisableImageGeneration: config.DisableImageGenerationAll,
 		}}
 		cfg.Routing.Providers.Codex.Speed = sharedSpeed
+		cfg.Routing.Providers.Codex.IgnoreClientTier = sharedIgnore
 		ultrafast := &config.RoutingProfile{}
 		ultrafast.Providers.Codex.Speed = config.CodexSpeedUltrafast
 		standard := &config.RoutingProfile{}
 		standard.Providers.Codex.IgnoreClientTier = true
-		cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{keyUltrafast: ultrafast, keyStandard: standard}
+		// A key profile that sets neither field behaves as standard with the
+		// client tier respected, whatever the shared profile says.
+		noCodex := &config.RoutingProfile{}
+		cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{keyUltrafast: ultrafast, keyStandard: standard, keyNoCodex: noCodex}
 		return cfg
 	}
 
@@ -376,7 +382,7 @@ func TestCodexProfileSpeedThroughManager(t *testing.T) {
 	exec := NewCodexExecutor(codexSpeedTestConfig(config.CodexSpeedFast, false))
 	manager := cliproxyauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(exec)
-	manager.SetConfig(buildConfig(config.CodexSpeedStandard))
+	manager.SetConfig(buildConfig(config.CodexSpeedStandard, false))
 	account := codexOAuthTestAuth(server.URL)
 	account.ID = accountID
 	account.Status = cliproxyauth.StatusActive
@@ -410,11 +416,16 @@ func TestCodexProfileSpeedThroughManager(t *testing.T) {
 	assertCapturedServiceTier(t, execute(keyStandard, "priority"), "")
 	assertCapturedServiceTier(t, execute(keyShared, ""), "")
 	assertCapturedServiceTier(t, execute(keyShared, "priority"), "priority")
+	assertCapturedServiceTier(t, execute(keyNoCodex, ""), "")
+	assertCapturedServiceTier(t, execute(keyNoCodex, "priority"), "priority")
 
-	manager.SetConfig(buildConfig(config.CodexSpeedUltrafast))
+	manager.SetConfig(buildConfig(config.CodexSpeedUltrafast, true))
 	assertCapturedServiceTier(t, execute(keyShared, ""), "ultrafast")
+	assertCapturedServiceTier(t, execute(keyShared, "priority"), "ultrafast")
 	assertCapturedServiceTier(t, execute(keyUltrafast, ""), "ultrafast")
 	assertCapturedServiceTier(t, execute(keyStandard, ""), "")
+	assertCapturedServiceTier(t, execute(keyNoCodex, ""), "")
+	assertCapturedServiceTier(t, execute(keyNoCodex, "priority"), "priority")
 }
 
 // Control frames only lose the client tier; they never get the profile speed,
