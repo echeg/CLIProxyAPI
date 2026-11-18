@@ -920,8 +920,8 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
 		return nil, err
 	}
-	// Payload rules run later in the finalizer, so they can still override the fast-mode tier.
-	applyCodexFastModeDoc(e.cfg, auth, baseModel, doc)
+	// Payload rules run later in the finalizer, so they can still override the profile tier.
+	applyCodexServiceTierDoc(ctx, e.cfg, auth, baseModel, doc)
 
 	instructionsResult := ojson.GetBytesNoCopy(req.Payload, "instructions")
 	hasExplicitInstructions := instructionsResult.Exists() && strings.TrimSpace(instructionsResult.String()) != ""

@@ -77,8 +77,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
 		return nil, err
 	}
-	// Payload rules run later in the finalizer, so they can still override the fast-mode tier.
-	applyCodexFastModeDoc(e.cfg, auth, baseModel, doc)
+	// Payload rules run later in the finalizer, so they can still override the profile tier.
+	applyCodexServiceTierDoc(ctx, e.cfg, auth, baseModel, doc)
 
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslated, req, opts, auth))
 	_ = doc.Delete("previous_response_id")

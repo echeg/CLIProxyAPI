@@ -154,8 +154,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
 		return resp, err
 	}
-	// Payload rules run later in the finalizer, so they can still override the fast-mode tier.
-	applyCodexFastModeDoc(e.cfg, auth, baseModel, doc)
+	// Payload rules run later in the finalizer, so they can still override the profile tier.
+	applyCodexServiceTierDoc(ctx, e.cfg, auth, baseModel, doc)
 
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslated, req, opts, auth))
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
@@ -466,6 +466,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
 		return resp, err
 	}
+	// Payload rules run later in the finalizer, so they can still override the profile tier.
+	applyCodexServiceTierDoc(ctx, e.cfg, auth, baseModel, doc)
 
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslated, req, opts))
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)

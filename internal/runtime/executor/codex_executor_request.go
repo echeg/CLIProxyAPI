@@ -582,21 +582,63 @@ func applyCodexHeadersWithSIWC(r *http.Request, auth *cliproxyauth.Auth, useSIWC
 	applyCodexCloakingHeaders(r.Header, cfg, auth)
 }
 
-// applyCodexFastModeDoc requests the priority service tier for subscription
-// requests when codex.fast-mode is enabled and the request carries no tier.
-// Only models whose Codex client catalog entry advertises priority are changed,
-// and payload rules applied afterwards keep precedence.
-func applyCodexFastModeDoc(cfg *config.Config, auth *cliproxyauth.Auth, baseModel string, doc *ojson.Doc) {
-	if doc == nil || cfg == nil || !cfg.Codex.FastMode || codexAuthUsesAPIKey(auth) {
+// codexModelSupportsServiceTier reports whether the Codex client catalog
+// advertises a service tier for a model. Tests replace it with a fixture so they
+// do not depend on the tiers of the embedded catalog.
+var codexModelSupportsServiceTier = registry.CodexClientModelSupportsServiceTier
+
+// codexSpeedSettings returns the Codex speed and ignore-client-tier settings of
+// the request's routing profile, or of the shared profile of cfg when the
+// context carries no profile (Home, direct executor calls).
+func codexSpeedSettings(ctx context.Context, cfg *config.Config) (speed string, ignoreClientTier bool) {
+	if speed, ignoreClientTier, ok := cliproxyauth.CodexSpeedFromContext(ctx); ok {
+		return speed, ignoreClientTier
+	}
+	if cfg == nil {
+		return config.CodexSpeedStandard, false
+	}
+	codex := cfg.Routing.SharedProfile().EffectiveProviders().Codex
+	return codex.Speed, codex.IgnoreClientTier
+}
+
+// codexServiceTierForSpeed maps a profile speed to the service tier the model
+// advertises: ultrafast downgrades to priority, and a model without the tier
+// gets none.
+func codexServiceTierForSpeed(speed, baseModel string) string {
+	var candidates []string
+	switch speed {
+	case config.CodexSpeedUltrafast:
+		candidates = []string{"ultrafast", "priority"}
+	case config.CodexSpeedFast:
+		candidates = []string{"priority"}
+	}
+	for _, tier := range candidates {
+		if codexModelSupportsServiceTier(baseModel, tier) {
+			return tier
+		}
+	}
+	return ""
+}
+
+// applyCodexServiceTierDoc applies the routing profile's Codex speed policy to a
+// subscription request. A tier sent by the client is kept unless the profile
+// ignores client tiers, in which case it is removed. A request without a tier
+// then gets the tier of the profile speed. Codex API-key auths are never
+// changed, and payload rules applied afterwards keep precedence.
+func applyCodexServiceTierDoc(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, baseModel string, doc *ojson.Doc) {
+	if doc == nil || codexAuthUsesAPIKey(auth) {
 		return
 	}
+	speed, ignoreClientTier := codexSpeedSettings(ctx, cfg)
 	if doc.Get("service_tier").Exists() {
-		return
+		if !ignoreClientTier {
+			return
+		}
+		_ = doc.Delete("service_tier")
 	}
-	if !registry.CodexClientModelSupportsServiceTier(baseModel, "priority") {
-		return
+	if tier := codexServiceTierForSpeed(speed, baseModel); tier != "" {
+		_ = doc.Set("service_tier", tier)
 	}
-	_ = doc.Set("service_tier", "priority")
 }
 
 const codexRoutingHintHeader = "X-Codex-Routing-Hint"
