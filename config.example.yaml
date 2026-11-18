@@ -233,9 +233,10 @@ routing:
   # A started response is never replayed. Later requests try Claude again in auto mode.
   # speed (codex only): standard (default) | fast | ultrafast. Sets service_tier on
   #   Codex subscription requests that carry none (response.create and
-  #   /responses/compact). fast sends priority; ultrafast sends ultrafast when the
-  #   model's catalog entry advertises it, else priority when advertised, else no
-  #   tier. Codex API-key credentials are never changed. Payload rules still win.
+  #   /responses/compact). Tiers come from the model's catalog entry: fast sends
+  #   priority when advertised; ultrafast sends ultrafast when advertised, else
+  #   priority when advertised; otherwise no tier is sent. Codex API-key
+  #   credentials are never changed. Payload rules still win.
   # ignore-client-tier (codex only, default false): true removes the service_tier the
   #   client sent before speed applies (response.steer frames only lose the client
   #   tier). false keeps a client tier unchanged. A tier the translator drops (for

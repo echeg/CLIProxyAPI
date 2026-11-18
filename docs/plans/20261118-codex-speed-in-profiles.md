@@ -193,11 +193,11 @@
 - [x] run `go vet` on the touched packages and fix findings in touched code
 
 ### Task 8: Update documentation
-- [ ] `docs/management-api-v8.md`: remove the `/config/oauth/providers/codex/fast-mode` row (`:43`) and add both fields to the routing profile sections and the `GET /routing/profiles` description
-- [ ] `docs/management-api-v8.md`: describe the behavior a client must know: a PATCH for a key without a profile creates a profile holding only the written fields, so a full profile must be sent when one is created; `/responses/compact` follows the same rule and `response.steer` only loses the client tier; a tier the translator drops (`auto`, `flex`) counts as absent; Home ignores key profiles; an open duplex websocket session keeps its starting profile until it reconnects
-- [ ] ➕ `docs/management-api-v8.md`: state that a PATCH with `null` for `speed` or `ignore-client-tier` stores `null` (read as the default) and that DELETE of the field path removes it from the file
-- [ ] `AGENTS.md`: add one sentence to the `sdk/cliproxy/auth` paragraph naming the accessor and the rule that the Codex executor reads the speed policy from the context profile
-- [ ] re-read the `config.example.yaml` comments written in Tasks 1 and 5 against the final behavior and correct them if they drifted; re-run `go test ./internal/config/...` when the file changes
+- [x] `docs/management-api-v8.md`: remove the `/config/oauth/providers/codex/fast-mode` row (`:43`) and add both fields to the routing profile sections and the `GET /routing/profiles` description
+- [x] `docs/management-api-v8.md`: describe the behavior a client must know: a PATCH for a key without a profile creates a profile holding only the written fields, so a full profile must be sent when one is created; `/responses/compact` follows the same rule and `response.steer` only loses the client tier; a tier the translator drops (`auto`, `flex`) counts as absent; Home ignores key profiles; an open duplex websocket session keeps its starting profile until it reconnects
+- [x] ➕ `docs/management-api-v8.md`: state that a PATCH with `null` for `speed` or `ignore-client-tier` stores `null` (read as the default) and that DELETE of the field path removes it from the file
+- [x] `AGENTS.md`: add one sentence to the `sdk/cliproxy/auth` paragraph naming the accessor and the rule that the Codex executor reads the speed policy from the context profile
+- [x] re-read the `config.example.yaml` comments written in Tasks 1 and 5 against the final behavior and correct them if they drifted; re-run `go test ./internal/config/...` when the file changes
 
 ## Technical Details
 

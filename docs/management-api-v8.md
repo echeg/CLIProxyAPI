@@ -40,7 +40,6 @@ the corresponding group value. Legacy field names are rejected by v8 writes.
 | `/config/api-keys` | All upstream provider groups. |
 | `/config/api-keys/codex` | Codex upstream groups. |
 | `/config/client/codex/optimize-multi-agent-v2` | Boolean, default `false`; applies to Codex clients across OAuth and API-key routes. |
-| `/config/oauth/providers/codex/fast-mode` | Boolean, default `false`; requests the priority service tier (Codex Fast) for subscription requests without a tier on models whose Codex catalog advertises it. API-key routes and payload rules are unaffected. |
 | `/config/observability/logs/debug` | A boolean, for example `true`. |
 | `/config/routing/retry/request-retry` | A number, for example `0`. |
 | `/config/plugins/configs/<id>` | A plugin configuration object. |
@@ -243,18 +242,21 @@ routing:
       api-credential: "<auth_index>"
       fallback:
         target: api                    # off or api
+      speed: fast                      # standard (default), fast, or ultrafast; codex only
+      ignore-client-tier: false        # default false; codex only
   key-profiles:
     "client-key-a":
       providers:
         claude: {mode: api, api-credential: "<auth_index>"}
-        codex: {api-credential: "<auth_index>", fallback: {target: api}}
+        codex: {api-credential: "<auth_index>", fallback: {target: api}, speed: ultrafast, ignore-client-tier: true}
 ```
 
 `api-credential` is the `auth_index` of an `api-keys.claude` or `api-keys.codex`
 entry of the same provider; take it from `api_credentials` in
 `GET /v8/management/routing/profiles`. A key profile replaces the shared profile
 completely: a key profile without `providers` runs both providers in
-`subscription` mode with fallback `off`.
+`subscription` mode with fallback `off`, and Codex at speed `standard` with the
+client tier respected.
 
 #### Validation
 
@@ -271,6 +273,11 @@ profile paths use the 12-hex key hash, for example
   only at the end of `from`, no duplicate `from`.
 - `fallback.mode` and `mappings` under `target: api` are kept but ignored; the
   load logs a warning.
+- `speed` must be empty, `standard`, `fast`, or `ultrafast` (trimmed and
+  lower-cased). A non-empty `speed` or `ignore-client-tier: true` under
+  `providers.claude` is an error; an empty `speed` and `ignore-client-tier: false`
+  are accepted there, so a profile read from `GET /v8/management/routing/profiles`
+  can be written back unchanged.
 - An `api-credential` that matches no enabled API-key credential of that provider
   is not an error, because the key may be added later. A successful
   configuration write logs one warning per such profile with the fields
@@ -347,6 +354,75 @@ profile paths use the 12-hex key hash, for example
   and both fallback targets do not apply there. CLIProxyAPIHome does not
   implement the provider policy, so a cluster deployment needs matching selector
   support in Home before using these settings.
+
+#### Codex speed
+
+`providers.codex.speed` and `providers.codex.ignore-client-tier` choose the
+`service_tier` of Codex subscription (OAuth) requests. They replace the removed
+`oauth.providers.codex.fast-mode` flag. Codex API-key credentials are never
+changed, also with `ignore-client-tier: true`.
+
+For each request the executor reads both fields from the profile of the request
+and then:
+
+1. If the request carries a `service_tier` and `ignore-client-tier` is `false`,
+   the client tier is sent unchanged.
+2. If the request carries a `service_tier` and `ignore-client-tier` is `true`,
+   the client tier is removed.
+3. A request without a tier gets the tier of the profile speed. `standard` sends
+   no tier. `fast` sends `priority` when the model's Codex catalog entry
+   advertises it. `ultrafast` sends `ultrafast` when the model advertises it,
+   otherwise `priority` when advertised, otherwise no tier.
+
+| Path | Client tier removed under `ignore-client-tier` | Speed applied |
+| --- | --- | --- |
+| `response.create` over HTTP and websocket, plain and streaming, including duplex follow-up turns | yes | yes |
+| `/responses/compact` | yes | yes |
+| `response.steer` control frames | yes | no |
+| Codex API-key credentials, any path | no | no |
+
+- The tier is resolved after protocol translation. The OpenAI Responses
+  translator maps `fast` to `priority` and drops tiers it does not know, such as
+  `auto` and `flex`. A dropped tier counts as absent, so the profile speed applies
+  to it even with `ignore-client-tier: false`.
+- Payload rules run afterwards and keep precedence over the profile.
+- An upstream rejection of `ultrafast` (for example, an account without the
+  entitlement) is handled like any other upstream error; the proxy never lowers
+  the tier and retries. Usage records keep the requested, effective, and response service tier.
+- `X-Codex-Routing-Hint` follows the tier of the final upstream body. On a
+  websocket it is a handshake header, so it describes the first turn of the
+  connection.
+- The Claude -> Codex fallback leg uses the Codex settings of the same profile.
+- An open Codex duplex websocket session keeps the profile it started with; a
+  changed profile applies after the client reconnects. HTTP requests and new
+  connections pick up a changed profile on hot reload without a restart.
+- Home mode ignores key profiles: every request uses the Codex settings of the
+  shared profile. Under a scheduler plugin every request uses the shared profile
+  too.
+- A config file that still contains `oauth.providers.codex.fast-mode` keeps
+  loading. The value is ignored and not migrated, and the next management write
+  comments the key out.
+
+Write the fields through `PATCH /v8/management/config` like any other profile
+field:
+
+```json
+{"routing": {"providers": {"codex": {"speed": "ultrafast", "ignore-client-tier": true}}}}
+```
+
+- A PATCH that names a key without a profile creates a profile that holds only
+  the written fields. Because a key profile replaces the shared profile
+  completely, that key loses the shared selection, preferred accounts, session
+  affinity, and `providers` settings. Send the full profile when you create one,
+  for example the key's entry from `GET /v8/management/routing/profiles` with the
+  new fields set.
+- A PATCH of one field of an existing profile keeps the other fields of that
+  profile.
+- A PATCH with `null` for `speed` or `ignore-client-tier` stores `null` in the
+  file, which is read as the default (`standard`, `false`).
+  `DELETE /v8/management/config/routing/providers/codex/speed` (or the
+  `ignore-client-tier` path, or the same path under a key profile) removes the
+  field from the file.
 
 #### Logging
 
@@ -510,8 +586,8 @@ keys and is sent with `Cache-Control: no-store`.
     "selection": {"primary": "reserves", "tiebreak": "earliest-reset"},
     "claude-fallback": {"enabled": true, "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]},
     "providers": {
-      "claude": {"mode": "subscription", "api-credential": "", "fallback": {"target": "codex", "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]}},
-      "codex": {"mode": "subscription", "api-credential": "", "fallback": {"target": "off", "mode": "", "mappings": []}}
+      "claude": {"mode": "subscription", "api-credential": "", "fallback": {"target": "codex", "mode": "auto", "mappings": [{"from": "claude-opus-*", "to": "gpt-6-astra"}]}, "speed": "", "ignore-client-tier": false},
+      "codex": {"mode": "subscription", "api-credential": "", "fallback": {"target": "off", "mode": "", "mappings": []}, "speed": "fast", "ignore-client-tier": false}
     }
   },
   "keys": [
@@ -523,8 +599,8 @@ keys and is sent with `Cache-Control: no-store`.
         "selection": {"primary": "priority", "tiebreak": "round-robin"},
         "claude-fallback": {"enabled": false, "mode": "", "mappings": []},
         "providers": {
-          "claude": {"mode": "subscription", "api-credential": "claude-api-key-index", "fallback": {"target": "api", "mode": "", "mappings": []}},
-          "codex": {"mode": "api", "api-credential": "codex-api-key-index", "fallback": {"target": "off", "mode": "", "mappings": []}}
+          "claude": {"mode": "subscription", "api-credential": "claude-api-key-index", "fallback": {"target": "api", "mode": "", "mappings": []}, "speed": "", "ignore-client-tier": false},
+          "codex": {"mode": "api", "api-credential": "codex-api-key-index", "fallback": {"target": "off", "mode": "", "mappings": []}, "speed": "standard", "ignore-client-tier": false}
         }
       }
     }
@@ -544,7 +620,10 @@ keys and is sent with `Cache-Control: no-store`.
 legacy selection or the key default is shown instead of an empty object.
 `providers` is effective too: both sub-blocks are always present, defaults are
 filled in, a legacy `claude-fallback` block is already converted, and `mappings`
-is `[]` rather than `null`. `claude-fallback` is the legacy view derived from
+is `[]` rather than `null`. Both sub-blocks carry `speed` and
+`ignore-client-tier`; `codex.speed` shows `standard` when the profile does not set
+it, and `claude.speed` is always `""` (see [Codex speed](#codex-speed)).
+`claude-fallback` is the legacy view derived from
 `providers.claude.fallback` for older clients; its `enabled` is `true` only for
 `target: codex`. `api_credentials` always has a `claude` and a `codex` list of
 API-key credentials sorted by `auth_index`; `disabled` covers disabled
