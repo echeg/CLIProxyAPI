@@ -50,6 +50,7 @@ func TestConfigV8LeftoverCodexFastModeAcceptsWrites(t *testing.T) {
 	handler := &Handler{cfg: cfg, configFilePath: path}
 	router := gin.New()
 	router.PATCH("/v8/management/config", handler.ConfigV8)
+	router.PUT("/v8/management/config/*path", handler.ConfigV8)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(`{"requests":{"proxy-url":"direct"}}`)))
 	if recorder.Code != http.StatusOK {
@@ -58,6 +59,16 @@ func TestConfigV8LeftoverCodexFastModeAcceptsWrites(t *testing.T) {
 	saved, errRead := os.ReadFile(path)
 	if errRead != nil {
 		t.Fatal(errRead)
+	}
+
+	// A panel that still writes the removed path gets 400 and the file stays as is.
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/v8/management/config/oauth/providers/codex/fast-mode", strings.NewReader(`true`)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("fast-mode put status %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+	if unchanged, errReread := os.ReadFile(path); errReread != nil || string(unchanged) != string(saved) {
+		t.Fatalf("rejected fast-mode write changed the config: %v", errReread)
 	}
 	var doc yaml.Node
 	if errUnmarshal := yaml.Unmarshal(saved, &doc); errUnmarshal != nil {

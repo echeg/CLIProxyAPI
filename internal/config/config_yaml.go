@@ -981,18 +981,14 @@ func dropSupersededLegacyClaudeFallback(dstRoot, srcRoot *yaml.Node) {
 	removeMapKey(yamlPath(dstRoot, "routing"), "claude-fallback")
 }
 
-// sharedCodexSpeedKeys are the omitempty Codex speed fields of the shared
-// routing profile. A key missing from the generated document was cleared.
-var sharedCodexSpeedKeys = []string{"speed", "ignore-client-tier"}
-
 // dropClearedSharedCodexSpeedFields removes routing.providers.codex.speed and
 // ignore-client-tier from the original document when the generated document no
-// longer has them. A key that already holds the default (null, false or "") is
-// kept, since omitempty hides it from the generated document without a change.
-// A codex mapping emptied here is removed too, and so is a providers mapping
-// left empty by that. The merge never deletes keys
-// outside pruned subtrees, and the rest of the shared providers block is left to
-// the merge on purpose.
+// longer has them: both are omitempty, so a missing key was cleared. A key that
+// already holds the default (null, false or "") is kept, since omitempty hides
+// it from the generated document without a change. A codex mapping emptied here
+// is removed too, and so is a providers mapping left empty by that. The merge
+// never deletes keys outside pruned subtrees, and the rest of the shared
+// providers block is left to the merge on purpose.
 func dropClearedSharedCodexSpeedFields(dstRoot, srcRoot *yaml.Node) {
 	providers := yamlPath(dstRoot, "routing.providers")
 	dst := yamlPath(providers, "codex")
@@ -1001,9 +997,9 @@ func dropClearedSharedCodexSpeedFields(dstRoot, srcRoot *yaml.Node) {
 	}
 	src := yamlPath(srcRoot, "routing.providers.codex")
 	removed := false
-	for _, key := range sharedCodexSpeedKeys {
+	for _, key := range []string{"speed", "ignore-client-tier"} {
 		idx := findMapKeyIndex(dst, key)
-		if idx < 0 || findMapKeyIndex(src, key) >= 0 || isDefaultYAMLValue(dst.Content[idx+1]) {
+		if idx < 0 || findMapKeyIndex(src, key) >= 0 || isZeroValueNode(dst.Content[idx+1]) {
 			continue
 		}
 		removeMapKey(dst, key)
@@ -1015,15 +1011,6 @@ func dropClearedSharedCodexSpeedFields(dstRoot, srcRoot *yaml.Node) {
 			removeMapKey(yamlPath(dstRoot, "routing"), "providers")
 		}
 	}
-}
-
-// isDefaultYAMLValue reports whether node holds null, false or an empty string.
-func isDefaultYAMLValue(node *yaml.Node) bool {
-	var value any
-	if node == nil || node.Decode(&value) != nil {
-		return false
-	}
-	return value == nil || value == false || value == ""
 }
 
 // isKeyProfileSubtreePath reports whether path is a routing.key-profiles entry or

@@ -855,9 +855,7 @@ func TestCodexDuplexSteerClientTier(t *testing.T) {
 			if tier := ojson.GetBytes(frames[0], "service_tier"); tier.Exists() {
 				t.Fatalf("create service_tier = %s, want none for speed standard", tier.Raw)
 			}
-			if got := ojson.GetBytes(frames[1], "service_tier").String(); got != tc.wantTier {
-				t.Fatalf("steer service_tier = %q, want %q: %s", got, tc.wantTier, frames[1])
-			}
+			assertCapturedServiceTier(t, ojson.GetBytes(frames[1], "service_tier"), tc.wantTier)
 		})
 	}
 }
@@ -877,20 +875,22 @@ func TestCodexDuplexKeyProfileThroughManager(t *testing.T) {
 		cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{clientKey: profile}
 		return cfg
 	}
-	// throughManager runs the session for clientKey through a manager whose key
-	// profile is fast with ignore-client-tier, and stores the manager in *manager.
-	throughManager := func(t *testing.T, manager **cliproxyauth.Manager) codexDuplexTierStart {
+	// newManager returns a manager whose key profile is fast with ignore-client-tier.
+	newManager := func() *cliproxyauth.Manager {
+		m := cliproxyauth.NewManager(nil, nil, nil)
+		m.SetConfig(managerConfig(config.CodexSpeedFast, true))
+		return m
+	}
+	// throughManager runs the session for clientKey through m.
+	throughManager := func(t *testing.T, m *cliproxyauth.Manager) codexDuplexTierStart {
 		return func(ctx context.Context, exec *CodexWebsocketsExecutor, auth *cliproxyauth.Auth, req core.Request, opts core.Options) (*core.StreamResult, error) {
-			m := cliproxyauth.NewManager(nil, nil, nil)
 			m.RegisterExecutor(exec)
-			m.SetConfig(managerConfig(config.CodexSpeedFast, true))
 			auth.Status = cliproxyauth.StatusActive
 			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
 				return nil, errRegister
 			}
 			registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: tierFixtureUltraModel}})
 			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
-			*manager = m
 			ctx = context.WithValue(ctx, "gin", codexSpeedGinContext(clientKey).Value("gin"))
 			return m.ExecuteStream(ctx, []string{"codex"}, req, opts)
 		}
@@ -899,8 +899,8 @@ func TestCodexDuplexKeyProfileThroughManager(t *testing.T) {
 	initial := []byte(`{"model":"gpt-fixture-ultrafast","service_tier":"ultrafast","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 1"}]}]}`)
 
 	t.Run("follow-up turn keeps the starting profile", func(t *testing.T) {
-		var manager *cliproxyauth.Manager
-		frames := runCodexDuplexTierSession(t, executorConfig, initial, false, throughManager(t, &manager), func(event, id string, input chan<- core.WebsocketInput) bool {
+		manager := newManager()
+		frames := runCodexDuplexTierSession(t, executorConfig, initial, false, throughManager(t, manager), func(event, id string, input chan<- core.WebsocketInput) bool {
 			if event != "response.completed" {
 				return false
 			}
@@ -920,8 +920,7 @@ func TestCodexDuplexKeyProfileThroughManager(t *testing.T) {
 	})
 
 	t.Run("steer frame loses the client tier", func(t *testing.T) {
-		var manager *cliproxyauth.Manager
-		frames := runCodexDuplexTierSession(t, executorConfig, initial, true, throughManager(t, &manager), func(event, id string, input chan<- core.WebsocketInput) bool {
+		frames := runCodexDuplexTierSession(t, executorConfig, initial, true, throughManager(t, newManager()), func(event, id string, input chan<- core.WebsocketInput) bool {
 			if event == "response.created" && id == "r1" {
 				input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","previous_response_id":"r1","service_tier":"ultrafast","input":[{"role":"user","content":[{"type":"input_text","text":"STEER_OK"}]}]}`)}
 			}

@@ -319,4 +319,28 @@ routing:
 			t.Fatalf("shared effective codex = %+v", got)
 		}
 	})
+
+	t.Run("an emptied codex block leaves the claude block in place", func(t *testing.T) {
+		const withClaude = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    # claude stays
+    claude:
+      mode: subscription
+    codex:
+      speed: fast
+`
+		path, cfg := writeLoad(t, withClaude)
+		cfg.Routing.Providers.Codex.Speed = ""
+		saved := saveRead(t, path, cfg)
+		if node := routingNode(t, saved, "routing.providers.codex"); node != nil {
+			t.Fatalf("cleared codex block survived the save:\n%s", saved)
+		}
+		// The claude block keeps its value and its comment.
+		if node := routingNode(t, saved, "routing.providers.claude.mode"); node == nil || node.Value != "subscription" || !strings.Contains(saved, "# claude stays") {
+			t.Fatalf("save dropped routing.providers.claude:\n%s", saved)
+		}
+	})
 }

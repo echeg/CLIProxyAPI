@@ -25,6 +25,9 @@ type codexWebsocketHintRecorder struct {
 	mu         sync.Mutex
 	handshakes []string
 	frames     []codexWebsocketHintFrame
+	// serviceTiers holds the raw service_tier of each frame, so an absent tier
+	// stays distinct from an empty one.
+	serviceTiers []ojson.Result
 }
 
 func newCodexWebsocketHintServer(t *testing.T, rec *codexWebsocketHintRecorder) *httptest.Server {
@@ -53,6 +56,7 @@ func newCodexWebsocketHintServer(t *testing.T, rec *codexWebsocketHintRecorder) 
 				tier:               ojson.GetBytes(payload, "service_tier").String(),
 				previousResponseID: ojson.GetBytes(payload, "previous_response_id").String(),
 			})
+			rec.serviceTiers = append(rec.serviceTiers, ojson.GetBytes(payload, "service_tier"))
 			rec.mu.Unlock()
 			completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","object":"response","status":"completed","model":"gpt-5.5","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
 			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {

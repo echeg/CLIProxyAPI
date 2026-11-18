@@ -238,14 +238,16 @@ routing:
   #   /responses/compact). Tiers come from the model's catalog entry: fast sends
   #   priority when advertised; ultrafast sends ultrafast when advertised, else
   #   priority when advertised; otherwise no tier is sent. Codex API-key
-  #   credentials are never changed. Payload rules still win.
+  #   credentials are never changed. Payload rules still win; on /responses/compact
+  #   they match protocol openai-response, not codex.
   # ignore-client-tier (codex only, default false): true removes the service_tier the
   #   client sent before speed applies (response.steer frames only lose the client
   #   tier). false keeps a client tier unchanged. A tier the translator drops (for
   #   example auto or flex) and a null or empty tier count as absent, so speed
   #   applies to them. /responses/compact is not translated, so a client tier
   #   there is used as sent.
-  # Setting either field under providers.claude is a config error.
+  # A non-empty speed or ignore-client-tier: true under providers.claude is a
+  # config error.
   # providers:
   #   claude:
   #     mode: subscription

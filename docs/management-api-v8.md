@@ -392,7 +392,10 @@ and then:
   (for example the `codex-service-tier` example plugin) counts as the client tier:
   `ignore-client-tier: true` removes it. To force a tier regardless of the
   profile, use a payload rule.
-- Payload rules run afterwards and keep precedence over the profile.
+- Payload rules run afterwards and keep precedence over the profile. On
+  `/responses/compact` they see the protocol `openai-response`, not `codex`, so a
+  rule meant to override or filter the tier on both create and compact requests
+  must omit `protocol`.
 - An upstream rejection of `ultrafast` (for example, an account without the
   entitlement) is handled like any other upstream error; the proxy never lowers
   the tier and retries. Usage records keep the requested, effective, and response service tier.
@@ -746,8 +749,10 @@ configuration diff in the log reports `routing.selection` changes,
 Key profiles apply to native standalone routing only. Home mode resolves no
 profile and keeps its control-plane selection; it also disables these management
 endpoints. With a scheduler plugin, every request uses the shared profile, so
-global preferences keep applying there, while key profiles, the provider mode,
-and both fallback targets do not apply. CLIProxyAPIHome does not implement the
+global preferences and the shared Codex `speed` and `ignore-client-tier` keep
+applying there, while key profiles, the provider mode, and both fallback targets
+do not apply. `supported: false` in `GET /v8/management/routing/profiles` does not
+turn off the shared Codex speed (see [Codex speed](#codex-speed)). CLIProxyAPIHome does not implement the
 provider policy.
 
 Each selection for a key with its own profile writes one info line:

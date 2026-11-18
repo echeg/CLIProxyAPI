@@ -247,6 +247,8 @@ func TestCodexExecutorCompactProfileSpeed(t *testing.T) {
 		{name: "flag strips client tier", speed: config.CodexSpeedStandard, ignoreClientTier: true, clientTier: "priority"},
 		{name: "fast injects priority", speed: config.CodexSpeedFast, wantTier: "priority"},
 		{name: "client tier kept without flag", speed: config.CodexSpeedStandard, clientTier: "priority", wantTier: "priority"},
+		// Compact is not translated, so auto stays a client tier there.
+		{name: "untranslated client auto kept over speed", speed: config.CodexSpeedFast, clientTier: "auto", wantTier: "auto"},
 		{name: "api key untouched", speed: config.CodexSpeedFast, ignoreClientTier: true, apiKey: true, clientTier: "ultrafast", wantTier: "ultrafast"},
 		{name: "api key without tier stays without tier", speed: config.CodexSpeedFast, apiKey: true},
 	}
@@ -279,7 +281,9 @@ func TestCodexExecutorCompactProfileSpeed(t *testing.T) {
 	}
 }
 
-// Payload rules run after the profile tier, on create paths and on compact.
+// Payload rules run after the profile tier on every request-building path:
+// HTTP create (plain and streaming), compact, and websocket create (plain and
+// streaming; duplex follow-up turns share the streaming preparation).
 func TestCodexProfileSpeedPayloadRulesWin(t *testing.T) {
 	useCodexServiceTierFixture(t)
 	// No protocol: create paths report "codex" and compact reports "openai-response".
@@ -292,45 +296,70 @@ func TestCodexProfileSpeedPayloadRulesWin(t *testing.T) {
 		{name: "filter removes injected tier", payload: config.PayloadConfig{Filter: []config.PayloadFilterRule{{Models: models, Params: []string{"service_tier"}}}}},
 		{name: "override replaces injected tier", payload: config.PayloadConfig{Override: []config.PayloadRule{{Models: models, Params: map[string]any{"service_tier": "flex"}}}}, wantTier: "flex"},
 	}
+	transports := []struct {
+		name      string
+		websocket bool
+		stream    bool
+		alt       string
+	}{
+		{name: "http"},
+		{name: "http-stream", stream: true},
+		{name: "compact", alt: "responses/compact"},
+		{name: "websocket", websocket: true},
+		{name: "websocket-stream", websocket: true, stream: true},
+	}
 	for _, tc := range cases {
-		for _, alt := range []string{"", "responses/compact"} {
-			t.Run(tc.name+"/alt="+alt, func(t *testing.T) {
+		for _, tr := range transports {
+			t.Run(tc.name+"/"+tr.name, func(t *testing.T) {
+				cfg := codexSpeedTestConfig(config.CodexSpeedUltrafast, false)
+				cfg.Payload = tc.payload
+				req := cliproxyexecutor.Request{Model: tierFixtureUltraModel, Payload: []byte(`{"model":"gpt-fixture-ultrafast","input":[{"type":"message","role":"user","content":"history"}]}`)}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: tr.stream, Alt: tr.alt}
+				if tr.websocket {
+					var rec codexWebsocketHintRecorder
+					server := newCodexWebsocketHintServer(t, &rec)
+					defer server.Close()
+					auth := codexOAuthTestAuth(server.URL)
+					auth.ID = "codex-oauth-payload-rules-" + tr.name
+					runCodexTestRequest(t, NewCodexWebsocketsExecutor(cfg), auth, req, opts)
+					rec.mu.Lock()
+					defer rec.mu.Unlock()
+					if len(rec.serviceTiers) != 1 {
+						t.Fatalf("frames = %+v, want one", rec.frames)
+					}
+					assertCapturedServiceTier(t, rec.serviceTiers[0], tc.wantTier)
+					return
+				}
 				var captured capturedCodexRequest
 				server := newCodexRoutingHintServer(t, &captured)
 				defer server.Close()
-
-				cfg := codexSpeedTestConfig(config.CodexSpeedUltrafast, false)
-				cfg.Payload = tc.payload
-				executor := NewCodexExecutor(cfg)
-				payload := []byte(`{"model":"gpt-fixture-ultrafast","input":[{"type":"message","role":"user","content":"history"}]}`)
-				if _, err := executor.Execute(context.Background(), codexOAuthTestAuth(server.URL), cliproxyexecutor.Request{Model: tierFixtureUltraModel, Payload: payload}, cliproxyexecutor.Options{
-					SourceFormat: sdktranslator.FromString("openai-response"),
-					Alt:          alt,
-				}); err != nil {
-					t.Fatalf("Execute error: %v", err)
-				}
+				runCodexTestRequest(t, NewCodexExecutor(cfg), codexOAuthTestAuth(server.URL), req, opts)
 				assertCapturedServiceTier(t, captured.serviceTier, tc.wantTier)
 			})
 		}
 	}
 }
 
-// The OpenAI Responses translator drops a client tier it does not know (auto),
-// so the request counts as one without a tier and gets the profile tier.
+// The OpenAI Responses translator drops a client tier it does not know (auto,
+// flex), so the request counts as one without a tier and gets the profile tier.
 func TestCodexProfileSpeedAfterTranslatorDropsClientTier(t *testing.T) {
 	useCodexServiceTierFixture(t)
-	var captured capturedCodexRequest
-	server := newCodexRoutingHintServer(t, &captured)
-	defer server.Close()
+	for _, clientTier := range []string{"auto", "flex"} {
+		t.Run(clientTier, func(t *testing.T) {
+			var captured capturedCodexRequest
+			server := newCodexRoutingHintServer(t, &captured)
+			defer server.Close()
 
-	executor := NewCodexExecutor(codexSpeedTestConfig(config.CodexSpeedFast, false))
-	payload := []byte(`{"model":"gpt-fixture-priority","service_tier":"auto","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
-	if _, err := executor.Execute(context.Background(), codexOAuthTestAuth(server.URL), cliproxyexecutor.Request{Model: tierFixturePriorityModel, Payload: payload}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai-response"),
-	}); err != nil {
-		t.Fatalf("Execute error: %v", err)
+			executor := NewCodexExecutor(codexSpeedTestConfig(config.CodexSpeedFast, false))
+			payload := []byte(`{"model":"gpt-fixture-priority","service_tier":"` + clientTier + `","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+			if _, err := executor.Execute(context.Background(), codexOAuthTestAuth(server.URL), cliproxyexecutor.Request{Model: tierFixturePriorityModel, Payload: payload}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-response"),
+			}); err != nil {
+				t.Fatalf("Execute error: %v", err)
+			}
+			assertCapturedServiceTier(t, captured.serviceTier, "priority")
+		})
 	}
-	assertCapturedServiceTier(t, captured.serviceTier, "priority")
 }
 
 func assertCapturedServiceTier(t *testing.T, got ojson.Result, want string) {
@@ -473,9 +502,7 @@ func TestRemoveCodexClientServiceTierDoc(t *testing.T) {
 			}
 			doc := ojson.NewDoc([]byte(tc.body))
 			removeCodexClientServiceTierDoc(context.Background(), codexSpeedTestConfig(config.CodexSpeedUltrafast, tc.ignoreClientTier), auth, doc)
-			if got := doc.Get("service_tier").String(); got != tc.wantTier {
-				t.Fatalf("service_tier = %q, want %q: %s", got, tc.wantTier, doc.Bytes())
-			}
+			assertCapturedServiceTier(t, doc.Get("service_tier"), tc.wantTier)
 		})
 	}
 }

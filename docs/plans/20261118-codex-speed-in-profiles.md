@@ -139,7 +139,7 @@
 - [x] write a test that a config without the new fields passes `normalizeProfileProviders` for the shared profile and a key profile, and that `EffectiveProviders` returns `standard` for Codex and an empty speed for Claude
 - [x] write save tests with `writeLoad`, `saveRead` and `routingNode`: a key profile keeps both fields; a config without them saves byte-identical; clearing a field of a key profile removes it from the file
 - [x] write a save test that clears `routing.providers.codex.speed` and `ignore-client-tier` on the shared profile, saves, reloads, and finds the keys gone; if a cleared key survives, extend `shouldPruneNestedMappingKeys` (`internal/config/config_yaml.go:947`) to these two keys under `routing.providers.codex`
-  - ⚠️ the cleared keys survived; `shouldPruneNestedMappingKeys` prunes a whole mapping, so the fix is a dedicated `dropClearedSharedCodexSpeedFields` in `internal/config/config_yaml.go` that drops only these two keys before the merge. `TestGetRoutingProfilesProvidersView` (management) now expects `speed: standard` in the effective Codex view.
+  - ⚠️ the cleared keys survived; `shouldPruneNestedMappingKeys` prunes a whole mapping, so the fix is a dedicated `dropClearedSharedCodexSpeedFields` in `internal/config/config_yaml.go` that drops only these two keys before the merge. It keeps a key that already holds the default (`null`, `false`, `""`) and removes a `codex` mapping, and then a `providers` mapping, that the removal leaves empty. `TestGetRoutingProfilesProvidersView` (management) now expects `speed: standard` in the effective Codex view.
 - [x] run `go test ./internal/config/...` (includes `TestV8ExampleLoadsAndRoundTrips`), gofmt, compile check - must pass before task 2
 
 ### Task 2: Export the Codex speed settings of the request's routing profile
@@ -158,6 +158,7 @@
 - [x] write one end-to-end smoke case per transport (HTTP non-stream, HTTP stream, websocket execute, websocket stream) with `newCodexRoutingHintServer` / `newCodexWebsocketHintServer` and `codexOAuthTestAuth`, asserting the upstream body and `X-Codex-Routing-Hint`; assert the websocket hint on a fresh connection only
 - [x] write compact tests modelled on `codex_executor_compact_test.go:1365`: the flag strips a client `service_tier`, speed `fast` injects `priority`, an API-key auth is untouched
 - [x] write tests that payload rules still win on a create path and on compact: a filter on `service_tier` removes the injected tier, an override replaces it (the rule names no protocol: create paths report `codex`, compact reports `openai-response`)
+  - ➕ review: the same test runs on all five paths (HTTP plain and streaming, compact, websocket plain and streaming), as AGENTS.md requires for request-building paths
 - [x] write a test for translator normalization: an OpenAI Responses request with `service_tier: "auto"` and `ignore-client-tier` false goes upstream with the profile's tier
 - [x] write a manager-driven test in `internal/runtime/executor` (pattern of `TestCodexDuplexSummaryCredentialFailuresThroughManager`): `cliproxyauth.NewManager`, the real Codex executor, `SetConfig`, key contexts built like `ginContextWithKey`; two keys with different key profiles and one key without a profile get different tiers, the key settings differ from the shared ones, and after `SetConfig` with a changed speed the next `Execute` uses the new value
 - [x] run `go test ./internal/runtime/executor/... ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 4
@@ -196,6 +197,8 @@
 - [x] `docs/management-api-v8.md`: remove the `/config/oauth/providers/codex/fast-mode` row (`:43`) and add both fields to the routing profile sections and the `GET /routing/profiles` description
 - [x] `docs/management-api-v8.md`: describe the behavior a client must know: a PATCH for a key without a profile creates a profile holding only the written fields, so a full profile must be sent when one is created; `/responses/compact` follows the same rule and `response.steer` only loses the client tier; a tier the translator drops (`auto`, `flex`) counts as absent; Home ignores key profiles; an open duplex websocket session keeps its starting profile until it reconnects
 - [x] ➕ `docs/management-api-v8.md`: state that a PATCH with `null` for `speed` or `ignore-client-tier` stores `null` (read as the default) and that DELETE of the field path removes it from the file
+- [x] ➕ `README.md`: an upgrade note that `oauth.providers.codex.fast-mode` was removed and the profile speed replaces it
+- [x] ➕ `examples/plugin/README.md`, `README_CN.md` and `codex-service-tier/README.md`: a tier the example plugin sets counts as the client tier, so `ignore-client-tier: true` removes it
 - [x] `AGENTS.md`: add one sentence to the `sdk/cliproxy/auth` paragraph naming the accessor and the rule that the Codex executor reads the speed policy from the context profile
 - [x] re-read the `config.example.yaml` comments written in Tasks 1 and 5 against the final behavior and correct them if they drifted; re-run `go test ./internal/config/...` when the file changes
 
@@ -212,8 +215,8 @@
 ### Resolution
 1. Skip when the auth is a Codex API key.
 2. Read `speed` and `ignore-client-tier` from the context profile; without a profile, from the shared profile of the executor config.
-3. If the body has `service_tier` and `ignore-client-tier` is false, stop.
-4. If the body has `service_tier` and `ignore-client-tier` is true, delete the field.
+3. If the body has a non-blank string `service_tier` and `ignore-client-tier` is false, stop.
+4. Otherwise delete any `service_tier`: the client tier under `ignore-client-tier`, or a null, blank or non-string value, which counts as absent.
 5. Choose the tier: `ultrafast` -> first advertised of [`ultrafast`, `priority`]; `fast` -> `priority` when advertised; `standard` -> none.
 6. Set `service_tier` when a tier was chosen. Payload rules run afterwards.
 
