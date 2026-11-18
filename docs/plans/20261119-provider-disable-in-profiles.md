@@ -140,12 +140,13 @@
 - [x] run `go test ./sdk/cliproxy/auth/... ./internal/api/... ./internal/client/codex/...` - must pass before task 4
 
 ### Task 4: Keep fallbacks and pinned websocket auths away from a disabled provider
-- [ ] in `providerFallbackFor`, build no Claude -> Codex fallback when the profile disables Codex (covers `auto`, `always` and `hasProviderFallbackAfterError`)
-- [ ] in `providerPolicyAllows` (`sdk/cliproxy/auth/provider_policy.go`), return false for any auth whose provider the profile disables, before the mode checks, reading the flag through `providerMode`; update the function comment
-- [ ] write tests in `provider_fallback_test.go`: Claude enabled with fallback `target: codex` in `auto` mode and Codex disabled - a failing Claude primary returns the primary error and the Codex leg never runs; in `always` mode the Claude primary runs and Codex is never called; `hasProviderFallbackAfterError` returns false for a 429 and a 503 with Codex disabled and true with Codex enabled
-- [ ] add rows to `TestRoutingPolicyAllowsAuth` (`sdk/cliproxy/auth/provider_policy_test.go:414`): an OAuth and an API-key auth of a disabled provider -> false in both modes; the other provider -> true; `providerPolicy` false -> true
-- [ ] write a Responses websocket test: a session pinned to a Codex auth, Codex then disabled in the key profile and no other target able to serve the turn - the next turn gets the 403 and never reaches upstream
-- [ ] run `go test ./sdk/cliproxy/auth/... ./sdk/api/...` and `go test -race ./sdk/cliproxy/auth/...` - must pass before task 5
+- [x] in `providerFallbackFor`, build no Claude -> Codex fallback when the profile disables Codex (covers `auto`, `always` and `hasProviderFallbackAfterError`)
+- [x] in `providerPolicyAllows` (`sdk/cliproxy/auth/provider_policy.go`), return false for any auth whose provider the profile disables, before the mode checks, reading the flag through `providerMode`; update the function comment
+- [x] write tests in `provider_fallback_test.go`: Claude enabled with fallback `target: codex` in `auto` mode and Codex disabled - a failing Claude primary returns the primary error and the Codex leg never runs; in `always` mode the Claude primary runs and Codex is never called; `hasProviderFallbackAfterError` returns false for a 429 and a 503 with Codex disabled and true with Codex enabled
+- [x] add rows to `TestRoutingPolicyAllowsAuth` (`sdk/cliproxy/auth/provider_policy_test.go:414`): an OAuth and an API-key auth of a disabled provider -> false in both modes; the other provider -> true; `providerPolicy` false -> true
+- [x] write a Responses websocket test: a session pinned to a Codex auth, Codex then disabled in the key profile and no other target able to serve the turn - the next turn gets the 403 and never reaches upstream
+- [x] ➕ expose the refusal on the Responses websocket: `shouldExposeResponsesUpstreamError` closed the socket without an error event for a 403 (only terminal-auth, 429/cooldown and request faults were exposed), so the client saw an abnormal close and would reconnect in a loop; added the exported `coreauth.IsProviderDisabledError` and exposed it there (test `TestResponsesWebsocketPinnedTurnRefusedWhenCodexDisabled` in `openai_responses_websocket_provider_disabled_test.go`, full create and incremental)
+- [x] run `go test ./sdk/cliproxy/auth/... ./sdk/api/...` and `go test -race ./sdk/cliproxy/auth/...` - must pass before task 5
 
 ### Task 5: Lock the management API behavior for `disabled`
 - [ ] no view change is needed: `disabled` reaches `GET /v8/management/routing/profiles` through `effectiveProvidersView` (`internal/api/handlers/management/routing_profiles.go:38-46`); the GET tests below cover it

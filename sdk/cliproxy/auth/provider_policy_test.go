@@ -416,12 +416,17 @@ func TestRoutingPolicyAllowsAuth(t *testing.T) {
 	key := providerPolicyTestAuth{"rpa-codex-key", "codex", AuthKindAPIKey, "codex-key"}
 	otherKey := providerPolicyTestAuth{"rpa-codex-key-2", "codex", AuthKindAPIKey, "codex-key-2"}
 	geminiKey := providerPolicyTestAuth{"rpa-gemini-key", "gemini", AuthKindAPIKey, "gemini-key"}
+	claudeOAuth := providerPolicyTestAuth{"rpa-claude-oauth", "claude", AuthKindOAuth, "claude-oauth"}
 
 	apiModeCfg := func() *internalconfig.Config {
 		cfg := &internalconfig.Config{}
 		withAPIModeRouting(cfg, "codex", key.index)
 		return cfg
 	}
+	disabledSubscriptionCfg := &internalconfig.Config{}
+	disabledSubscriptionCfg.Routing.Providers.Codex.Disabled = true
+	disabledAPICfg := apiModeCfg()
+	disabledAPICfg.Routing.Providers.Codex.Disabled = true
 	homeCfg := apiFallbackConfig("codex", key.index)
 	homeCfg.Home.Enabled = true
 	keyProfileCfg := apiFallbackConfig("codex", key.index)
@@ -451,9 +456,15 @@ func TestRoutingPolicyAllowsAuth(t *testing.T) {
 		{"shared profile without client key", keyProfileCfg, false, ginContextWithKey(""), key.id, false},
 		{"key profile overrides shared", keyProfileCfg, false, ginContextWithKey(routingTestKeyA), key.id, true},
 		{"key profile rejects oauth", keyProfileCfg, false, ginContextWithKey(routingTestKeyA), oauth.id, false},
+		{"disabled subscription mode oauth", disabledSubscriptionCfg, false, nil, oauth.id, false},
+		{"disabled subscription mode api key", disabledSubscriptionCfg, false, nil, key.id, false},
+		{"disabled api mode named key", disabledAPICfg, false, nil, key.id, false},
+		{"disabled api mode oauth", disabledAPICfg, false, nil, oauth.id, false},
+		{"other provider of disabled", disabledSubscriptionCfg, false, nil, claudeOAuth.id, true},
+		{"disabled under plugin scheduler", disabledSubscriptionCfg, true, nil, oauth.id, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m, _ := providerPolicyTestManager(t, tc.cfg, oauth, key, otherKey, geminiKey)
+			m, _ := providerPolicyTestManager(t, tc.cfg, oauth, key, otherKey, geminiKey, claudeOAuth)
 			if tc.plugin {
 				m.SetPluginScheduler(&fakePluginScheduler{})
 			}

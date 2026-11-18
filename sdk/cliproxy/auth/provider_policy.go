@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -32,6 +33,14 @@ func (e *providerDisabledError) StatusCode() int { return http.StatusForbidden }
 // IsRequestScoped keeps the refusal away from credential cooldown.
 func (e *providerDisabledError) IsRequestScoped() bool { return true }
 
+// IsProviderDisabledError reports whether err is the refusal of a provider the
+// request's routing profile disables. The refusal is final for the client key,
+// so transports that hide transient failures still surface it.
+func IsProviderDisabledError(err error) bool {
+	var disabledErr *providerDisabledError
+	return errors.As(err, &disabledErr) && disabledErr != nil
+}
+
 // refuseDisabledProvider logs the refusal of provider and returns the error the
 // client receives. The message names the profile kind, never the key or its hash.
 func refuseDisabledProvider(ctx context.Context, profile *routingProfile, provider string) error {
@@ -60,14 +69,17 @@ func (m *Manager) refuseDisabledSelection(ctx context.Context, provider string) 
 	return ctx, nil
 }
 
-// providerPolicyAllows applies the per-provider mode of the routing profile:
-// subscription mode keeps API-key credentials out of the pool, api mode allows
-// only the API-key credential named by api-credential. Providers without a
-// policy are unaffected.
+// providerPolicyAllows applies the per-provider policy of the routing profile:
+// a disabled provider keeps every credential out of the pool, subscription mode
+// keeps API-key credentials out, api mode allows only the API-key credential
+// named by api-credential. Providers without a policy are unaffected.
 func providerPolicyAllows(profile *routingProfile, auth *Auth) bool {
 	policy, ok := profile.providerMode(auth.Provider)
 	if !ok {
 		return true
+	}
+	if policy.Disabled {
+		return false
 	}
 	kind := auth.AuthKind()
 	if policy.Mode == internalconfig.ProviderModeAPI {

@@ -29,7 +29,8 @@ type providerFallback struct {
 
 // providerFallbackFor resolves the fallback of the request's routing profile for
 // the first listed provider that has one, claude before codex. A pinned request
-// and a fallback leg never fall back, so fallbacks do not chain.
+// and a fallback leg never fall back, so fallbacks do not chain, and a profile
+// that disables Codex gets no Claude -> Codex fallback.
 func (m *Manager) providerFallbackFor(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) providerFallback {
 	if !m.ClaudeFallbackSupported() || pinnedAuthIDFromMetadata(opts.Metadata) != "" || routingFallbackLeg(ctx) {
 		return providerFallback{}
@@ -51,7 +52,9 @@ func (m *Manager) providerFallbackFor(ctx context.Context, providers []string, r
 		var fallback providerFallback
 		switch policy.Fallback.Target {
 		case config.ProviderFallbackCodex:
-			if provider == "claude" {
+			// A disabled Codex keeps the Claude fallback settings but never runs
+			// the leg; the leg calls the inner execute and skips the entry gate.
+			if codex, ok := profile.providerMode("codex"); provider == "claude" && !(ok && codex.Disabled) {
 				fallback = codexFallbackFor(policy.Fallback, eligibility, req, opts)
 			}
 		case config.ProviderFallbackAPI:

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -594,6 +595,17 @@ func assertProviderDisabledError(t *testing.T, err error, message string) {
 	if !isRequestScopedError(err) {
 		t.Fatal("refusal is not request-scoped")
 	}
+	if !IsProviderDisabledError(fmt.Errorf("wrapped: %w", err)) {
+		t.Fatal("IsProviderDisabledError misses the wrapped refusal")
+	}
+}
+
+func TestIsProviderDisabledErrorRejectsOtherErrors(t *testing.T) {
+	for _, err := range []error{nil, errors.New("forbidden"), &Error{HTTPStatus: http.StatusForbidden}, NewRequestScopedError("refused", http.StatusForbidden)} {
+		if IsProviderDisabledError(err) {
+			t.Fatalf("IsProviderDisabledError(%v) = true", err)
+		}
+	}
 }
 
 // assertNoAuthFailures checks that no registered auth recorded a failure.
@@ -887,4 +899,59 @@ func TestDirectSelectionWithCodexEnabled(t *testing.T) {
 			t.Fatalf("plugin scheduler refused the selection: %v", err)
 		}
 	})
+}
+
+// codexFallbackIntoDisabledConfig configures a Claude -> Codex fallback in mode
+// with Codex disabled or enabled.
+func codexFallbackIntoDisabledConfig(mode string, codexDisabled bool) *internalconfig.Config {
+	cfg := &internalconfig.Config{}
+	cfg.Routing.Providers.Claude.Fallback = internalconfig.ProviderFallbackConfig{
+		Target: internalconfig.ProviderFallbackCodex, Mode: mode,
+		Mappings: []internalconfig.ClaudeFallbackMapping{{From: "claude-opus-*", To: "gpt-6-astra"}},
+	}
+	cfg.Routing.Providers.Codex.Disabled = codexDisabled
+	return cfg
+}
+
+func TestClaudeFallbackSkipsDisabledCodex(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path+"/auto", func(t *testing.T) {
+			m, calls, _, _ := fallbackTestManager(t, "off", &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"})
+			m.SetConfig(codexFallbackIntoDisabledConfig("auto", true))
+			_, err := runFallbackPath(context.Background(), m, path, []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, cliproxyexecutor.Options{})
+			if status := statusCodeFromError(err); status != http.StatusTooManyRequests {
+				t.Fatalf("err = %v (status %d), want the primary 429", err, status)
+			}
+			if len(*calls) == 0 || countKind(*calls, "codex") != 0 {
+				t.Fatalf("calls = %v, want claude only", *calls)
+			}
+		})
+		t.Run(path+"/always", func(t *testing.T) {
+			m, calls, _, _ := fallbackTestManager(t, "off", nil)
+			m.SetConfig(codexFallbackIntoDisabledConfig("always", true))
+			body, err := runFallbackPath(context.Background(), m, path, []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5"}, cliproxyexecutor.Options{})
+			if err != nil || body != "primary" {
+				t.Fatalf("body = %q, err = %v, want the Claude primary", body, err)
+			}
+			if !reflect.DeepEqual(*calls, []string{"claude"}) {
+				t.Fatalf("calls = %v, want [claude]", *calls)
+			}
+		})
+	}
+}
+
+func TestHasProviderFallbackAfterErrorWithDisabledCodex(t *testing.T) {
+	req := cliproxyexecutor.Request{Model: "claude-opus-5"}
+	for _, codexDisabled := range []bool{true, false} {
+		for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+			m, _, _, _ := fallbackTestManager(t, "off", nil)
+			m.SetConfig(codexFallbackIntoDisabledConfig("auto", codexDisabled))
+			ctx := m.ensureRoutingProfile(context.Background())
+			got := m.hasProviderFallbackAfterError(ctx, []string{"claude"}, req, cliproxyexecutor.Options{}, &Error{HTTPStatus: status})
+			if got == codexDisabled {
+				t.Fatalf("codex disabled=%t status %d: hasProviderFallbackAfterError = %t", codexDisabled, status, got)
+			}
+		}
+	}
 }

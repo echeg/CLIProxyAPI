@@ -385,16 +385,17 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Request-shape failures, permanent auth failures, and terminal 429 quota or
-// model-cooldown failures (where credential failover has already exhausted all
-// eligible candidates) are exposed so the client can surface the final error
-// instead of reconnecting in a loop. Transient credential and transport failures
-// stay silent so the client reconnects with a full context resend.
+// Request-shape failures, permanent auth failures, a provider disabled by the
+// routing profile, and terminal 429 quota or model-cooldown failures (where
+// credential failover has already exhausted all eligible candidates) are exposed
+// so the client can surface the final error instead of reconnecting in a loop.
+// Transient credential and transport failures stay silent so the client
+// reconnects with a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
 	}
-	if coreauth.IsTerminalAuthError(errMsg.Error) {
+	if coreauth.IsTerminalAuthError(errMsg.Error) || coreauth.IsProviderDisabledError(errMsg.Error) {
 		return true
 	}
 	status := responsesWebsocketErrorStatus(errMsg)
