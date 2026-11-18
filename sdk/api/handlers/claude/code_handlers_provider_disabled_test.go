@@ -20,33 +20,43 @@ import (
 
 // A key profile that disables Claude refuses /v1/messages (non-streaming and
 // streaming) and count-tokens with 403 and the exact client-facing message,
-// without reaching the executor.
+// without reaching the executor. A shared-profile disable refuses a key
+// without its own profile with the shared message.
 func TestClaudeMessagesRefusedWhenProfileDisablesClaude(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const (
-		model     = "provider-disabled-claude-model"
-		clientKey = "sk-provider-disabled-client"
-		message   = "claude is disabled by the routing profile of this API key"
+		model         = "provider-disabled-claude-model"
+		clientKey     = "sk-provider-disabled-client"
+		keyMessage    = "claude is disabled by the routing profile of this API key"
+		sharedMessage = "claude is disabled by the routing profile"
 	)
 
 	for _, tc := range []struct {
 		name      string
 		path      string
 		streaming bool
+		shared    bool
 	}{
 		{name: "messages_non_stream", path: "/v1/messages"},
 		{name: "messages_stream", path: "/v1/messages", streaming: true},
 		{name: "count_tokens", path: "/v1/messages/count_tokens"},
+		{name: "shared_messages_non_stream", path: "/v1/messages", shared: true},
+		{name: "shared_messages_stream", path: "/v1/messages", streaming: true, shared: true},
+		{name: "shared_count_tokens", path: "/v1/messages/count_tokens", shared: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstreamCalls := 0
 			manager := coreauth.NewManager(nil, nil, nil)
-			manager.SetConfig(&internalconfig.Config{
-				SDKConfig: internalconfig.SDKConfig{APIKeys: []string{clientKey}},
-				Routing: internalconfig.RoutingConfig{KeyProfiles: map[string]*internalconfig.RoutingProfile{
-					clientKey: {Providers: internalconfig.ProvidersRoutingConfig{Claude: internalconfig.ProviderRoutingConfig{Disabled: true}}},
-				}},
-			})
+			cfg := &internalconfig.Config{SDKConfig: internalconfig.SDKConfig{APIKeys: []string{clientKey}}}
+			disabled := internalconfig.ProvidersRoutingConfig{Claude: internalconfig.ProviderRoutingConfig{Disabled: true}}
+			message := keyMessage
+			if tc.shared {
+				cfg.Routing.Providers = disabled
+				message = sharedMessage
+			} else {
+				cfg.Routing.KeyProfiles = map[string]*internalconfig.RoutingProfile{clientKey: {Providers: disabled}}
+			}
+			manager.SetConfig(cfg)
 			manager.RegisterExecutor(&issue7521ClaudeExecutor{
 				executeFn: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 					upstreamCalls++

@@ -809,6 +809,11 @@ func TestDisabledProviderNotEnforcedWithoutProviderPolicy(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(providers, []string{"claude", "codex"}) {
 			t.Fatalf("Home filter = %v, %v; want both providers kept", providers, err)
 		}
+		for _, provider := range []string{"claude", "codex"} {
+			if _, errSelect := m.refuseDisabledSelection(ginContextWithKey(routingTestKeyA), provider); errSelect != nil {
+				t.Fatalf("Home direct selection of %s refused: %v", provider, errSelect)
+			}
+		}
 	})
 }
 

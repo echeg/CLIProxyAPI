@@ -156,11 +156,11 @@
 - [x] run `go test ./internal/api/...` - must pass before task 6
 
 ### Task 6: Verify acceptance criteria
-- [ ] confirm each Success Criterion maps to a test from Tasks 1-5; add any missing one
-- [ ] run `go build ./...`
-- [ ] run `go vet ./...` - all issues must be fixed
-- [ ] run `go test ./...`
-- [ ] run `go test -race ./sdk/cliproxy/auth/...`
+- [x] confirm each Success Criterion maps to a test from Tasks 1-5; add any missing one (added `TestResponsesCodexServedWhenProfileDisablesClaude` for `/v1/responses` with a Codex model under a Claude-disabled key profile, shared-profile cases in `TestClaudeMessagesRefusedWhenProfileDisablesClaude`, and a Home check of direct selection in `TestDisabledProviderNotEnforcedWithoutProviderPolicy`)
+- [x] run `go build ./...`
+- [x] run `go vet ./...` - all issues must be fixed
+- [x] run `go test ./...`
+- [x] run `go test -race ./sdk/cliproxy/auth/...`
 
 ### Task 7: [Final] Update documentation
 - [ ] `docs/management-api-v8.md`: add `disabled` to the YAML example of "Per-provider mode and API fallback" (~230-252) and to the key-profile default sentence (~256-259)
