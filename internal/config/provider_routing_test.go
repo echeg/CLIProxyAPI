@@ -36,6 +36,11 @@ func TestProvidersRoutingValidation(t *testing.T) {
 		{name: "codex target api", body: `{codex: {api-credential: idx-2, fallback: {target: API}}}`},
 		{name: "claude target codex", body: `{claude: {fallback: {target: codex, mode: always, mappings: [{from: 'claude-*', to: gpt-x}]}}}`},
 		{name: "api credential kept with subscription", body: `{claude: {api-credential: idx-1}}`},
+		{name: "codex speed and flag", body: `{codex: {speed: ultrafast, ignore-client-tier: true}}`},
+		{name: "claude empty speed and false flag", body: `{claude: {speed: '', ignore-client-tier: false}}`},
+		{name: "unknown codex speed", body: `{codex: {speed: turbo}}`, wantErr: ".codex.speed has unsupported value"},
+		{name: "claude speed", body: `{claude: {speed: fast}}`, wantErr: ".claude.speed is only supported for codex"},
+		{name: "claude ignore-client-tier", body: `{claude: {ignore-client-tier: true}}`, wantErr: ".claude.ignore-client-tier is only supported for codex"},
 		{name: "unknown mode", body: `{claude: {mode: hybrid}}`, wantErr: ".claude.mode has unsupported value"},
 		{name: "unknown target", body: `{codex: {fallback: {target: gemini}}}`, wantErr: ".codex.fallback.target has unsupported value"},
 		{name: "codex target codex", body: `{codex: {fallback: {target: codex, mappings: [{from: a, to: b}]}}}`, wantErr: ".codex.fallback.target codex is only supported for claude"},
@@ -208,11 +213,12 @@ func TestEffectiveProvidersConvertsLegacy(t *testing.T) {
 		t.Fatalf("key effective = %+v", key)
 	}
 
-	// An omitted providers block means subscription and fallback off for both providers.
+	// An omitted providers block means subscription and fallback off for both
+	// providers, and speed standard for Codex only.
 	empty := RoutingProfile{}.EffectiveProviders()
 	want := ProvidersRoutingConfig{
 		Claude: ProviderRoutingConfig{Mode: ProviderModeSubscription, Fallback: ProviderFallbackConfig{Target: ProviderFallbackOff}},
-		Codex:  ProviderRoutingConfig{Mode: ProviderModeSubscription, Fallback: ProviderFallbackConfig{Target: ProviderFallbackOff}},
+		Codex:  ProviderRoutingConfig{Mode: ProviderModeSubscription, Fallback: ProviderFallbackConfig{Target: ProviderFallbackOff}, Speed: CodexSpeedStandard},
 	}
 	if !reflect.DeepEqual(empty, want) {
 		t.Fatalf("empty effective = %+v, want %+v", empty, want)
@@ -304,5 +310,92 @@ func TestProvidersNormalizeIsIdempotent(t *testing.T) {
 	}
 	if first.Claude.Fallback.Mode != "auto" || first.Claude.Fallback.Mappings[0].From != "claude-*" {
 		t.Fatalf("fallback not canonicalized: %+v", first.Claude.Fallback)
+	}
+}
+
+func TestProvidersRoutingCodexSpeedNormalize(t *testing.T) {
+	cases := []struct {
+		name       string
+		providers  ProvidersRoutingConfig
+		wantErr    string
+		wantSpeed  string
+		wantIgnore bool
+	}{
+		{name: "unset", providers: ProvidersRoutingConfig{}},
+		{name: "standard", providers: ProvidersRoutingConfig{Codex: ProviderRoutingConfig{Speed: "standard"}}, wantSpeed: CodexSpeedStandard},
+		{name: "fast", providers: ProvidersRoutingConfig{Codex: ProviderRoutingConfig{Speed: "fast"}}, wantSpeed: CodexSpeedFast},
+		{name: "ultrafast with flag", providers: ProvidersRoutingConfig{Codex: ProviderRoutingConfig{Speed: "ultrafast", IgnoreClientTier: true}}, wantSpeed: CodexSpeedUltrafast, wantIgnore: true},
+		{name: "case and whitespace", providers: ProvidersRoutingConfig{Codex: ProviderRoutingConfig{Speed: "  UltraFast "}}, wantSpeed: CodexSpeedUltrafast},
+		{name: "blank speed stays empty", providers: ProvidersRoutingConfig{Codex: ProviderRoutingConfig{Speed: "   "}}},
+		{name: "flag only", providers: ProvidersRoutingConfig{Codex: ProviderRoutingConfig{IgnoreClientTier: true}}, wantIgnore: true},
+		{name: "unknown value", providers: ProvidersRoutingConfig{Codex: ProviderRoutingConfig{Speed: "priority"}}, wantErr: `routing.providers.codex.speed has unsupported value "priority"`},
+		{name: "unknown value under claude", providers: ProvidersRoutingConfig{Claude: ProviderRoutingConfig{Speed: "turbo"}}, wantErr: `routing.providers.claude.speed has unsupported value "turbo"`},
+		{name: "claude speed", providers: ProvidersRoutingConfig{Claude: ProviderRoutingConfig{Speed: "fast"}}, wantErr: "routing.providers.claude.speed is only supported for codex"},
+		{name: "claude standard speed", providers: ProvidersRoutingConfig{Claude: ProviderRoutingConfig{Speed: "standard"}}, wantErr: "routing.providers.claude.speed is only supported for codex"},
+		{name: "claude flag", providers: ProvidersRoutingConfig{Claude: ProviderRoutingConfig{IgnoreClientTier: true}}, wantErr: "routing.providers.claude.ignore-client-tier is only supported for codex"},
+		{name: "claude empty speed and false flag", providers: ProvidersRoutingConfig{Claude: ProviderRoutingConfig{Speed: " ", IgnoreClientTier: false}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			providers := tc.providers
+			_, errNormalize := providers.Normalize("routing.providers")
+			if tc.wantErr != "" {
+				if errNormalize == nil || errNormalize.Error() != tc.wantErr {
+					t.Fatalf("error = %v, want %q", errNormalize, tc.wantErr)
+				}
+				return
+			}
+			if errNormalize != nil {
+				t.Fatalf("unexpected error: %v", errNormalize)
+			}
+			if providers.Codex.Speed != tc.wantSpeed || providers.Codex.IgnoreClientTier != tc.wantIgnore {
+				t.Fatalf("stored codex = %+v, want speed %q ignore %v", providers.Codex, tc.wantSpeed, tc.wantIgnore)
+			}
+			if providers.Claude.Speed != "" || providers.Claude.IgnoreClientTier {
+				t.Fatalf("stored claude = %+v", providers.Claude)
+			}
+		})
+	}
+}
+
+func TestProvidersRoutingCodexSpeedDefaults(t *testing.T) {
+	captureStandardLogs(t)
+	raw := "config-version: 8\naccess:\n  api-keys: [\"" + providersTestKey + "\", \"other-key\"]\nrouting:\n" +
+		"  providers: {codex: {mode: subscription}}\n" +
+		"  key-profiles:\n    \"" + providersTestKey + "\":\n      session-affinity: true\n" +
+		"    other-key:\n      providers: {codex: {speed: Fast, ignore-client-tier: true}}\n"
+	cfg, errParse := ParseConfigBytes([]byte(raw))
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	shared := cfg.Routing.SharedProfile()
+	key := *cfg.Routing.KeyProfiles[providersTestKey]
+	for name, profile := range map[string]RoutingProfile{"shared": shared, "key": key} {
+		if profile.Providers.Codex.Speed != "" || profile.Providers.Codex.IgnoreClientTier {
+			t.Fatalf("%s stored codex = %+v, want empty", name, profile.Providers.Codex)
+		}
+		effective := profile.EffectiveProviders()
+		if effective.Codex.Speed != CodexSpeedStandard || effective.Codex.IgnoreClientTier {
+			t.Fatalf("%s effective codex = %+v, want standard", name, effective.Codex)
+		}
+		if effective.Claude.Speed != "" || effective.Claude.IgnoreClientTier {
+			t.Fatalf("%s effective claude = %+v, want empty speed", name, effective.Claude)
+		}
+	}
+	other := cfg.Routing.KeyProfiles["other-key"]
+	if other.Providers.Codex.Speed != CodexSpeedFast || !other.Providers.Codex.IgnoreClientTier {
+		t.Fatalf("other key stored codex = %+v", other.Providers.Codex)
+	}
+	if effective := other.EffectiveProviders().Codex; effective.Speed != CodexSpeedFast || !effective.IgnoreClientTier {
+		t.Fatalf("other key effective codex = %+v", effective)
+	}
+
+	// The effective view passes validation again for both scopes.
+	for name, profile := range map[string]RoutingProfile{"shared": shared, "key": key} {
+		providers := profile.Providers.Clone()
+		legacy := profile.ClaudeFallback
+		if errNormalize := normalizeProfileProviders(&providers, &legacy, "routing.providers", ""); errNormalize != nil {
+			t.Fatalf("%s: %v", name, errNormalize)
+		}
 	}
 }

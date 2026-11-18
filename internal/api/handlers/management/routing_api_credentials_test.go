@@ -49,6 +49,9 @@ func registerRoutingCredentials(t *testing.T, manager *coreauth.Manager) {
 func TestGetRoutingProfilesProvidersView(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	offView := config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackOff, Mappings: []config.ClaudeFallbackMapping{}}}
+	// The effective Codex block also carries the default speed.
+	codexOffView := offView
+	codexOffView.Speed = config.CodexSpeedStandard
 	legacyMappings := []config.ClaudeFallbackMapping{{From: "claude-*", To: "gpt-6-sol"}}
 	cases := []struct {
 		name       string
@@ -60,21 +63,21 @@ func TestGetRoutingProfilesProvidersView(t *testing.T) {
 		{
 			name:       "legacy only",
 			routing:    "  claude-fallback: {enabled: true, mode: always, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}\n  key-profiles:\n    key-a:\n      session-affinity: true\n",
-			wantShared: config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackCodex, Mode: "always", Mappings: legacyMappings}}, Codex: offView},
-			wantKey:    config.ProvidersRoutingConfig{Claude: offView, Codex: offView},
+			wantShared: config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackCodex, Mode: "always", Mappings: legacyMappings}}, Codex: codexOffView},
+			wantKey:    config.ProvidersRoutingConfig{Claude: offView, Codex: codexOffView},
 			wantLegacy: true,
 		},
 		{
 			name:       "providers only",
 			routing:    "  providers: {claude: {api-credential: claude-idx, fallback: {target: api}}, codex: {mode: api, api-credential: codex-idx}}\n  key-profiles:\n    key-a:\n      providers: {codex: {api-credential: codex-idx, fallback: {target: api}}}\n",
-			wantShared: config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, APICredential: "claude-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackAPI, Mappings: []config.ClaudeFallbackMapping{}}}, Codex: config.ProviderRoutingConfig{Mode: config.ProviderModeAPI, APICredential: "codex-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackOff, Mappings: []config.ClaudeFallbackMapping{}}}},
-			wantKey:    config.ProvidersRoutingConfig{Claude: offView, Codex: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, APICredential: "codex-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackAPI, Mappings: []config.ClaudeFallbackMapping{}}}},
+			wantShared: config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, APICredential: "claude-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackAPI, Mappings: []config.ClaudeFallbackMapping{}}}, Codex: config.ProviderRoutingConfig{Mode: config.ProviderModeAPI, APICredential: "codex-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackOff, Mappings: []config.ClaudeFallbackMapping{}}, Speed: config.CodexSpeedStandard}},
+			wantKey:    config.ProvidersRoutingConfig{Claude: offView, Codex: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, APICredential: "codex-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackAPI, Mappings: []config.ClaudeFallbackMapping{}}, Speed: config.CodexSpeedStandard}},
 		},
 		{
 			name:       "mixed",
 			routing:    "  providers: {codex: {api-credential: codex-idx, fallback: {target: api}}}\n  key-profiles:\n    key-a:\n      claude-fallback: {enabled: true, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}\n      providers: {claude: {api-credential: claude-idx}}\n",
-			wantShared: config.ProvidersRoutingConfig{Claude: offView, Codex: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, APICredential: "codex-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackAPI, Mappings: []config.ClaudeFallbackMapping{}}}},
-			wantKey:    config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, APICredential: "claude-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackCodex, Mappings: legacyMappings}}, Codex: offView},
+			wantShared: config.ProvidersRoutingConfig{Claude: offView, Codex: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, APICredential: "codex-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackAPI, Mappings: []config.ClaudeFallbackMapping{}}, Speed: config.CodexSpeedStandard}},
+			wantKey:    config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Mode: config.ProviderModeSubscription, APICredential: "claude-idx", Fallback: config.ProviderFallbackConfig{Target: config.ProviderFallbackCodex, Mappings: legacyMappings}}, Codex: codexOffView},
 		},
 	}
 	for _, tc := range cases {

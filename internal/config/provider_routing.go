@@ -21,6 +21,15 @@ const (
 	ProviderFallbackAPI   = "api"
 )
 
+// Codex speeds of a routing profile. An empty stored speed means standard.
+// The executor turns a speed into a service_tier the model's catalog entry
+// advertises: ultrafast falls back to fast (priority), fast falls back to none.
+const (
+	CodexSpeedStandard  = "standard"
+	CodexSpeedFast      = "fast"
+	CodexSpeedUltrafast = "ultrafast"
+)
+
 // ProvidersRoutingConfig holds the per-provider mode and fallback of a routing profile.
 type ProvidersRoutingConfig struct {
 	Claude ProviderRoutingConfig `yaml:"claude,omitempty" json:"claude"`
@@ -29,10 +38,14 @@ type ProvidersRoutingConfig struct {
 
 // ProviderRoutingConfig is the routing policy of one provider inside a profile.
 // APICredential is the auth_index of an api-keys entry of the same provider.
+// Speed and IgnoreClientTier apply to Codex subscription requests only; they
+// must stay unset for other providers.
 type ProviderRoutingConfig struct {
-	Mode          string                 `yaml:"mode,omitempty" json:"mode"`
-	APICredential string                 `yaml:"api-credential,omitempty" json:"api-credential"`
-	Fallback      ProviderFallbackConfig `yaml:"fallback,omitempty" json:"fallback"`
+	Mode             string                 `yaml:"mode,omitempty" json:"mode"`
+	APICredential    string                 `yaml:"api-credential,omitempty" json:"api-credential"`
+	Fallback         ProviderFallbackConfig `yaml:"fallback,omitempty" json:"fallback"`
+	Speed            string                 `yaml:"speed,omitempty" json:"speed"`
+	IgnoreClientTier bool                   `yaml:"ignore-client-tier,omitempty" json:"ignore-client-tier"`
 }
 
 // ProviderFallbackConfig selects what runs after a failed primary round.
@@ -108,6 +121,23 @@ func (p *ProviderRoutingConfig) normalize(provider, fieldPath string) ([]string,
 	p.APICredential = strings.TrimSpace(p.APICredential)
 	p.Fallback.Target = strings.ToLower(strings.TrimSpace(p.Fallback.Target))
 	p.Fallback.Mode = strings.ToLower(strings.TrimSpace(p.Fallback.Mode))
+	p.Speed = strings.ToLower(strings.TrimSpace(p.Speed))
+
+	switch p.Speed {
+	case "", CodexSpeedStandard, CodexSpeedFast, CodexSpeedUltrafast:
+	default:
+		return nil, fmt.Errorf("%s.speed has unsupported value %q", fieldPath, p.Speed)
+	}
+	if provider != "codex" {
+		// An empty speed and a false flag stay valid so a profile read from the
+		// API can be written back unchanged.
+		if p.Speed != "" {
+			return nil, fmt.Errorf("%s.speed is only supported for codex", fieldPath)
+		}
+		if p.IgnoreClientTier {
+			return nil, fmt.Errorf("%s.ignore-client-tier is only supported for codex", fieldPath)
+		}
+	}
 
 	// Empty values stay empty in the stored config so saves remain byte-stable;
 	// validation runs on the effective values.
@@ -145,7 +175,8 @@ func (p *ProviderRoutingConfig) normalize(provider, fieldPath string) ([]string,
 
 // effectiveProviders returns providers with the legacy claude-fallback block
 // converted when providers.claude.fallback is unset, and default mode and
-// target filled in. It does not validate.
+// target filled in. The Codex speed defaults to standard here and not in
+// applyDefaults, which runs for Claude too. It does not validate.
 func effectiveProviders(providers ProvidersRoutingConfig, legacy ClaudeFallbackConfig) ProvidersRoutingConfig {
 	out := providers.Clone()
 	if out.Claude.Fallback.IsZero() && !legacy.IsZero() {
@@ -153,12 +184,16 @@ func effectiveProviders(providers ProvidersRoutingConfig, legacy ClaudeFallbackC
 	}
 	out.Claude.applyDefaults()
 	out.Codex.applyDefaults()
+	if out.Codex.Speed == "" {
+		out.Codex.Speed = CodexSpeedStandard
+	}
 	return out
 }
 
 // EffectiveProviders returns the providers policy of the profile: the legacy
 // claude-fallback block is converted when providers.claude.fallback is unset, and
-// an empty mode or target means subscription and off. Use it wherever the policy
+// an empty mode or target means subscription and off, and an empty Codex speed
+// means standard. Use it wherever the policy
 // is read; the stored Providers keeps only what the config file spells out.
 func (p RoutingProfile) EffectiveProviders() ProvidersRoutingConfig {
 	return effectiveProviders(p.Providers, p.ClaudeFallback)

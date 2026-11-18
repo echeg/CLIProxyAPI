@@ -168,3 +168,111 @@ routing:
 		t.Fatalf("key claude target = %q, want codex", got)
 	}
 }
+
+func TestSaveConfigCodexSpeedFields(t *testing.T) {
+	const withSpeed = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    codex:
+      mode: subscription
+      # shared speed
+      speed: fast
+      ignore-client-tier: true
+  key-profiles:
+    key-a:
+      session-affinity: true
+      providers:
+        codex:
+          speed: ultrafast
+          ignore-client-tier: true
+`
+	const withoutSpeed = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    codex:
+      mode: subscription
+  key-profiles:
+    key-a:
+      session-affinity: true
+      providers:
+        codex:
+          mode: subscription
+`
+
+	t.Run("key profile keeps both fields", func(t *testing.T) {
+		path, cfg := writeLoad(t, withSpeed)
+		saved := saveRead(t, path, cfg)
+		for _, node := range []string{"routing.key-profiles.key-a.providers.codex.speed", "routing.key-profiles.key-a.providers.codex.ignore-client-tier", "routing.providers.codex.speed", "routing.providers.codex.ignore-client-tier"} {
+			if routingNode(t, saved, node) == nil {
+				t.Fatalf("save dropped %s:\n%s", node, saved)
+			}
+		}
+		_, loaded := writeLoad(t, saved)
+		if got := loaded.Routing.KeyProfiles["key-a"].Providers.Codex; got.Speed != CodexSpeedUltrafast || !got.IgnoreClientTier {
+			t.Fatalf("key codex = %+v", got)
+		}
+		if got := loaded.Routing.Providers.Codex; got.Speed != CodexSpeedFast || !got.IgnoreClientTier {
+			t.Fatalf("shared codex = %+v", got)
+		}
+	})
+
+	t.Run("config without the fields saves byte-identical", func(t *testing.T) {
+		// The first save renders the file in the canonical layout; the fields
+		// must not appear in it and a second save must not change a byte.
+		path, cfg := writeLoad(t, withoutSpeed)
+		first := saveRead(t, path, cfg)
+		if strings.Contains(first, "speed") || strings.Contains(first, "ignore-client-tier") {
+			t.Fatalf("save added the new fields:\n%s", first)
+		}
+		_, reloaded := writeLoad(t, first)
+		if second := saveRead(t, path, reloaded); second != first {
+			t.Fatalf("second save changed the file:\n%s\n---\n%s", first, second)
+		}
+	})
+
+	t.Run("clearing the fields of a key profile removes them", func(t *testing.T) {
+		path, cfg := writeLoad(t, withSpeed)
+		cfg.Routing.KeyProfiles["key-a"].Providers.Codex.Speed = ""
+		cfg.Routing.KeyProfiles["key-a"].Providers.Codex.IgnoreClientTier = false
+		saved := saveRead(t, path, cfg)
+		for _, node := range []string{"routing.key-profiles.key-a.providers.codex.speed", "routing.key-profiles.key-a.providers.codex.ignore-client-tier"} {
+			if routingNode(t, saved, node) != nil {
+				t.Fatalf("cleared %s survived the save:\n%s", node, saved)
+			}
+		}
+		_, loaded := writeLoad(t, saved)
+		key := loaded.Routing.KeyProfiles["key-a"]
+		if got := key.EffectiveProviders().Codex; got.Speed != CodexSpeedStandard || got.IgnoreClientTier {
+			t.Fatalf("key effective codex = %+v", got)
+		}
+		if !key.SessionAffinity {
+			t.Fatalf("key profile lost session-affinity:\n%s", saved)
+		}
+	})
+
+	t.Run("clearing the fields of the shared profile removes them", func(t *testing.T) {
+		path, cfg := writeLoad(t, withSpeed)
+		cfg.Routing.Providers.Codex.Speed = ""
+		cfg.Routing.Providers.Codex.IgnoreClientTier = false
+		saved := saveRead(t, path, cfg)
+		for _, node := range []string{"routing.providers.codex.speed", "routing.providers.codex.ignore-client-tier"} {
+			if routingNode(t, saved, node) != nil {
+				t.Fatalf("cleared %s survived the save:\n%s", node, saved)
+			}
+		}
+		if routingNode(t, saved, "routing.providers.codex.mode") == nil {
+			t.Fatalf("save dropped routing.providers.codex.mode:\n%s", saved)
+		}
+		_, loaded := writeLoad(t, saved)
+		if got := loaded.Routing.SharedProfile().EffectiveProviders().Codex; got.Speed != CodexSpeedStandard || got.IgnoreClientTier {
+			t.Fatalf("shared effective codex = %+v", got)
+		}
+		if got := loaded.Routing.KeyProfiles["key-a"].Providers.Codex; got.Speed != CodexSpeedUltrafast || !got.IgnoreClientTier {
+			t.Fatalf("key codex changed: %+v", got)
+		}
+	})
+}

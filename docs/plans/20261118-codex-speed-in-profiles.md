@@ -130,16 +130,17 @@
 ## Implementation Steps
 
 ### Task 1: Add `speed` and `ignore-client-tier` to the provider routing config
-- [ ] in `internal/config/provider_routing.go` add constants `CodexSpeedStandard`, `CodexSpeedFast`, `CodexSpeedUltrafast` and the fields `Speed string` (`yaml:"speed,omitempty" json:"speed"`) and `IgnoreClientTier bool` (`yaml:"ignore-client-tier,omitempty" json:"ignore-client-tier"`) on `ProviderRoutingConfig`
-- [ ] in `normalize` trim and lower-case `Speed` and validate the stored value: empty or one of the three constants, otherwise `"<path>.speed has unsupported value %q"`
-- [ ] in `normalize` reject, for a provider other than `codex`, a non-empty `Speed` (`"<path>.speed is only supported for codex"`) and a true `IgnoreClientTier` (`"<path>.ignore-client-tier is only supported for codex"`); an empty speed and a false flag stay valid there
-- [ ] leave `applyDefaults` unchanged; in `effectiveProviders` (`provider_routing.go:149`) set `out.Codex.Speed` to `standard` when it is empty, so the Claude block stays empty through the second validation at `:190-191`
-- [ ] document both fields in the `routing.providers.codex` and `routing.key-profiles` examples of `config.example.yaml`, including the downgrade rule and the subscription-only scope
-- [ ] write a table test for `normalize`: valid values, case and whitespace, unknown value, both Claude errors, Claude with an empty speed and a false flag accepted, stored value stays empty
-- [ ] write a test that a config without the new fields passes `normalizeProfileProviders` for the shared profile and a key profile, and that `EffectiveProviders` returns `standard` for Codex and an empty speed for Claude
-- [ ] write save tests with `writeLoad`, `saveRead` and `routingNode`: a key profile keeps both fields; a config without them saves byte-identical; clearing a field of a key profile removes it from the file
-- [ ] write a save test that clears `routing.providers.codex.speed` and `ignore-client-tier` on the shared profile, saves, reloads, and finds the keys gone; if a cleared key survives, extend `shouldPruneNestedMappingKeys` (`internal/config/config_yaml.go:947`) to these two keys under `routing.providers.codex`
-- [ ] run `go test ./internal/config/...` (includes `TestV8ExampleLoadsAndRoundTrips`), gofmt, compile check - must pass before task 2
+- [x] in `internal/config/provider_routing.go` add constants `CodexSpeedStandard`, `CodexSpeedFast`, `CodexSpeedUltrafast` and the fields `Speed string` (`yaml:"speed,omitempty" json:"speed"`) and `IgnoreClientTier bool` (`yaml:"ignore-client-tier,omitempty" json:"ignore-client-tier"`) on `ProviderRoutingConfig`
+- [x] in `normalize` trim and lower-case `Speed` and validate the stored value: empty or one of the three constants, otherwise `"<path>.speed has unsupported value %q"`
+- [x] in `normalize` reject, for a provider other than `codex`, a non-empty `Speed` (`"<path>.speed is only supported for codex"`) and a true `IgnoreClientTier` (`"<path>.ignore-client-tier is only supported for codex"`); an empty speed and a false flag stay valid there
+- [x] leave `applyDefaults` unchanged; in `effectiveProviders` (`provider_routing.go:149`) set `out.Codex.Speed` to `standard` when it is empty, so the Claude block stays empty through the second validation at `:190-191`
+- [x] document both fields in the `routing.providers.codex` and `routing.key-profiles` examples of `config.example.yaml`, including the downgrade rule and the subscription-only scope
+- [x] write a table test for `normalize`: valid values, case and whitespace, unknown value, both Claude errors, Claude with an empty speed and a false flag accepted, stored value stays empty
+- [x] write a test that a config without the new fields passes `normalizeProfileProviders` for the shared profile and a key profile, and that `EffectiveProviders` returns `standard` for Codex and an empty speed for Claude
+- [x] write save tests with `writeLoad`, `saveRead` and `routingNode`: a key profile keeps both fields; a config without them saves byte-identical; clearing a field of a key profile removes it from the file
+- [x] write a save test that clears `routing.providers.codex.speed` and `ignore-client-tier` on the shared profile, saves, reloads, and finds the keys gone; if a cleared key survives, extend `shouldPruneNestedMappingKeys` (`internal/config/config_yaml.go:947`) to these two keys under `routing.providers.codex`
+  - ⚠️ the cleared keys survived; `shouldPruneNestedMappingKeys` prunes a whole mapping, so the fix is a dedicated `dropClearedSharedCodexSpeedFields` in `internal/config/config_yaml.go` that drops only these two keys before the merge. `TestGetRoutingProfilesProvidersView` (management) now expects `speed: standard` in the effective Codex view.
+- [x] run `go test ./internal/config/...` (includes `TestV8ExampleLoadsAndRoundTrips`), gofmt, compile check - must pass before task 2
 
 ### Task 2: Export the Codex speed settings of the request's routing profile
 - [ ] in `sdk/cliproxy/auth/routing_profile.go` add an exported accessor (for example `CodexSpeedFromContext(ctx context.Context) (speed string, ignoreClientTier bool, ok bool)`) that reads `routingProfileFromContext(ctx).providers.Codex`; `ok` is false when the context carries no profile

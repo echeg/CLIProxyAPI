@@ -74,6 +74,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	// generated map drops the node because key-profiles is omitempty.
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "routing", "key-profiles")
 	dropSupersededLegacyClaudeFallback(original.Content[0], generated.Content[0])
+	dropClearedSharedCodexSpeedFields(original.Content[0], generated.Content[0])
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "antigravity", "sensitive-words-replace")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "antigravity", "sensitive-patterns-replace")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "devin", "sensitive-words-replace")
@@ -978,6 +979,27 @@ func dropSupersededLegacyClaudeFallback(dstRoot, srcRoot *yaml.Node) {
 		return
 	}
 	removeMapKey(yamlPath(dstRoot, "routing"), "claude-fallback")
+}
+
+// sharedCodexSpeedKeys are the omitempty Codex speed fields of the shared
+// routing profile. A key missing from the generated document was cleared.
+var sharedCodexSpeedKeys = []string{"speed", "ignore-client-tier"}
+
+// dropClearedSharedCodexSpeedFields removes routing.providers.codex.speed and
+// ignore-client-tier from the original document when the generated document no
+// longer has them. The merge never deletes keys outside pruned subtrees, and
+// the rest of the shared providers block is left to the merge on purpose.
+func dropClearedSharedCodexSpeedFields(dstRoot, srcRoot *yaml.Node) {
+	dst := yamlPath(dstRoot, "routing.providers.codex")
+	if dst == nil {
+		return
+	}
+	src := yamlPath(srcRoot, "routing.providers.codex")
+	for _, key := range sharedCodexSpeedKeys {
+		if findMapKeyIndex(src, key) < 0 {
+			removeMapKey(dst, key)
+		}
+	}
 }
 
 // isKeyProfileSubtreePath reports whether path is a routing.key-profiles entry or

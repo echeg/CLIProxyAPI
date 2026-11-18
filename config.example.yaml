@@ -231,6 +231,16 @@ routing:
   # transient connection failures, never invalid requests or client cancellation.
   # Exact source IDs win over trailing-* prefixes. Unmapped models stay on Claude.
   # A started response is never replayed. Later requests try Claude again in auto mode.
+  # speed (codex only): standard (default) | fast | ultrafast. Sets service_tier on
+  #   Codex subscription requests that carry none (response.create and
+  #   /responses/compact). fast sends priority; ultrafast sends ultrafast when the
+  #   model's catalog entry advertises it, else priority when advertised, else no
+  #   tier. Codex API-key credentials are never changed. Payload rules still win.
+  # ignore-client-tier (codex only, default false): true removes the service_tier the
+  #   client sent before speed applies (response.steer frames only lose the client
+  #   tier). false keeps a client tier unchanged. A tier the translator drops (for
+  #   example auto or flex) counts as absent, so speed applies to it.
+  # Setting either field under providers.claude is a config error.
   # providers:
   #   claude:
   #     mode: subscription
@@ -246,6 +256,8 @@ routing:
   #     api-credential: "auth-index"
   #     fallback:
   #       target: api
+  #     speed: fast
+  #     ignore-client-tier: false
   # Legacy spelling of providers.claude.fallback, still accepted:
   # enabled: true = target: codex, enabled: false = target: off. When a profile has
   # both, providers.claude.fallback wins and each load warns; a management write
@@ -277,7 +289,8 @@ routing:
   # A key profile is a full copy: it replaces session-affinity, preferred-accounts,
   # selection and providers (or legacy claude-fallback) for that key, and nothing is
   # inherited from the shared fields above (an empty selection means {reserves,
-  # round-robin}; no providers means subscription mode with fallback off). Keys
+  # round-robin}; no providers means subscription mode with fallback off and Codex
+  # speed standard with the client tier respected). Keys
   # without a profile use the shared fields. On load, profiles for keys missing from
   # access.api-keys are dropped with a warning; the v8 management config write
   # rejects them with 400.
@@ -296,6 +309,9 @@ routing:
   #         api-credential: "codex-api-key-auth-index"
   #   "your-api-key-2":
   #     providers:
+  #       codex:
+  #         speed: ultrafast
+  #         ignore-client-tier: true
   #       claude:
   #         fallback:
   #           target: codex
