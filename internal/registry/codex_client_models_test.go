@@ -212,11 +212,17 @@ func testCodexClientCatalog(t *testing.T, models ...map[string]any) []byte {
 }
 
 func TestCodexClientModelSupportsServiceTier(t *testing.T) {
-	if !CodexClientModelSupportsServiceTier("gpt-5.5", "priority") {
-		t.Fatal("gpt-5.5 priority = false, want true")
+	if !CodexClientModelSupportsServiceTier("gpt-6.2-sol", "priority") {
+		t.Fatal("gpt-6.2-sol priority = false, want true")
 	}
-	if CodexClientModelSupportsServiceTier("gpt-5.5", "flex") {
-		t.Fatal("gpt-5.5 flex = true, want false")
+	if !CodexClientModelSupportsServiceTier("gpt-6.2-sol", "ultrafast") {
+		t.Fatal("gpt-6.2-sol ultrafast = false, want true")
+	}
+	if CodexClientModelSupportsServiceTier("gpt-6.2-sol", "flex") {
+		t.Fatal("gpt-6.2-sol flex = true, want false")
+	}
+	if CodexClientModelSupportsServiceTier("gpt-5.5", "priority") {
+		t.Fatal("gpt-5.5 priority = true, want false")
 	}
 	if CodexClientModelSupportsServiceTier("gpt-unlisted", "priority") {
 		t.Fatal("unlisted model priority = true, want false")

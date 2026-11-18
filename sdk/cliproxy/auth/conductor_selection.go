@@ -974,12 +974,10 @@ func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Select
 	if _, pipeline := selector.(*PipelineSelector); pipeline {
 		return m.availableAuthsForPipeline(ctx, auths, provider, routeModel, now, reserve, schedulerAcross, clientHeaders)
 	}
-	if _, weighted := selector.(*WeightedRoundRobinSelector); weighted {
+	if UnwrapWeightedRoundRobinSelector(selector) != nil {
 		// Exclude zero-weight credentials before priority selection, just as the
 		// scheduler predicate does, including when only a lower tier has weight.
-		auths = positiveWeightAuths(auths)
-	} else if _, ok := selectorFallback(affinitySelector).(*WeightedRoundRobinSelector); ok && sessionAffinity && reserve && anyQuotaReserveConfigured(auths) {
-		// Weighted round-robin never serves non-positive weights, so they must not count as
+		// Under session affinity this also keeps non-positive weights from counting as
 		// unreserved alternatives that push reserved credentials out of a new selection.
 		auths = positiveWeightAuths(auths)
 	}
