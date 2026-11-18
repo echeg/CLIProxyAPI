@@ -143,10 +143,10 @@
 - [x] run `go test ./internal/config/...` (includes `TestV8ExampleLoadsAndRoundTrips`), gofmt, compile check - must pass before task 2
 
 ### Task 2: Export the Codex speed settings of the request's routing profile
-- [ ] in `sdk/cliproxy/auth/routing_profile.go` add an exported accessor (for example `CodexSpeedFromContext(ctx context.Context) (speed string, ignoreClientTier bool, ok bool)`) that reads `routingProfileFromContext(ctx).providers.Codex`; `ok` is false when the context carries no profile
-- [ ] the accessor must not depend on `providerPolicy`: a scheduler-plugin profile (`providerPolicy = false`) still returns the shared profile's settings
-- [ ] write accessor tests with `ginContextWithKey` and `routingProfileTestConfig`: no profile in the context, a key profile, the shared profile, and a profile with `providerPolicy = false`
-- [ ] run `go test ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 3
+- [x] in `sdk/cliproxy/auth/routing_profile.go` add an exported accessor (for example `CodexSpeedFromContext(ctx context.Context) (speed string, ignoreClientTier bool, ok bool)`) that reads `routingProfileFromContext(ctx).providers.Codex`; `ok` is false when the context carries no profile
+- [x] the accessor must not depend on `providerPolicy`: a scheduler-plugin profile (`providerPolicy = false`) still returns the shared profile's settings
+- [x] write accessor tests with `ginContextWithKey` and `routingProfileTestConfig`: no profile in the context, a key profile, the shared profile, and a profile with `providerPolicy = false`
+- [x] run `go test ./sdk/cliproxy/auth/...`, gofmt, compile check - must pass before task 3
 
 ### Task 3: Resolve the Codex service tier from the profile in the executor
 - [ ] in `internal/runtime/executor/codex_executor_request.go` replace `applyCodexFastModeDoc` with a function that takes the request context and implements the rules from `## Technical Details` (client tier kept or removed, tier from speed with the ultrafast -> priority -> none downgrade, API-key auths untouched)

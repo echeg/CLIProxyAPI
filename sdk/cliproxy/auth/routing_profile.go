@@ -55,6 +55,24 @@ func sessionAffinityOff(ctx context.Context) bool {
 	return profile != nil && !profile.sticky
 }
 
+// CodexSpeedFromContext returns the Codex speed and ignore-client-tier settings of
+// the request's routing profile. ok is false when the context carries no profile
+// (Home, or a call outside Manager.Execute*), so the caller falls back to the shared
+// profile of its config. The settings do not depend on the provider policy: a
+// profile resolved under a scheduler plugin still reports them.
+func CodexSpeedFromContext(ctx context.Context) (speed string, ignoreClientTier bool, ok bool) {
+	profile := routingProfileFromContext(ctx)
+	if profile == nil {
+		return "", false, false
+	}
+	codex := profile.providers.Codex
+	speed = codex.Speed
+	if speed == "" {
+		speed = config.CodexSpeedStandard
+	}
+	return speed, codex.IgnoreClientTier, true
+}
+
 func (p *routingProfile) preferredAccounts() map[string]string {
 	if p == nil {
 		return nil

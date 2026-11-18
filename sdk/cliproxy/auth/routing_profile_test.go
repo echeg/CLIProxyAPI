@@ -258,3 +258,74 @@ func TestLogRoutingProfileSelection(t *testing.T) {
 		t.Fatalf("log line leaked the raw key: %s", line)
 	}
 }
+
+func TestCodexSpeedFromContext(t *testing.T) {
+	cfg := routingProfileTestConfig()
+	cfg.Routing.Providers.Codex = internalconfig.ProviderRoutingConfig{Speed: internalconfig.CodexSpeedFast, IgnoreClientTier: true}
+	cfg.Routing.KeyProfiles[routingTestKeyA].Providers.Codex = internalconfig.ProviderRoutingConfig{Speed: internalconfig.CodexSpeedUltrafast}
+
+	m := NewManager(nil, &RoundRobinSelector{}, nil)
+	m.SetConfig(cfg)
+
+	if speed, ignore, ok := CodexSpeedFromContext(context.Background()); ok || speed != "" || ignore {
+		t.Fatalf("no profile: speed=%q ignore=%t ok=%t", speed, ignore, ok)
+	}
+	if _, _, ok := CodexSpeedFromContext(nil); ok {
+		t.Fatal("nil context reported a profile")
+	}
+
+	cases := []struct {
+		name       string
+		ctx        context.Context
+		wantSpeed  string
+		wantIgnore bool
+	}{
+		{name: "key profile", ctx: m.ensureRoutingProfile(ginContextWithKey(routingTestKeyA)), wantSpeed: internalconfig.CodexSpeedUltrafast},
+		{name: "shared profile for a key without one", ctx: m.ensureRoutingProfile(ginContextWithKey(routingTestKeyB)), wantSpeed: internalconfig.CodexSpeedFast, wantIgnore: true},
+		{name: "shared profile without a key", ctx: m.ensureRoutingProfile(context.Background()), wantSpeed: internalconfig.CodexSpeedFast, wantIgnore: true},
+		{name: "profile without codex settings", ctx: withRoutingProfile(context.Background(), &routingProfile{providerPolicy: true}), wantSpeed: internalconfig.CodexSpeedStandard},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			speed, ignore, ok := CodexSpeedFromContext(tc.ctx)
+			if !ok || speed != tc.wantSpeed || ignore != tc.wantIgnore {
+				t.Fatalf("speed=%q ignore=%t ok=%t, want speed=%q ignore=%t ok=true", speed, ignore, ok, tc.wantSpeed, tc.wantIgnore)
+			}
+		})
+	}
+
+	t.Run("key profile without codex settings is not inherited", func(t *testing.T) {
+		cfgNoCodex := routingProfileTestConfig()
+		cfgNoCodex.Routing.Providers.Codex = internalconfig.ProviderRoutingConfig{Speed: internalconfig.CodexSpeedFast, IgnoreClientTier: true}
+		mNoCodex := NewManager(nil, &RoundRobinSelector{}, nil)
+		mNoCodex.SetConfig(cfgNoCodex)
+		speed, ignore, ok := CodexSpeedFromContext(mNoCodex.ensureRoutingProfile(ginContextWithKey(routingTestKeyA)))
+		if !ok || speed != internalconfig.CodexSpeedStandard || ignore {
+			t.Fatalf("speed=%q ignore=%t ok=%t, want standard without the shared flag", speed, ignore, ok)
+		}
+	})
+
+	t.Run("scheduler plugin profile without provider policy", func(t *testing.T) {
+		mPlugin := NewManager(nil, &RoundRobinSelector{}, nil)
+		mPlugin.SetConfig(cfg)
+		mPlugin.SetPluginScheduler(&fakePluginScheduler{})
+		ctx := mPlugin.ensureRoutingProfile(ginContextWithKey(routingTestKeyA))
+		if profile := routingProfileFromContext(ctx); profile == nil || profile.providerPolicy {
+			t.Fatalf("plugin profile = %+v, want providerPolicy false", profile)
+		}
+		speed, ignore, ok := CodexSpeedFromContext(ctx)
+		if !ok || speed != internalconfig.CodexSpeedFast || !ignore {
+			t.Fatalf("speed=%q ignore=%t ok=%t, want the shared fast with ignore", speed, ignore, ok)
+		}
+	})
+
+	t.Run("home carries no profile", func(t *testing.T) {
+		cfgHome := routingProfileTestConfig()
+		cfgHome.Home.Enabled = true
+		mHome := NewManager(nil, &RoundRobinSelector{}, nil)
+		mHome.SetConfig(cfgHome)
+		if _, _, ok := CodexSpeedFromContext(mHome.ensureRoutingProfile(ginContextWithKey(routingTestKeyA))); ok {
+			t.Fatal("Home context reported a profile")
+		}
+	})
+}
