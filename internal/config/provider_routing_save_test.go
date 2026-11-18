@@ -344,3 +344,196 @@ routing:
 		}
 	})
 }
+
+func TestSaveConfigProviderDisabled(t *testing.T) {
+	const withoutDisabled = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    claude:
+      mode: subscription
+    codex:
+      mode: subscription
+  key-profiles:
+    key-a:
+      session-affinity: true
+      providers:
+        codex:
+          speed: fast
+`
+	const withDisabled = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    claude:
+      mode: subscription
+      # shared claude switch
+      disabled: true
+    codex:
+      speed: fast
+      disabled: true
+  key-profiles:
+    key-a:
+      session-affinity: true
+      providers:
+        claude:
+          disabled: true
+        codex:
+          speed: fast
+`
+
+	t.Run("config without disabled saves byte-identical", func(t *testing.T) {
+		path, cfg := writeLoad(t, withoutDisabled)
+		first := saveRead(t, path, cfg)
+		if strings.Contains(first, "disabled") {
+			t.Fatalf("save added disabled:\n%s", first)
+		}
+		_, reloaded := writeLoad(t, first)
+		if second := saveRead(t, path, reloaded); second != first {
+			t.Fatalf("second save changed the file:\n%s\n---\n%s", first, second)
+		}
+	})
+
+	t.Run("setting disabled writes only that key", func(t *testing.T) {
+		path, cfg := writeLoad(t, withoutDisabled)
+		before := saveRead(t, path, cfg)
+		_, cfg = writeLoad(t, before)
+		cfg.Routing.Providers.Claude.Disabled = true
+		key := cfg.Routing.KeyProfiles["key-a"]
+		key.Providers.Codex.Disabled = true
+		cfg.Routing.KeyProfiles["key-a"] = key
+		saved := saveRead(t, path, cfg)
+		for _, node := range []string{"routing.providers.claude.disabled", "routing.key-profiles.key-a.providers.codex.disabled"} {
+			if got := routingNode(t, saved, node); got == nil || got.Value != "true" {
+				t.Fatalf("save did not write %s:\n%s", node, saved)
+			}
+		}
+		// Apart from the two new lines the file is unchanged.
+		var added []string
+		beforeLines := strings.Split(before, "\n")
+		savedLines := strings.Split(saved, "\n")
+		j := 0
+		for _, line := range savedLines {
+			if j < len(beforeLines) && line == beforeLines[j] {
+				j++
+				continue
+			}
+			added = append(added, strings.TrimSpace(line))
+		}
+		if j != len(beforeLines) || !reflect.DeepEqual(added, []string{"disabled: true", "disabled: true"}) {
+			t.Fatalf("save changed more than the disabled keys (added %q):\n%s\n---\n%s", added, before, saved)
+		}
+		_, loaded := writeLoad(t, saved)
+		if !loaded.Routing.Providers.Claude.Disabled || loaded.Routing.Providers.Codex.Disabled {
+			t.Fatalf("shared providers = %+v", loaded.Routing.Providers)
+		}
+		if got := loaded.Routing.KeyProfiles["key-a"].Providers.Codex; !got.Disabled || got.Speed != CodexSpeedFast {
+			t.Fatalf("key codex = %+v", got)
+		}
+	})
+
+	t.Run("clearing disabled in the shared profile removes it", func(t *testing.T) {
+		path, cfg := writeLoad(t, withDisabled)
+		cfg.Routing.Providers.Claude.Disabled = false
+		cfg.Routing.Providers.Codex.Disabled = false
+		saved := saveRead(t, path, cfg)
+		for _, node := range []string{"routing.providers.claude.disabled", "routing.providers.codex.disabled"} {
+			if routingNode(t, saved, node) != nil {
+				t.Fatalf("cleared %s survived the save:\n%s", node, saved)
+			}
+		}
+		if routingNode(t, saved, "routing.providers.claude.mode") == nil || routingNode(t, saved, "routing.providers.codex.speed") == nil {
+			t.Fatalf("save dropped sibling settings:\n%s", saved)
+		}
+		_, loaded := writeLoad(t, saved)
+		if loaded.Routing.Providers.Claude.Disabled || loaded.Routing.Providers.Codex.Disabled {
+			t.Fatalf("shared providers = %+v", loaded.Routing.Providers)
+		}
+		if !loaded.Routing.KeyProfiles["key-a"].Providers.Claude.Disabled {
+			t.Fatalf("key profile lost claude.disabled:\n%s", saved)
+		}
+	})
+
+	t.Run("clearing disabled in a key profile removes it", func(t *testing.T) {
+		path, cfg := writeLoad(t, withDisabled)
+		key := cfg.Routing.KeyProfiles["key-a"]
+		key.Providers.Claude.Disabled = false
+		cfg.Routing.KeyProfiles["key-a"] = key
+		saved := saveRead(t, path, cfg)
+		if routingNode(t, saved, "routing.key-profiles.key-a.providers.claude") != nil {
+			t.Fatalf("cleared key claude block survived the save:\n%s", saved)
+		}
+		_, loaded := writeLoad(t, saved)
+		got := loaded.Routing.KeyProfiles["key-a"]
+		if got.Providers.Claude.Disabled || got.Providers.Codex.Speed != CodexSpeedFast || !got.SessionAffinity {
+			t.Fatalf("key profile = %+v", got)
+		}
+		if !loaded.Routing.Providers.Claude.Disabled || !loaded.Routing.Providers.Codex.Disabled {
+			t.Fatalf("shared providers changed: %+v", loaded.Routing.Providers)
+		}
+	})
+
+	t.Run("clearing blocks that hold only disabled removes the emptied mappings", func(t *testing.T) {
+		const onlyDisabled = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    claude:
+      disabled: true
+    codex:
+      disabled: true
+`
+		for _, tc := range []struct {
+			name  string
+			clear func(*Config)
+			gone  string
+			kept  string
+		}{
+			{name: "claude", clear: func(c *Config) { c.Routing.Providers.Claude.Disabled = false }, gone: "routing.providers.claude", kept: "routing.providers.codex.disabled"},
+			{name: "codex", clear: func(c *Config) { c.Routing.Providers.Codex.Disabled = false }, gone: "routing.providers.codex", kept: "routing.providers.claude.disabled"},
+			{name: "both", clear: func(c *Config) {
+				c.Routing.Providers.Claude.Disabled = false
+				c.Routing.Providers.Codex.Disabled = false
+			}, gone: "routing.providers"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				path, cfg := writeLoad(t, onlyDisabled)
+				tc.clear(cfg)
+				saved := saveRead(t, path, cfg)
+				if routingNode(t, saved, tc.gone) != nil {
+					t.Fatalf("%s survived the save:\n%s", tc.gone, saved)
+				}
+				if tc.kept != "" && routingNode(t, saved, tc.kept) == nil {
+					t.Fatalf("save dropped %s:\n%s", tc.kept, saved)
+				}
+			})
+		}
+	})
+
+	t.Run("a file holding disabled false keeps it", func(t *testing.T) {
+		const withFalse = `config-version: 8
+access:
+  api-keys: ["key-a"]
+routing:
+  providers:
+    claude:
+      disabled: false
+    codex:
+      # kept on purpose
+      disabled: false
+`
+		path, cfg := writeLoad(t, withFalse)
+		saved := saveRead(t, path, cfg)
+		for _, node := range []string{"routing.providers.claude.disabled", "routing.providers.codex.disabled"} {
+			if got := routingNode(t, saved, node); got == nil || got.Value != "false" {
+				t.Fatalf("save dropped %s:\n%s", node, saved)
+			}
+		}
+		if !strings.Contains(saved, "# kept on purpose") {
+			t.Fatalf("save dropped the comment:\n%s", saved)
+		}
+	})
+}

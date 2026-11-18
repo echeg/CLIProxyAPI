@@ -74,7 +74,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	// generated map drops the node because key-profiles is omitempty.
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "routing", "key-profiles")
 	dropSupersededLegacyClaudeFallback(original.Content[0], generated.Content[0])
-	dropClearedSharedCodexSpeedFields(original.Content[0], generated.Content[0])
+	dropClearedSharedProviderFields(original.Content[0], generated.Content[0])
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "antigravity", "sensitive-words-replace")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "antigravity", "sensitive-patterns-replace")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "devin", "sensitive-words-replace")
@@ -981,35 +981,53 @@ func dropSupersededLegacyClaudeFallback(dstRoot, srcRoot *yaml.Node) {
 	removeMapKey(yamlPath(dstRoot, "routing"), "claude-fallback")
 }
 
-// dropClearedSharedCodexSpeedFields removes routing.providers.codex.speed and
-// ignore-client-tier from the original document when the generated document no
-// longer has them: both are omitempty, so a missing key was cleared. A key that
-// already holds the default (null, false or "") is kept, since omitempty hides
-// it from the generated document without a change. A codex mapping emptied here
-// is removed too, and so is a providers mapping left empty by that. The merge
-// never deletes keys outside pruned subtrees, and the rest of the shared
-// providers block is left to the merge on purpose.
-func dropClearedSharedCodexSpeedFields(dstRoot, srcRoot *yaml.Node) {
+// sharedProviderClearableKeys lists, per provider block of the shared profile,
+// the omitempty keys that dropClearedSharedProviderFields removes once cleared.
+var sharedProviderClearableKeys = []struct {
+	provider string
+	keys     []string
+}{
+	{provider: "claude", keys: []string{"disabled"}},
+	{provider: "codex", keys: []string{"speed", "ignore-client-tier", "disabled"}},
+}
+
+// dropClearedSharedProviderFields removes routing.providers.claude.disabled and
+// routing.providers.codex.speed, ignore-client-tier and disabled from the
+// original document when the generated document no longer has them: all are
+// omitempty, so a missing key was cleared. A key that already holds the default
+// (null, false or "") is kept, since omitempty hides it from the generated
+// document without a change. A provider mapping emptied here is removed too, and
+// so is a providers mapping left empty by that. The merge never deletes keys
+// outside pruned subtrees, and the rest of the shared providers block is left to
+// the merge on purpose.
+func dropClearedSharedProviderFields(dstRoot, srcRoot *yaml.Node) {
 	providers := yamlPath(dstRoot, "routing.providers")
-	dst := yamlPath(providers, "codex")
-	if dst == nil {
+	if providers == nil {
 		return
 	}
-	src := yamlPath(srcRoot, "routing.providers.codex")
-	removed := false
-	for _, key := range []string{"speed", "ignore-client-tier"} {
-		idx := findMapKeyIndex(dst, key)
-		if idx < 0 || findMapKeyIndex(src, key) >= 0 || isZeroValueNode(dst.Content[idx+1]) {
+	emptied := false
+	for _, entry := range sharedProviderClearableKeys {
+		dst := yamlPath(providers, entry.provider)
+		if dst == nil || dst.Kind != yaml.MappingNode {
 			continue
 		}
-		removeMapKey(dst, key)
-		removed = true
-	}
-	if removed && len(dst.Content) == 0 {
-		removeMapKey(providers, "codex")
-		if len(providers.Content) == 0 {
-			removeMapKey(yamlPath(dstRoot, "routing"), "providers")
+		src := yamlPath(srcRoot, "routing.providers."+entry.provider)
+		removed := false
+		for _, key := range entry.keys {
+			idx := findMapKeyIndex(dst, key)
+			if idx < 0 || findMapKeyIndex(src, key) >= 0 || isZeroValueNode(dst.Content[idx+1]) {
+				continue
+			}
+			removeMapKey(dst, key)
+			removed = true
 		}
+		if removed && len(dst.Content) == 0 {
+			removeMapKey(providers, entry.provider)
+			emptied = true
+		}
+	}
+	if emptied && len(providers.Content) == 0 {
+		removeMapKey(yamlPath(dstRoot, "routing"), "providers")
 	}
 }
 

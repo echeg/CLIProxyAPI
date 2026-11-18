@@ -39,8 +39,11 @@ type ProvidersRoutingConfig struct {
 // ProviderRoutingConfig is the routing policy of one provider inside a profile.
 // APICredential is the auth_index of an api-keys entry of the same provider.
 // Speed and IgnoreClientTier apply to Codex subscription requests only; they
-// must stay unset for other providers.
+// must stay unset for other providers. Disabled refuses every request that
+// needs the provider; it is valid for claude and codex and keeps the other
+// fields, which are still validated, so re-enabling restores them.
 type ProviderRoutingConfig struct {
+	Disabled         bool                   `yaml:"disabled,omitempty" json:"disabled"`
 	Mode             string                 `yaml:"mode,omitempty" json:"mode"`
 	APICredential    string                 `yaml:"api-credential,omitempty" json:"api-credential"`
 	Fallback         ProviderFallbackConfig `yaml:"fallback,omitempty" json:"fallback"`
@@ -226,6 +229,14 @@ func normalizeProfileProviders(providers *ProvidersRoutingConfig, legacy *Claude
 	warnings, errEffective := effective.Normalize(providersPath)
 	if errEffective != nil {
 		return errEffective
+	}
+	if effective.Claude.Fallback.Target == ProviderFallbackCodex && providers.Codex.Disabled {
+		fallbackPath := providersPath + ".claude.fallback"
+		if providers.Claude.Fallback.IsZero() {
+			// The fallback comes from the legacy block next to providers.
+			fallbackPath = strings.TrimSuffix(providersPath, ".providers") + ".claude-fallback"
+		}
+		warnings = append(warnings, fallbackPath+": target codex is inactive while "+providersPath+".codex.disabled is true")
 	}
 	for _, warning := range warnings {
 		log.Warn(warning)

@@ -38,6 +38,13 @@ func TestProvidersRoutingValidation(t *testing.T) {
 		{name: "api credential kept with subscription", body: `{claude: {api-credential: idx-1}}`},
 		{name: "codex speed and flag", body: `{codex: {speed: ultrafast, ignore-client-tier: true}}`},
 		{name: "claude empty speed and false flag", body: `{claude: {speed: '', ignore-client-tier: false}}`},
+		{name: "claude disabled", body: `{claude: {disabled: true}}`},
+		{name: "codex disabled keeps settings", body: `{codex: {disabled: true, mode: api, api-credential: idx-2, speed: fast}}`},
+		{name: "both disabled", body: `{claude: {disabled: true}, codex: {disabled: true}}`},
+		{name: "disabled false", body: `{claude: {disabled: false}, codex: {disabled: false}}`},
+		{name: "disabled claude with unknown mode", body: `{claude: {disabled: true, mode: hybrid}}`, wantErr: ".claude.mode has unsupported value"},
+		{name: "disabled codex with target codex", body: `{codex: {disabled: true, fallback: {target: codex, mappings: [{from: a, to: b}]}}}`, wantErr: ".codex.fallback.target codex is only supported for claude"},
+		{name: "disabled claude with api mode without credential", body: `{claude: {disabled: true, mode: api}}`, wantErr: ".claude.api-credential is required"},
 		{name: "unknown codex speed", body: `{codex: {speed: turbo}}`, wantErr: ".codex.speed has unsupported value"},
 		{name: "claude speed", body: `{claude: {speed: fast}}`, wantErr: ".claude.speed is only supported for codex"},
 		{name: "claude ignore-client-tier", body: `{claude: {ignore-client-tier: true}}`, wantErr: ".claude.ignore-client-tier is only supported for codex"},
@@ -398,4 +405,96 @@ func TestProvidersRoutingCodexSpeedDefaults(t *testing.T) {
 			t.Fatalf("%s: %v", name, errNormalize)
 		}
 	}
+}
+
+func TestProvidersRoutingDisabledFields(t *testing.T) {
+	captureStandardLogs(t)
+	cfg, errParse := ParseConfigBytes([]byte(keyProvidersConfig(`{claude: {disabled: true, mode: api, api-credential: idx-1}, codex: {disabled: true, speed: fast}}`)))
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	got := cfg.Routing.KeyProfiles[providersTestKey].EffectiveProviders()
+	if !got.Claude.Disabled || got.Claude.Mode != ProviderModeAPI || got.Claude.APICredential != "idx-1" {
+		t.Fatalf("effective claude = %+v", got.Claude)
+	}
+	if !got.Codex.Disabled || got.Codex.Speed != CodexSpeedFast {
+		t.Fatalf("effective codex = %+v", got.Codex)
+	}
+	shared := cfg.Routing.SharedProfile().EffectiveProviders()
+	if shared.Claude.Disabled || shared.Codex.Disabled {
+		t.Fatalf("shared profile disabled by default: %+v", shared)
+	}
+}
+
+func TestProvidersRoutingWarnsOnFallbackIntoDisabledCodex(t *testing.T) {
+	hash := KeyHashPrefix(providersTestKey)
+	const fallback = `fallback: {target: codex, mappings: [{from: 'claude-*', to: gpt-x}]}`
+	const legacy = `claude-fallback: {enabled: true, mappings: [{from: 'claude-*', to: gpt-x}]}`
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "shared",
+			raw:  sharedProvidersConfig(`{claude: {` + fallback + `}, codex: {disabled: true}}`),
+			want: "routing.providers.claude.fallback: target codex is inactive while routing.providers.codex.disabled is true",
+		},
+		{
+			name: "key profile",
+			raw:  keyProvidersConfig(`{claude: {` + fallback + `}, codex: {disabled: true}}`),
+			want: "routing.key-profiles." + hash + ".providers.claude.fallback: target codex is inactive while routing.key-profiles." + hash + ".providers.codex.disabled is true",
+		},
+		{
+			name: "shared legacy",
+			raw:  "config-version: 8\naccess:\n  api-keys: [\"" + providersTestKey + "\"]\nrouting:\n  " + legacy + "\n  providers: {codex: {disabled: true}}\n",
+			want: "routing.claude-fallback: target codex is inactive while routing.providers.codex.disabled is true",
+		},
+		{
+			name: "key profile legacy",
+			raw:  "config-version: 8\naccess:\n  api-keys: [\"" + providersTestKey + "\"]\nrouting:\n  key-profiles:\n    \"" + providersTestKey + "\":\n      " + legacy + "\n      providers: {codex: {disabled: true}}\n",
+			want: "routing.key-profiles." + hash + ".claude-fallback: target codex is inactive while routing.key-profiles." + hash + ".providers.codex.disabled is true",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hook := captureStandardLogs(t)
+			if _, errParse := ParseConfigBytes([]byte(tc.raw)); errParse != nil {
+				t.Fatalf("unexpected error: %v", errParse)
+			}
+			var warned bool
+			for _, entry := range hook.AllEntries() {
+				if line, _ := entry.String(); strings.Contains(line, providersTestKey) {
+					t.Fatalf("log line leaks the raw key: %s", line)
+				}
+				if entry.Level == log.WarnLevel && entry.Message == tc.want {
+					warned = true
+				}
+			}
+			if !warned {
+				var got []string
+				for _, entry := range hook.AllEntries() {
+					got = append(got, entry.Message)
+				}
+				t.Fatalf("missing warning %q; got %q", tc.want, got)
+			}
+		})
+	}
+
+	t.Run("no warning when codex is enabled or the fallback is off", func(t *testing.T) {
+		for _, raw := range []string{
+			sharedProvidersConfig(`{claude: {` + fallback + `}}`),
+			sharedProvidersConfig(`{claude: {disabled: true}, codex: {disabled: true}}`),
+		} {
+			hook := captureStandardLogs(t)
+			if _, errParse := ParseConfigBytes([]byte(raw)); errParse != nil {
+				t.Fatalf("unexpected error: %v", errParse)
+			}
+			for _, entry := range hook.AllEntries() {
+				if strings.Contains(entry.Message, "is inactive") {
+					t.Fatalf("unexpected warning %q for %s", entry.Message, raw)
+				}
+			}
+		}
+	})
 }
