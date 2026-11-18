@@ -3,11 +3,48 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
+
+// providerDisabledError refuses a request whose provider the routing profile
+// disables. It is request-scoped, so no credential cools down, and its Error()
+// is the client-facing message without an error-code prefix.
+type providerDisabledError struct {
+	provider string
+	message  string
+}
+
+func (e *providerDisabledError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+// StatusCode reports 403 to the handlers.
+func (e *providerDisabledError) StatusCode() int { return http.StatusForbidden }
+
+// IsRequestScoped keeps the refusal away from credential cooldown.
+func (e *providerDisabledError) IsRequestScoped() bool { return true }
+
+// refuseDisabledProvider logs the refusal of provider and returns the error the
+// client receives. The message names the profile kind, never the key or its hash.
+func refuseDisabledProvider(ctx context.Context, profile *routingProfile, provider string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	message := provider + " is disabled by the routing profile"
+	profileName := "shared"
+	if profile != nil && profile.fromKey {
+		message += " of this API key"
+		profileName = profile.keyHash
+	}
+	logEntryWithRequestID(ctx).WithFields(log.Fields{"provider": provider, "profile": profileName}).Info("Refusing request: provider disabled by routing profile")
+	return &providerDisabledError{provider: provider, message: message}
+}
 
 // providerPolicyAllows applies the per-provider mode of the routing profile:
 // subscription mode keeps API-key credentials out of the pool, api mode allows

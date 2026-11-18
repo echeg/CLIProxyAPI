@@ -138,9 +138,63 @@ func (p *routingProfile) apiFallbackProfile(provider string) *routingProfile {
 	return &derived
 }
 
+// filterDisabledProviders drops the providers the request's routing profile
+// disables and keeps the others in place. It refuses the request when every
+// listed provider is disabled (naming the first disabled one) or when the request
+// is pinned to an auth of a disabled provider, since pinned requests skip the
+// selection filter. Without a profile or a provider policy (Home, a scheduler
+// plugin) nothing is dropped.
+func (m *Manager) filterDisabledProviders(ctx context.Context, providers []string, opts cliproxyexecutor.Options) ([]string, error) {
+	profile := routingProfileFromContext(ctx)
+	if profile == nil || !profile.providerPolicy {
+		return providers, nil
+	}
+	disabled := func(provider string) bool {
+		policy, ok := profile.providerMode(provider)
+		return ok && policy.Disabled
+	}
+	filtered := providers
+	firstDisabled := ""
+	for i, provider := range providers {
+		if !disabled(provider) {
+			if firstDisabled != "" {
+				filtered = append(filtered, provider)
+			}
+			continue
+		}
+		if firstDisabled == "" {
+			firstDisabled = provider
+			filtered = append(make([]string, 0, len(providers)-1), providers[:i]...)
+		}
+	}
+	if len(providers) > 0 && len(filtered) == 0 {
+		return nil, refuseDisabledProvider(ctx, profile, firstDisabled)
+	}
+	if pinnedID := pinnedAuthIDFromMetadata(opts.Metadata); pinnedID != "" {
+		m.mu.RLock()
+		pinned := m.auths[pinnedID]
+		pinnedProvider := ""
+		if pinned != nil {
+			pinnedProvider = pinned.Provider
+		}
+		m.mu.RUnlock()
+		if pinnedProvider != "" && disabled(pinnedProvider) {
+			return nil, refuseDisabledProvider(ctx, profile, pinnedProvider)
+		}
+	}
+	return filtered, nil
+}
+
 func executeWithProviderFallback[T any](m *Manager, ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, execute func(context.Context, []string, cliproxyexecutor.Request, cliproxyexecutor.Options) (T, error)) (T, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// The disabled-provider gate runs before the fallback decision: its 403 would
+	// otherwise count as a fallback trigger.
+	providers, errDisabled := m.filterDisabledProviders(ctx, providers, opts)
+	if errDisabled != nil {
+		var zero T
+		return zero, errDisabled
 	}
 	fallback := m.providerFallbackFor(ctx, providers, req, opts)
 	var primaryErr error

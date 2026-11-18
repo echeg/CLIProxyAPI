@@ -13,6 +13,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 const apiFallbackModel = "api-fallback-model-5"
@@ -547,4 +548,254 @@ func TestAPIFallbackLogging(t *testing.T) {
 	if !apiSelection || !message {
 		t.Fatalf("api selection logged=%t, fallback message logged=%t; entries=%v", apiSelection, message, hook.AllEntries())
 	}
+}
+
+const (
+	disabledKeyMessage    = "claude is disabled by the routing profile of this API key"
+	disabledSharedMessage = "claude is disabled by the routing profile"
+	disabledRefusalLog    = "Refusing request: provider disabled by routing profile"
+)
+
+var (
+	disabledClaudeOAuth = providerPolicyTestAuth{"pd-claude-oauth", "claude", AuthKindOAuth, "claude-oauth"}
+	disabledCodexOAuth  = providerPolicyTestAuth{"pd-codex-oauth", "codex", AuthKindOAuth, "codex-oauth"}
+	disabledGeminiKey   = providerPolicyTestAuth{"pd-gemini-key", "gemini", AuthKindAPIKey, "gemini-key"}
+)
+
+// disabledProviderConfig builds a config whose shared profile and key A profile
+// (when keyProfile is non-nil) carry the given providers blocks.
+func disabledProviderConfig(shared internalconfig.ProvidersRoutingConfig, keyProfile *internalconfig.ProvidersRoutingConfig) *internalconfig.Config {
+	cfg := &internalconfig.Config{SDKConfig: internalconfig.SDKConfig{APIKeys: []string{routingTestKeyA, routingTestKeyB}}}
+	cfg.Routing.Providers = shared
+	if keyProfile != nil {
+		cfg.Routing.KeyProfiles = map[string]*internalconfig.RoutingProfile{routingTestKeyA: {Providers: *keyProfile}}
+	}
+	return cfg
+}
+
+func disabledProviders(claude, codex bool) internalconfig.ProvidersRoutingConfig {
+	return internalconfig.ProvidersRoutingConfig{Claude: internalconfig.ProviderRoutingConfig{Disabled: claude}, Codex: internalconfig.ProviderRoutingConfig{Disabled: codex}}
+}
+
+// assertProviderDisabledError checks the 403 request-scoped refusal and its exact
+// client-facing message.
+func assertProviderDisabledError(t *testing.T, err error, message string) {
+	t.Helper()
+	var disabledErr *providerDisabledError
+	if !errors.As(err, &disabledErr) {
+		t.Fatalf("err = %v (%T), want a provider disabled refusal", err, err)
+	}
+	if got := err.Error(); got != message {
+		t.Fatalf("err.Error() = %q, want %q", got, message)
+	}
+	if status := statusCodeFromError(err); status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", status)
+	}
+	if !isRequestScopedError(err) {
+		t.Fatal("refusal is not request-scoped")
+	}
+}
+
+// assertNoAuthFailures checks that no registered auth recorded a failure.
+func assertNoAuthFailures(t *testing.T, m *Manager) {
+	t.Helper()
+	for _, auth := range m.List() {
+		if auth.Unavailable || auth.LastError != nil || !auth.NextRetryAfter.IsZero() || len(auth.ModelStates) != 0 {
+			t.Fatalf("auth %s recorded a failure: unavailable=%t lastError=%v states=%d", auth.ID, auth.Unavailable, auth.LastError, len(auth.ModelStates))
+		}
+	}
+}
+
+func disabledRefusalEntries(hook interface{ AllEntries() []*log.Entry }) []*log.Entry {
+	var entries []*log.Entry
+	for _, entry := range hook.AllEntries() {
+		if entry.Message == disabledRefusalLog {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+func TestDisabledProviderRefusesEveryExecutePath(t *testing.T) {
+	keyProfile := disabledProviders(true, false)
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			m, calls := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile), disabledClaudeOAuth, disabledCodexOAuth)
+			hook := newStandardLogHook(t)
+			_, err := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, []string{"claude"}, cliproxyexecutor.Request{Model: providerPolicyTestModel}, cliproxyexecutor.Options{})
+			assertProviderDisabledError(t, err, disabledKeyMessage)
+			if len(*calls) != 0 {
+				t.Fatalf("executor calls = %v, want none", *calls)
+			}
+			assertNoAuthFailures(t, m)
+			entries := disabledRefusalEntries(hook)
+			if len(entries) != 1 {
+				t.Fatalf("refusal log entries = %d, want 1", len(entries))
+			}
+			entry := entries[0]
+			if entry.Level != log.InfoLevel || entry.Data["provider"] != "claude" || entry.Data["profile"] != internalconfig.KeyHashPrefix(routingTestKeyA) {
+				t.Fatalf("refusal log = level %s fields %v", entry.Level, entry.Data)
+			}
+			line, errLine := entry.String()
+			if errLine != nil {
+				t.Fatal(errLine)
+			}
+			if strings.Contains(line, routingTestKeyA) {
+				t.Fatalf("refusal log leaked the raw key: %s", line)
+			}
+
+			// The enabled provider of the same key still runs.
+			if _, errCodex := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, []string{"codex"}, cliproxyexecutor.Request{Model: providerPolicyTestModel}, cliproxyexecutor.Options{}); errCodex != nil {
+				t.Fatalf("codex request: %v", errCodex)
+			}
+			if !reflect.DeepEqual(*calls, []string{disabledCodexOAuth.id}) {
+				t.Fatalf("calls = %v, want only codex", *calls)
+			}
+		})
+	}
+}
+
+func TestDisabledProviderSharedProfile(t *testing.T) {
+	keyProfile := internalconfig.ProvidersRoutingConfig{}
+	cfg := disabledProviderConfig(disabledProviders(true, false), &keyProfile)
+	m, calls := providerPolicyTestManager(t, cfg, disabledClaudeOAuth, disabledCodexOAuth)
+	hook := newStandardLogHook(t)
+	req := cliproxyexecutor.Request{Model: providerPolicyTestModel}
+
+	// Key B has no own profile, so the shared disable applies.
+	for _, ctx := range []context.Context{ginContextWithKey(routingTestKeyB), ginContextWithKey(""), context.Background()} {
+		_, err := m.Execute(ctx, []string{"claude"}, req, cliproxyexecutor.Options{})
+		assertProviderDisabledError(t, err, disabledSharedMessage)
+	}
+	entries := disabledRefusalEntries(hook)
+	if len(entries) != 3 {
+		t.Fatalf("refusal log entries = %d, want 3", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.Data["provider"] != "claude" || entry.Data["profile"] != "shared" {
+			t.Fatalf("refusal log fields = %v, want profile=shared", entry.Data)
+		}
+		line, errLine := entry.String()
+		if errLine != nil {
+			t.Fatal(errLine)
+		}
+		if strings.Contains(line, routingTestKeyB) || strings.Contains(line, internalconfig.KeyHashPrefix(routingTestKeyB)) {
+			t.Fatalf("shared refusal log names the key: %s", line)
+		}
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("executor calls = %v, want none", *calls)
+	}
+
+	// Key A has its own profile without a disable; it replaces the shared one.
+	if _, err := m.Execute(ginContextWithKey(routingTestKeyA), []string{"claude"}, req, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("key A claude request: %v", err)
+	}
+	if !reflect.DeepEqual(*calls, []string{disabledClaudeOAuth.id}) {
+		t.Fatalf("calls = %v, want claude", *calls)
+	}
+}
+
+func TestDisabledProviderFiltersRequestProviders(t *testing.T) {
+	req := cliproxyexecutor.Request{Model: providerPolicyTestModel}
+	for _, tc := range []struct {
+		name      string
+		claude    bool
+		codex     bool
+		providers []string
+		want      string
+		message   string
+	}{
+		{"claude disabled runs codex", true, false, []string{"claude", "codex"}, disabledCodexOAuth.id, ""},
+		{"codex disabled runs claude", false, true, []string{"codex", "claude"}, disabledClaudeOAuth.id, ""},
+		{"mixed case names are compared normalized", true, false, []string{" Claude ", "codex"}, disabledCodexOAuth.id, ""},
+		{"both disabled names the first", true, true, []string{"claude", "codex"}, "", disabledKeyMessage},
+		{"both disabled names codex first", true, true, []string{"codex", "claude"}, "", "codex is disabled by the routing profile of this API key"},
+		{"other provider untouched", true, true, []string{"gemini"}, disabledGeminiKey.id, ""},
+		{"other provider kept beside a disabled one", true, false, []string{"claude", "gemini"}, disabledGeminiKey.id, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyProfile := disabledProviders(tc.claude, tc.codex)
+			m, calls := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile), disabledClaudeOAuth, disabledCodexOAuth, disabledGeminiKey)
+			for i := 0; i < 3; i++ {
+				_, err := m.Execute(ginContextWithKey(routingTestKeyA), tc.providers, req, cliproxyexecutor.Options{})
+				if tc.message != "" {
+					assertProviderDisabledError(t, err, tc.message)
+					continue
+				}
+				if err != nil {
+					t.Fatalf("Execute #%d: %v", i, err)
+				}
+			}
+			if tc.message != "" {
+				if len(*calls) != 0 {
+					t.Fatalf("executor calls = %v, want none", *calls)
+				}
+				return
+			}
+			for _, id := range *calls {
+				if id != tc.want {
+					t.Fatalf("calls = %v, want only %s", *calls, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestDisabledProviderRefusesPinnedRequest(t *testing.T) {
+	keyProfile := disabledProviders(true, false)
+	pin := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: disabledClaudeOAuth.id}}
+	for _, providers := range [][]string{{"claude"}, {"claude", "codex"}, {"codex"}} {
+		for _, path := range []string{"execute", "count", "stream"} {
+			t.Run(strings.Join(providers, ",")+"/"+path, func(t *testing.T) {
+				m, calls := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile), disabledClaudeOAuth, disabledCodexOAuth)
+				_, err := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, providers, cliproxyexecutor.Request{Model: providerPolicyTestModel}, pin)
+				assertProviderDisabledError(t, err, disabledKeyMessage)
+				if len(*calls) != 0 {
+					t.Fatalf("executor calls = %v, want none", *calls)
+				}
+				assertNoAuthFailures(t, m)
+			})
+		}
+	}
+
+	// A pin to an auth of the enabled provider is served.
+	m, calls := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile), disabledClaudeOAuth, disabledCodexOAuth)
+	codexPin := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: disabledCodexOAuth.id}}
+	if _, err := m.Execute(ginContextWithKey(routingTestKeyA), []string{"claude", "codex"}, cliproxyexecutor.Request{Model: providerPolicyTestModel}, codexPin); err != nil {
+		t.Fatalf("pinned codex request: %v", err)
+	}
+	if !reflect.DeepEqual(*calls, []string{disabledCodexOAuth.id}) {
+		t.Fatalf("calls = %v, want the pinned codex auth", *calls)
+	}
+}
+
+func TestDisabledProviderNotEnforcedWithoutProviderPolicy(t *testing.T) {
+	keyProfile := disabledProviders(true, true)
+	cfg := disabledProviderConfig(disabledProviders(true, true), &keyProfile)
+
+	t.Run("plugin scheduler", func(t *testing.T) {
+		m, calls := providerPolicyTestManager(t, cfg, disabledClaudeOAuth, disabledCodexOAuth)
+		m.SetPluginScheduler(&fakePluginScheduler{})
+		for _, ctx := range []context.Context{ginContextWithKey(routingTestKeyA), ginContextWithKey(routingTestKeyB)} {
+			if _, err := m.Execute(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: providerPolicyTestModel}, cliproxyexecutor.Options{}); err != nil {
+				t.Fatalf("Execute under a plugin scheduler: %v", err)
+			}
+		}
+		if len(*calls) != 2 {
+			t.Fatalf("calls = %v, want two claude calls", *calls)
+		}
+	})
+
+	t.Run("home", func(t *testing.T) {
+		homeCfg := *cfg
+		homeCfg.Home.Enabled = true
+		m := NewManager(nil, &RoundRobinSelector{}, nil)
+		m.SetConfig(&homeCfg)
+		ctx := m.ensureRoutingProfile(ginContextWithKey(routingTestKeyA))
+		providers, err := m.filterDisabledProviders(ctx, []string{"claude", "codex"}, cliproxyexecutor.Options{})
+		if err != nil || !reflect.DeepEqual(providers, []string{"claude", "codex"}) {
+			t.Fatalf("Home filter = %v, %v; want both providers kept", providers, err)
+		}
+	})
 }
