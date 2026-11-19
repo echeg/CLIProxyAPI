@@ -97,25 +97,68 @@ func TestGetFirstAvailableModelMatchingSkipsUnavailableAliasPool(t *testing.T) {
 }
 
 // GetFirstRegisteredModelMatching ignores availability: a model whose only
-// accepted client cools down is still returned, newest first.
+// accepted client cools down, or is suspended for a reason that hides it from the
+// listing, is still returned, newest first.
 func TestGetFirstRegisteredModelMatching(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("claude-client", "claude", []*ModelInfo{{ID: "newest-claude", Created: 300}})
 	r.RegisterClient("codex-client", "codex", []*ModelInfo{{ID: "older-codex", Created: 200}})
 	r.SetModelQuotaExceeded("claude-client", "newest-claude")
-	r.SetModelQuotaExceeded("codex-client", "older-codex")
+	r.SuspendClientModel("codex-client", "older-codex", "unauthorized")
 	onlyCodex := func(provider string) bool { return provider == "codex" }
 
 	if got, err := r.GetFirstAvailableModelMatching("", nil); err == nil {
-		t.Fatalf("GetFirstAvailableModelMatching with every client cooling down = %q, want an error", got)
+		t.Fatalf("GetFirstAvailableModelMatching with no available client = %q, want an error", got)
 	}
-	if got, err := r.GetFirstRegisteredModelMatching("", func(string) bool { return true }); err != nil || got != "newest-claude" {
-		t.Fatalf("accept all = %q, %v; want newest-claude", got, err)
+	for _, model := range r.GetAvailableModels("") {
+		if model["id"] == "older-codex" {
+			t.Fatal("the listing shows older-codex; the test needs a model hidden by its suspension")
+		}
 	}
-	if got, err := r.GetFirstRegisteredModelMatching("", onlyCodex); err != nil || got != "older-codex" {
+	for _, accept := range []func(string) bool{nil, func(string) bool { return true }} {
+		if got, err := r.GetFirstRegisteredModelMatching(accept); err != nil || got != "newest-claude" {
+			t.Fatalf("accept all = %q, %v; want newest-claude", got, err)
+		}
+	}
+	if got, err := r.GetFirstRegisteredModelMatching(onlyCodex); err != nil || got != "older-codex" {
 		t.Fatalf("accept codex = %q, %v; want older-codex", got, err)
 	}
-	if got, err := r.GetFirstRegisteredModelMatching("", func(string) bool { return false }); err == nil {
+	if got, err := r.GetFirstRegisteredModelMatching(func(string) bool { return false }); err == nil {
 		t.Fatalf("accept none = %q, want an error", got)
+	}
+
+	r.UnregisterClient("codex-client")
+	if got, err := r.GetFirstRegisteredModelMatching(onlyCodex); err == nil {
+		t.Fatalf("accept codex after unregistering it = %q, want an error", got)
+	}
+}
+
+// The per-client entry counts follow re-registration and unregistration, so a
+// pool that shrinks to one entry, or a client that is gone, is not over-counted.
+func TestGetModelCountMatchingFollowsReRegisteredAliasPool(t *testing.T) {
+	r := newTestModelRegistry()
+	pool := []*ModelInfo{{ID: "pooled-alias", Created: 300}, {ID: "pooled-alias", Created: 300}}
+	r.RegisterClient("pool-client", "openai-compatibility", pool)
+	r.RegisterClient("other-client", "openai-compatibility", []*ModelInfo{{ID: "pooled-alias", Created: 300}})
+	if count := r.GetModelCount("pooled-alias"); count != 3 {
+		t.Fatalf("GetModelCount(pooled-alias) = %d, want 3", count)
+	}
+	r.SetModelQuotaExceeded("pool-client", "pooled-alias")
+	if count := r.GetModelCount("pooled-alias"); count != 1 {
+		t.Fatalf("count with the two-entry pool cooling down = %d, want 1", count)
+	}
+
+	r.RegisterClient("pool-client", "openai-compatibility", pool[:1])
+	r.SetModelQuotaExceeded("pool-client", "pooled-alias")
+	if count := r.GetModelCount("pooled-alias"); count != 1 {
+		t.Fatalf("count with the shrunk pool cooling down = %d, want 1", count)
+	}
+
+	r.UnregisterClient("pool-client")
+	if _, ok := r.clientModelCounts["pool-client"]; ok {
+		t.Fatal("unregistered client keeps its entry counts")
+	}
+	if count := r.GetModelCount("pooled-alias"); count != 1 {
+		t.Fatalf("count after unregistering the pool = %d, want 1", count)
 	}
 }

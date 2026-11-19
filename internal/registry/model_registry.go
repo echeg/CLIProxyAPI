@@ -193,7 +193,7 @@ type ModelRegistry struct {
 	// clientModels maps client ID to the models it provides
 	clientModels map[string][]string
 	// clientModelCounts maps client ID to model ID -> the number of times the
-	// client lists that model (above one for an alias pool), mirroring
+	// client lists that model (above one for an alias pool). It is written with
 	// clientModels so an availability count reads it in O(1).
 	clientModelCounts map[string]map[string]int
 	// clientModelInfos maps client ID to a map of model ID -> ModelInfo
@@ -534,6 +534,9 @@ func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, mo
 	if r.clientEpochs == nil {
 		r.clientEpochs = make(map[string]uint64)
 	}
+	if r.clientModelCounts == nil {
+		r.clientModelCounts = make(map[string]map[string]int)
+	}
 
 	provider := strings.ToLower(clientProvider)
 	uniqueModelIDs := make([]string, 0, len(models))
@@ -587,6 +590,7 @@ func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, mo
 			r.addModelRegistration(modelID, provider, model, now, clientID)
 		}
 		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+		r.clientModelCounts[clientID] = newCounts
 		// Store client's own model infos
 		clientInfos := make(map[string]*ModelInfo, len(newModels))
 		for id, m := range newModels {
@@ -746,6 +750,7 @@ func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, mo
 	r.dropClientWebSearchCountsLocked(clientID)
 	if len(rawModelIDs) > 0 {
 		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+		r.clientModelCounts[clientID] = newCounts
 	}
 	// Update client's own model infos
 	clientInfos := make(map[string]*ModelInfo, len(newModels))
@@ -1011,6 +1016,7 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	r.dropClientWebSearchCountsLocked(clientID)
 
 	delete(r.clientModels, clientID)
+	delete(r.clientModelCounts, clientID)
 	delete(r.clientModelInfos, clientID)
 	if hasProvider {
 		delete(r.clientProviders, clientID)
@@ -1932,13 +1938,7 @@ func (r *ModelRegistry) GetModelCountMatching(modelID string, acceptProvider fun
 // lists its alias once per upstream model. A client without a recorded entry
 // counts once. The caller holds the registry mutex.
 func (r *ModelRegistry) clientModelRegistrationsLocked(clientID, modelID string) int {
-	entries := 0
-	for _, id := range r.clientModels[clientID] {
-		if id == modelID {
-			entries++
-		}
-	}
-	return max(entries, 1)
+	return max(r.clientModelCounts[clientID][modelID], 1)
 }
 
 // GetModelProviders returns provider identifiers that currently supply the given model
@@ -2203,48 +2203,6 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 // available clients all belong to rejected providers is skipped. A nil
 // acceptProvider counts every client.
 func (r *ModelRegistry) GetFirstAvailableModelMatching(handlerType string, acceptProvider func(provider string) bool) (string, error) {
-	modelID, err := r.firstListedModel(handlerType, func(modelID string) bool {
-		return r.GetModelCountMatching(modelID, acceptProvider) > 0
-	})
-	if err != nil {
-		return "", err
-	}
-	if modelID == "" {
-		return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
-	}
-	return modelID, nil
-}
-
-// GetFirstRegisteredModelMatching returns the newest model listed for
-// handlerType that a client of a provider acceptProvider allows registers,
-// whether or not that client is available (for example while it cools down).
-func (r *ModelRegistry) GetFirstRegisteredModelMatching(handlerType string, acceptProvider func(provider string) bool) (string, error) {
-	modelID, err := r.firstListedModel(handlerType, func(modelID string) bool {
-		r.mutex.RLock()
-		defer r.mutex.RUnlock()
-		registration, exists := r.models[modelID]
-		if !exists {
-			return false
-		}
-		for provider, count := range registration.Providers {
-			if count > 0 && acceptProvider(provider) {
-				return true
-			}
-		}
-		return false
-	})
-	if err != nil {
-		return "", err
-	}
-	if modelID == "" {
-		return "", fmt.Errorf("no registered clients of an accepted provider for any model in handler type: %s", handlerType)
-	}
-	return modelID, nil
-}
-
-// firstListedModel returns the newest model listed for handlerType that pick
-// accepts, or "" when pick accepts none. It fails only when nothing is listed.
-func (r *ModelRegistry) firstListedModel(handlerType string, pick func(modelID string) bool) (string, error) {
 	// Get all available models for this handler type
 	models := r.GetAvailableModels(handlerType)
 	if len(models) == 0 {
@@ -2262,12 +2220,54 @@ func (r *ModelRegistry) firstListedModel(handlerType string, pick func(modelID s
 		return createdI > createdJ
 	})
 
+	// Find the first model with available clients
 	for _, model := range models {
-		if modelID, ok := model["id"].(string); ok && pick(modelID) {
-			return modelID, nil
+		if modelID, ok := model["id"].(string); ok {
+			if count := r.GetModelCountMatching(modelID, acceptProvider); count > 0 {
+				return modelID, nil
+			}
 		}
 	}
-	return "", nil
+
+	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+}
+
+// GetFirstRegisteredModelMatching returns the newest model that a client of a
+// provider acceptProvider allows registers, whatever the state of that client.
+// Unlike the listing behind GetFirstAvailableModel, it also sees a model whose
+// clients are all suspended. A nil acceptProvider accepts every provider.
+func (r *ModelRegistry) GetFirstRegisteredModelMatching(acceptProvider func(provider string) bool) (string, error) {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	newestID, newestCreated := "", int64(0)
+	for modelID, registration := range r.models {
+		if registration == nil {
+			continue
+		}
+		accepted := false
+		for provider, count := range registration.Providers {
+			if count > 0 && (acceptProvider == nil || acceptProvider(provider)) {
+				accepted = true
+				break
+			}
+		}
+		if !accepted {
+			continue
+		}
+		created := int64(0)
+		if registration.Info != nil {
+			created = registration.Info.Created
+		}
+		// Ties go to the smaller ID so the choice does not depend on map order.
+		if newestID == "" || created > newestCreated || (created == newestCreated && modelID < newestID) {
+			newestID, newestCreated = modelID, created
+		}
+	}
+	if newestID == "" {
+		return "", fmt.Errorf("no registered clients of an accepted provider")
+	}
+	return newestID, nil
 }
 
 // GetModelsAndEpochForClient atomically returns the models registered for clientID along with the client's current registration epoch.

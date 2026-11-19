@@ -98,3 +98,82 @@ func TestHandlerRefusesDisabledCodex(t *testing.T) {
 		})
 	}
 }
+
+// TestRealtimeEntryPointsRefuseDisabledCodex checks the realtime entry points
+// that select before the websocket upgrade: a new direct realtime websocket and
+// the sideband of a call opened before Codex was disabled. A disable applies to
+// new connections, so both are refused with the OpenAI-format refusal; only the
+// hangup of an open call is exempt.
+func TestRealtimeEntryPointsRefuseDisabledCodex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const ownerKey = "realtime-codex-off"
+	const message = "codex is disabled by the routing profile of this API key"
+	for _, tc := range []struct {
+		name  string
+		route string
+		path  string
+		mount func(handler *Handler) gin.HandlerFunc
+	}{
+		{"direct websocket", "/v1/realtime", "/v1/realtime?model=gpt-realtime", func(handler *Handler) gin.HandlerFunc { return handler.HandleDirectWebsocket }},
+		{"sideband of an open call", "/v1/realtime/calls/:call_id", "/v1/realtime/calls/call-open", func(handler *Handler) gin.HandlerFunc {
+			handler.sessions.put("call-open", liveSession{
+				authID:         "codex-oauth-realtime-disabled",
+				model:          defaultLiveModel,
+				ownerPrincipal: ownerKey,
+				ownerProvider:  "static",
+			})
+			return handler.HandleSideband
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := auth.NewManager(nil, nil, nil)
+			cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{ownerKey}}}
+			cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{
+				ownerKey: {Providers: config.ProvidersRoutingConfig{Codex: config.ProviderRoutingConfig{Disabled: true}}},
+			}
+			manager.SetConfig(cfg)
+			executor := &captureExecutor{}
+			manager.RegisterExecutor(executor)
+			registerCredential(t, manager, &auth.Auth{
+				ID:       "codex-oauth-realtime-disabled",
+				Provider: "codex",
+				Status:   auth.StatusActive,
+				Metadata: map[string]any{"access_token": "oauth-token", "account_id": "account-123"},
+			})
+
+			handler := NewHandler(manager, nil)
+			router := gin.New()
+			router.GET(tc.route, func(c *gin.Context) {
+				// The access middleware stores the authenticated client key here.
+				c.Set("userApiKey", ownerKey)
+				c.Set("accessProvider", "static")
+				c.Next()
+			}, tc.mount(handler))
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body=%s", recorder.Code, recorder.Body.String())
+			}
+			var body struct {
+				Error struct {
+					Message string `json:"message"`
+					Type    string `json:"type"`
+					Code    string `json:"code"`
+				} `json:"error"`
+			}
+			if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &body); errUnmarshal != nil {
+				t.Fatalf("decode body %s: %v", recorder.Body.String(), errUnmarshal)
+			}
+			if body.Error.Message != message || body.Error.Type != "permission_error" || body.Error.Code != "provider_disabled" {
+				t.Fatalf("error = %+v; want %q, permission_error, provider_disabled", body.Error, message)
+			}
+			if calls := executor.httpCalls.Load(); calls != 0 {
+				t.Fatalf("upstream calls = %d after a refusal, want 0", calls)
+			}
+		})
+	}
+}

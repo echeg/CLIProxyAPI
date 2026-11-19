@@ -341,7 +341,10 @@ profile paths use the 12-hex key hash, for example
   and the refusal message, and never reaches upstream.
 - Codex Alpha Search (`/v1/alpha/search`) and Codex live and realtime
   (`/v1/live`) select a Codex credential directly and are refused with the same
-  403 when the profile disables Codex.
+  403 when the profile disables Codex. On `/v1/alpha/search` and `/v1/live` the
+  body is `{"error": "<message>"}`, a plain string without `type` or `code`, as
+  their other errors are; the `/v1/realtime/...` routes use the OpenAI error
+  object described above.
 - A disable applies to new requests and connections after a hot reload. An open
   Codex duplex websocket forwards follow-up creates and steering frames inside
   its existing upstream stream, so it keeps running until it closes. The hangup
@@ -351,10 +354,13 @@ profile paths use the 12-hex key hash, for example
 - `/v1/models` is global and still lists every model, including models of a
   disabled provider. `model: auto` resolves, with the request's profile, to the
   newest model that has an available credential of an enabled provider, so it
-  skips a model whose only available credentials belong to disabled providers;
-  when there is none, it resolves as before and the request gets the 403, also
-  when every credential is cooling down and `auto` falls back to the newest
-  model of a disabled provider. A Responses websocket resolves `auto` the same
+  skips a model whose only available credentials belong to disabled providers.
+  When there is none, it resolves to the newest model an enabled provider
+  serves, so the request gets that provider's own error (for example a `429`
+  while its credentials cool down), and to the newest model of a disabled
+  provider only when no enabled provider serves any model, so the request gets
+  the 403 whatever the state of the disabled provider's credentials. A
+  Responses websocket resolves `auto` the same
   way when it matches its pinned credential to a turn, and ignores credentials of
   disabled providers when it decides how to replay a turn.
 - **Primary leg.** Each candidate credential is filtered by the mode of its own

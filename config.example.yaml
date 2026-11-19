@@ -253,7 +253,8 @@ routing:
   #   needs the provider with 403 "<provider> is disabled by the routing profile"
   #   (" of this API key" for a key profile) before any credential is selected, so
   #   no credential cools down and no fallback runs. Pinned requests, Codex search
-  #   and live/realtime are refused too. A model served by both providers runs on
+  #   and new live/realtime calls are refused too (the hangup of an open realtime
+  #   call still goes through). A model served by both providers runs on
   #   the enabled one. The other fields are kept and still validated, so false
   #   restores them. codex.disabled turns off the Claude -> Codex fallback (the load
   #   warns). Applies to new requests and connections; an open Codex websocket

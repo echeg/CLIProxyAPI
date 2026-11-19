@@ -188,3 +188,35 @@ func TestResponsesWebsocketCompactionReplayIgnoresDisabledProvider(t *testing.T)
 		t.Fatal("plain key: compaction replay = true, want false (mixed Claude and Codex backends)")
 	}
 }
+
+// A pin to a disabled provider is released, not refused, when another provider
+// can serve the turn: after Codex is disabled, a full response.create on a model
+// that Claude also serves runs on Claude, and the release is logged.
+func TestResponsesWebsocketReleasesDisabledPinWhenAnotherProviderServes(t *testing.T) {
+	f := newDisabledCodexPinFixture(t)
+	hook := policyPinLogHook(t)
+	conn := f.dial()
+	f.pinSubscription(conn)
+
+	claude := &websocketPolicyPinExecutor{provider: "claude"}
+	f.manager.RegisterExecutor(claude)
+	claudeID := "ws-disabled-claude-" + f.subID
+	claudeAuth := &coreauth.Auth{ID: claudeID, Provider: "claude", Status: coreauth.StatusActive, Metadata: map[string]any{"access_token": "claude-token"}}
+	if _, err := f.manager.Register(context.Background(), claudeAuth); err != nil {
+		t.Fatalf("register %s: %v", claudeID, err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(claudeID, "claude", []*registry.ModelInfo{{ID: f.model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(claudeID) })
+
+	f.disableCodexForKey()
+	policyPinSendCompleted(t, conn, f.fullCreate("msg-2"))
+	if got := claude.turns(claudeID); got != 1 {
+		t.Fatalf("claude turns = %d, want 1; codex auth IDs %v, claude auth IDs %v", got, f.executor.AuthIDs(), claude.AuthIDs())
+	}
+	if got := f.executor.turns(f.subID); got != 1 {
+		t.Fatalf("subscription turns = %d, want 1 (turn 2 reached the disabled Codex)", got)
+	}
+	if !policyPinReleaseLogged(hook) {
+		t.Fatalf("missing log %q", policyPinReleaseLogMessage)
+	}
+}

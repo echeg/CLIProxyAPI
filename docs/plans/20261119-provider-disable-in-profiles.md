@@ -10,12 +10,12 @@
 
 ## Success Criteria
 - A key profile with `claude.disabled: true`: `/v1/messages` with a Claude model returns 403 whose client-facing `error.message` is exactly `claude is disabled by the routing profile of this API key` (no error-code prefix); `/v1/responses` with a Codex model works.
-- A key profile with `codex.disabled: true`: Codex search (`/v1/alpha/search`) and live/realtime (`/v1/live`) are refused with 403.
+- A key profile with `codex.disabled: true`: Codex search (`/v1/alpha/search`) and live/realtime (`/v1/live`) are refused with 403; the hangup of a realtime call opened before the disable still goes through.
 - `disabled: true` in the shared profile applies to every key without its own profile, with the message `claude is disabled by the routing profile`.
 - A disabled Codex blocks the Claude -> Codex fallback leg in both `auto` and `always` modes.
 - Streaming, non-streaming and count-tokens requests are refused the same way; a Responses websocket pinned to an auth of a disabled provider is refused or released, never served.
 - A model served by both providers runs on the enabled one when the other is disabled.
-- Configs without `disabled` behave exactly as before and are written back byte-stable. A management PATCH with `disabled: false` re-enables the provider (the file keeps an explicit `disabled: false`); `DELETE /v8/management/config/routing/providers/<p>/disabled` (or the key-profile path) removes the key; a typed save of the shared profile drops a cleared `disabled` key, as it does for the Codex speed fields.
+- Configs without `disabled` behave exactly as before (except the accepted alias-pool count fix for `model: auto`, see the Decision Log) and are written back byte-stable. A management PATCH with `disabled: false` re-enables the provider (the file keeps an explicit `disabled: false`); `DELETE /v8/management/config/routing/providers/<p>/disabled` (or the key-profile path) removes the key; a typed save of the shared profile drops a cleared `disabled` key, as it does for the Codex speed fields.
 - Home mode and a plugin scheduler are unaffected.
 - `go build ./...`, `go vet ./...`, `go test ./...` pass; `go test -race ./sdk/cliproxy/auth/...` passes.
 
@@ -108,6 +108,11 @@
 - 2026-11-19 grill: **accepted** - Task 5 drops the hand-built-view check, names `routing_provider_disabled_test.go` modeled on `routing_codex_speed_test.go`, round-trips the GET `providers` block (not the whole GET body), and specifies PATCH `false` keeps `disabled: false` while DELETE removes it; Success Criteria updated - decided by grill: `routing_profiles.go:38-46`, `config_v8.go:93-99`, `:387`, `docs/management-api-v8.md:432-436`
 - 2026-11-19 grill: **accepted** - Task 6 replaces test-name bookkeeping with "confirm each criterion maps to a test" - decided by grill: Tasks 1-5 list a test per criterion
 - 2026-11-19 grill: **accepted** - a disable applies to new requests and connections; an open Codex duplex websocket runs until it closes (Overview, Success Criteria via docs, Task 7)
+- 2026-11-19 review: **accepted** - a Claude Thread continuation owned by a disabled Claude is refused with the Claude 403, also when `auto` resolved it to another provider, because another provider would run it without the conversation history - decided by review: `filterDisabledProviders` drops claude before `withClaudeThreadAuth` would run in `execute`
+- 2026-11-19 review: **accepted** - the hangup of an open realtime call skips the switch through `WithOpenSessionPin`, so a call opened before the disable can still be ended; every other selection check of the pin still applies
+- 2026-11-19 review: **accepted** - OpenAI-format refusals carry `type: permission_error`, `code: provider_disabled`, also in-band after a pre-first-token keep-alive; `/v1/alpha/search` and `/v1/live` keep their plain-string error body
+- 2026-11-19 review: **accepted** - `model: auto` resolves with the request's profile: the newest model with an available client of an enabled provider; else, when a disabled provider registers a model, the newest model an enabled provider registers (its own error, for example a cooldown), and the newest model of a disabled provider (the 403) only when no enabled provider registers one; the Responses websocket pin matcher and capability checks use the same profile
+- 2026-11-19 review: **accepted** - the availability count subtracts every alias-pool entry of an unavailable client (`clientModelCounts`), which also changes `auto` for configs without `disabled` (a cooling pool no longer wins over a healthy older model); kept here because the filtered count needed it and one shared count avoids two accountings; the listing paths are in backlog `model-listing-counts-alias-pool-entries.md`
 
 ## Implementation Steps
 
@@ -131,12 +136,16 @@
 - [x] write tests with `newStandardLogHook` (`sdk/cliproxy/auth/routing_profile_test.go:216`): exactly one Info entry per refusal with `provider` and `profile` (`shared` or the key hash) and no raw key in any field
 - [x] write tests: Home mode and a plugin scheduler (`providerPolicy` false) do not refuse
 - [x] write handler tests that the client receives HTTP 403 with exactly the message in `error.message` for `/v1/messages` (non-streaming), a streaming request (bootstrap error), and count-tokens
+- [x] ➕ refuse a Claude Thread continuation owned by a disabled Claude when claude was dropped from the list or `auto` resolved away from it (`requestedAutoModel`); tests `TestDisabledClaudeRefusesOwnedThreadContinuation`, `TestDisabledClaudeRefusesOwnedThreadContinuationResolvedFromAuto`
+- [x] ➕ keep `type: permission_error` and `code: provider_disabled` on OpenAI-format refusals, including in-band stream errors after a keep-alive (`BuildErrorResponseBodyWithError`, `ResponsesStreamErrorTextWithError`); tests in `sdk/api/handlers/openai/openai_stream_provider_disabled_test.go` and `sdk/api/handlers/gemini/gemini_stream_provider_disabled_test.go`
+- [x] ➕ resolve `model: auto` with the request's profile (`BaseAPIHandler.AutoModelProviderFilter`, `util.ResolveAutoModelMatching`, registry `GetModelCountMatching`/`GetFirstAvailableModelMatching`/`GetFirstRegisteredModelMatching`, alias-pool entry counts in `clientModelCounts`); tests `sdk/api/handlers/handlers_auto_model_provider_disabled_test.go`, `internal/registry/model_registry_first_available_test.go`
 - [x] run `go test ./sdk/cliproxy/auth/... ./sdk/api/...` - must pass before task 3
 
 ### Task 3: Refuse direct auth selection for a disabled provider
 - [x] in `SelectAuthExcluding`, `SelectAuthByKind` and `SelectAuthWithCredentialPolicy` (`sdk/cliproxy/auth/conductor_selection.go:2604`, `:2628`, `:2652`), resolve the profile with `ensureRoutingProfile` and return the Task 2 refusal (same message and log line) before picking when the requested provider is disabled; Home and plugin schedulers are unchanged because `providerMode` reports no policy there (implemented as `Manager.refuseDisabledSelection` in `provider_policy.go`)
 - [x] write Manager-level tests: each of the three methods refuses `codex` under a key profile and under the shared profile with the exact message, and still selects when Codex is enabled
 - [x] write handler tests: `/v1/alpha/search` (see `internal/api/server_codex_search_siwc_test.go`) and `/v1/live` (see `internal/client/codex/live/live_test.go`) return 403 for a key whose profile disables Codex
+- [x] ➕ let the hangup of an open realtime call select its pinned credential through `WithOpenSessionPin`, and give realtime refusals the OpenAI type and code (`writeSelectionError`); tests `TestHandleHangupForwardsOpenCallAfterCodexDisabled`, `TestOpenSessionPinSkipsOnlyTheDisabledSwitch`, `TestHandlerRefusesDisabledCodex`, `TestRealtimeEntryPointsRefuseDisabledCodex`
 - [x] run `go test ./sdk/cliproxy/auth/... ./internal/api/... ./internal/client/codex/...` - must pass before task 4
 
 ### Task 4: Keep fallbacks and pinned websocket auths away from a disabled provider
@@ -146,6 +155,7 @@
 - [x] add rows to `TestRoutingPolicyAllowsAuth` (`sdk/cliproxy/auth/provider_policy_test.go:414`): an OAuth and an API-key auth of a disabled provider -> false in both modes; the other provider -> true; `providerPolicy` false -> true
 - [x] write a Responses websocket test: a session pinned to a Codex auth, Codex then disabled in the key profile and no other target able to serve the turn - the next turn gets the 403 and never reaches upstream
 - [x] ➕ expose the refusal on the Responses websocket: `shouldExposeResponsesUpstreamError` closed the socket without an error event for a 403 (only terminal-auth, 429/cooldown and request faults were exposed), so the client saw an abnormal close and would reconnect in a loop; added the exported `coreauth.IsProviderDisabledError` and exposed it there (test `TestResponsesWebsocketPinnedTurnRefusedWhenCodexDisabled` in `openai_responses_websocket_provider_disabled_test.go`, full create and incremental)
+- [x] ➕ resolve `auto` per websocket turn with the key's profile (`responsesWebsocketResolvedModel`) and leave auths of disabled providers out of the replay capability checks (`responsesWebsocketAvailableAuthsForModel`); tests `TestResponsesWebsocketAutoModelKeepsCodexPinWhenProfileDisablesClaude`, `TestResponsesWebsocketCompactionReplayIgnoresDisabledProvider`, `TestResponsesWebsocketReleasesDisabledPinWhenAnotherProviderServes`
 - [x] run `go test ./sdk/cliproxy/auth/... ./sdk/api/...` and `go test -race ./sdk/cliproxy/auth/...` - must pass before task 5
 
 ### Task 5: Lock the management API behavior for `disabled`
@@ -187,16 +197,18 @@ routing:
 JSON (`GET /v8/management/routing/profiles`): `"disabled": false` is always present in each provider block, because the panel uses its presence to detect support.
 
 ### Request flow
+0. Handlers resolve `model: auto` with the request's profile (`AutoModelProviderFilter`), preferring models of enabled providers.
 1. `Execute` / `ExecuteCount` / `ExecuteStream` resolve the routing profile (`ensureRoutingProfile`).
-2. `executeWithProviderFallback` filters the provider list. Nothing left -> 403 request-scoped error, logged, returned before the fallback decision.
+2. `executeWithProviderFallback` filters the provider list. Nothing left, a pin to a disabled provider, or a Claude Thread owned by a disabled Claude -> 403 request-scoped error, logged, returned before the fallback decision.
 3. `providerFallbackFor` sees the filtered list and skips a Codex fallback when Codex is disabled.
 4. Selection: `providerPolicyAllows` rejects auths of a disabled provider (defense in depth; drives websocket pin release).
-5. Direct selection (`SelectAuthExcluding`, `SelectAuthByKind`, `SelectAuthWithCredentialPolicy`, used by Codex search and live/realtime) refuses a disabled provider before picking.
+5. Direct selection (`SelectAuthExcluding`, `SelectAuthByKind`, `SelectAuthWithCredentialPolicy`, used by Codex search and live/realtime) refuses a disabled provider before picking; only an open-session pin (`WithOpenSessionPin`, the realtime hangup) skips the switch.
 
 ### Messages
 - key profile: `claude is disabled by the routing profile of this API key`
 - shared profile: `claude is disabled by the routing profile`
 - the same with `codex`.
+- OpenAI-format bodies carry `type: permission_error` and `code: provider_disabled`; `/v1/alpha/search` and `/v1/live` return `{"error": "<message>"}`.
 
 ### Non-goals
 - Filtering `/v1/models` per key.

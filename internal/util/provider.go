@@ -91,34 +91,37 @@ func ResolveAutoModel(modelName string) string {
 }
 
 // ResolveAutoModelMatching resolves "auto" like ResolveAutoModel but prefers the
-// first model with an available client of a provider acceptProvider allows. When
-// no model has one (or acceptProvider is nil), it falls back to the first
-// available model, so the request still fails with that model's own error
-// instead of an unknown-model error. When no model has an available client at
-// all, it resolves to the newest model registered by a provider acceptProvider
-// rejects, so the request still reaches the routing-profile refusal whatever the
-// quota state of that provider's clients.
+// newest model with an available client of a provider acceptProvider allows.
+// When there is none and a provider acceptProvider rejects registers a model,
+// it resolves to the newest model an accepted provider registers, so the
+// request gets that provider's own error (for example its cooldown) rather than
+// a refusal for a provider it never asked for, and to the newest model of a
+// rejected provider only when no accepted provider registers one, so the
+// request still reaches the routing-profile refusal. Otherwise, and with a nil
+// acceptProvider, it resolves like ResolveAutoModel.
 func ResolveAutoModelMatching(modelName string, acceptProvider func(provider string) bool) string {
 	if modelName != "auto" {
 		return modelName
 	}
 
-	// Use empty string as handler type to get any available model
 	reg := registry.GetGlobalRegistry()
 	if acceptProvider != nil {
 		if matched, errMatch := reg.GetFirstAvailableModelMatching("", acceptProvider); errMatch == nil {
 			log.Infof("Resolved 'auto' model to: %s", matched)
 			return matched
 		}
-	}
-	firstModel, err := reg.GetFirstAvailableModel("")
-	if err != nil && acceptProvider != nil {
 		rejected := func(provider string) bool { return !acceptProvider(provider) }
-		if refused, errRefused := reg.GetFirstRegisteredModelMatching("", rejected); errRefused == nil {
-			log.Infof("Resolved 'auto' model to: %s (no available client; its provider is rejected)", refused)
+		if refused, errRefused := reg.GetFirstRegisteredModelMatching(rejected); errRefused == nil {
+			if accepted, errAccepted := reg.GetFirstRegisteredModelMatching(acceptProvider); errAccepted == nil {
+				log.Infof("Resolved 'auto' model to: %s (no available client of an accepted provider)", accepted)
+				return accepted
+			}
+			log.Infof("Resolved 'auto' model to: %s (only a rejected provider registers a model)", refused)
 			return refused
 		}
 	}
+	// Use empty string as handler type to get any available model
+	firstModel, err := reg.GetFirstAvailableModel("")
 	if err != nil {
 		log.Warnf("Failed to resolve 'auto' model: %v, falling back to original model name", err)
 		return modelName

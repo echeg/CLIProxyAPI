@@ -169,24 +169,21 @@ func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, resolvedModel
 // responsesWebsocketResolvedModel resolves "auto" with the routing profile of the
 // connection's key in ctx, as execution does (BaseAPIHandler.AutoModelProviderFilter),
 // so pin matching and transport choices follow the model the turn runs on.
+// Any other model name is returned unchanged.
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketResolvedModel(ctx context.Context, modelName string) string {
+	initialSuffix := thinking.ParseSuffix(modelName)
+	if initialSuffix.ModelName != "auto" {
+		return modelName
+	}
 	var acceptProvider func(provider string) bool
-	if h != nil && h.BaseAPIHandler != nil {
+	if h != nil {
 		acceptProvider = h.AutoModelProviderFilter(ctx)
 	}
-	return responsesWebsocketResolvedModelName(modelName, acceptProvider)
-}
-
-func responsesWebsocketResolvedModelName(modelName string, acceptProvider func(provider string) bool) string {
-	initialSuffix := thinking.ParseSuffix(modelName)
-	if initialSuffix.ModelName == "auto" {
-		resolvedBase := util.ResolveAutoModelMatching(initialSuffix.ModelName, acceptProvider)
-		if initialSuffix.HasSuffix {
-			return fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
-		}
-		return resolvedBase
+	resolvedBase := util.ResolveAutoModelMatching(initialSuffix.ModelName, acceptProvider)
+	if initialSuffix.HasSuffix {
+		return fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 	}
-	return util.ResolveAutoModel(modelName)
+	return resolvedBase
 }
 
 func responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string]struct{}, string) {

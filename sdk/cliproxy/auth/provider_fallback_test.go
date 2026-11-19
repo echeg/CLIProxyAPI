@@ -1077,6 +1077,38 @@ func TestDisabledClaudeRefusesOwnedThreadContinuation(t *testing.T) {
 	}
 }
 
+// The gate's Thread lookup keeps its own errors: a continuation pinned to a
+// credential that does not own the disabled Claude's Thread gets the 409
+// conflict the lookup reports, and no provider runs it.
+func TestDisabledClaudeThreadLookupErrorStopsRequest(t *testing.T) {
+	keyProfile := disabledProviders(true, false)
+	providers := []string{"claude", "gemini"}
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			m, calls := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile), disabledClaudeOAuth, disabledGeminiKey)
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatClaude,
+				Metadata: map[string]any{
+					cliproxyexecutor.CallerScopeMetadataKey: t.Name() + "-" + uuid.NewString(),
+					cliproxyexecutor.PinnedAuthMetadataKey:  disabledGeminiKey.id,
+				},
+			}
+			ownedID := "msg_owned_" + uuid.NewString()
+			cliproxysession.RememberClaudeThreadAuth(cliproxysession.ClaudeThreadCallerScope("", opts.Metadata), ownedID, disabledClaudeOAuth.id)
+			payload := `{"model":"` + providerPolicyTestModel + `","thread":{"type":"continue","previous_message_id":"` + ownedID + `"},"messages":[{"role":"user","content":"next"}]}`
+
+			_, err := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, providers, cliproxyexecutor.Request{Model: providerPolicyTestModel, Payload: []byte(payload)}, opts)
+			var authErr *Error
+			if !errors.As(err, &authErr) || authErr.Code != "thread_auth_conflict" || authErr.HTTPStatus != http.StatusConflict {
+				t.Fatalf("err = %v, want the 409 thread_auth_conflict", err)
+			}
+			if len(*calls) != 0 {
+				t.Fatalf("executor calls = %v, want none", *calls)
+			}
+		})
+	}
+}
+
 // The handler resolves "auto" to a model of an enabled provider, so a Thread
 // continuation of the disabled Claude arrives without claude in the list. The
 // gate still refuses it when Claude owns the Thread; an explicit model choice and

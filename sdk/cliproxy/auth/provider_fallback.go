@@ -163,20 +163,18 @@ func (m *Manager) filterDisabledProviders(ctx context.Context, providers []strin
 		policy, ok := profile.providerMode(provider)
 		return ok && policy.Disabled
 	}
-	checkClaudeThread := false
+	// The handler resolves "auto" to a model of an enabled provider, so a
+	// continuation of a Thread on the disabled Claude may not list claude here.
+	checkClaudeThread := disabled("claude") && (requestedAutoModel(opts) || slices.ContainsFunc(providers, func(provider string) bool {
+		return strings.EqualFold(strings.TrimSpace(provider), "claude")
+	}))
 	if i := slices.IndexFunc(providers, disabled); i >= 0 {
 		firstDisabled := providers[i]
-		checkClaudeThread = slices.ContainsFunc(providers, func(provider string) bool {
-			return strings.EqualFold(strings.TrimSpace(provider), "claude") && disabled(provider)
-		})
 		providers = slices.DeleteFunc(slices.Clone(providers), disabled)
 		if len(providers) == 0 {
 			return nil, refuseDisabledProvider(ctx, profile, firstDisabled)
 		}
 	}
-	// The handler resolves "auto" to a model of an enabled provider, so a
-	// continuation of a Thread on the disabled Claude never lists claude here.
-	checkClaudeThread = checkClaudeThread || (disabled("claude") && requestedAutoModel(opts))
 	if checkClaudeThread {
 		// execute resolves the Thread owner only while claude is listed, so look
 		// it up here before the remaining providers run the request.

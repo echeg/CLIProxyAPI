@@ -14,10 +14,10 @@ only one.
 (`clientModelRegistrationsLocked`), so `model: auto` is correct. The listing paths
 still subtract one per credential:
 
-- `modelRegistrationAvailability` (`internal/registry/model_registry.go:1589`,
-  `effectiveClients` at :1635), used by `GetAvailableModels`/`GetAvailableModelInfos`
-- `GetAvailableModelsByProvider` (`internal/registry/model_registry.go:1729`,
-  `effectiveClients` at :1836)
+- `modelRegistrationAvailability` (`internal/registry/model_registry.go`, its
+  `effectiveClients`), used by `GetAvailableModels`/`GetAvailableModelInfos`
+- `GetAvailableModelsByProvider` (`internal/registry/model_registry.go`, its
+  `effectiveClients`)
 
 Effect: a pool whose only credential is suspended for a non-quota reason stays in
 `/v1/models` and in the per-provider listing (for example `2 - 1 = 1`), although
