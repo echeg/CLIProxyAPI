@@ -62,6 +62,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	if routeDecision.ExecutorPluginID != "" {
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
+	ctx = h.withRequestRoutingProfile(ctx)
 	providers, normalizedModel, errMsg := h.providersForExecution(ctx, modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -142,6 +143,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
+	ctx = h.withRequestRoutingProfile(ctx)
 	providers, normalizedModel, errMsg := h.providersForExecution(ctx, modelName, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg

@@ -44,8 +44,18 @@ func OpenAICompatibleProviderKey(name string) string {
 // Returns:
 //   - []string: All provider identifiers capable of serving the model, ordered by preference.
 func GetProviderName(modelName string) []string {
+	_, providers := GetRegisteredModelProviders(modelName)
+	return providers
+}
+
+// GetRegisteredModelProviders returns the registered model ID that serves
+// modelName and its providers, as GetProviderName finds them: modelName itself
+// or, when only that is registered, its lowercase form. The registry is keyed
+// case-sensitively, so a count of the model's clients must use the returned ID.
+// Without a registration it returns modelName and no providers.
+func GetRegisteredModelProviders(modelName string) (string, []string) {
 	if modelName == "" {
-		return nil
+		return modelName, nil
 	}
 
 	providers := make([]string, 0, 4)
@@ -65,17 +75,19 @@ func GetProviderName(modelName string) []string {
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelName) {
 		appendProvider(provider)
 	}
-	if len(providers) == 0 && strings.ToLower(modelName) != modelName {
-		for _, provider := range registry.GetGlobalRegistry().GetModelProviders(strings.ToLower(modelName)) {
+	if len(providers) > 0 {
+		return modelName, providers
+	}
+	if lowerName := strings.ToLower(modelName); lowerName != modelName {
+		for _, provider := range registry.GetGlobalRegistry().GetModelProviders(lowerName) {
 			appendProvider(provider)
+		}
+		if len(providers) > 0 {
+			return lowerName, providers
 		}
 	}
 
-	if len(providers) > 0 {
-		return providers
-	}
-
-	return providers
+	return modelName, providers
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
@@ -87,32 +99,34 @@ func GetProviderName(modelName string) []string {
 // Returns:
 //   - string: The resolved model name, or the original if not "auto" or resolution fails
 func ResolveAutoModel(modelName string) string {
-	return ResolveAutoModelMatching(modelName, nil)
+	return ResolveAutoModelMatching(modelName, nil, nil)
 }
 
 // ResolveAutoModelMatching resolves "auto" like ResolveAutoModel but prefers the
-// newest model with an available client of a provider acceptProvider allows.
-// When there is none and a provider acceptProvider rejects registers a model,
-// it resolves to the newest model an accepted provider registers, so the
+// newest model with an available client of a provider acceptProvider allows
+// among the clients routeModel says serve it (see registry.ModelRouter). When
+// there is none and a provider acceptProvider rejects registers a model, it
+// resolves to the newest model such a client serves whatever its state, so the
 // request gets that provider's own error (for example its cooldown) rather than
 // a refusal for a provider it never asked for, and to the newest model of a
-// rejected provider only when no accepted provider registers one, so the
-// request still reaches the routing-profile refusal. Otherwise, and with a nil
-// acceptProvider, it resolves like ResolveAutoModel.
-func ResolveAutoModelMatching(modelName string, acceptProvider func(provider string) bool) string {
+// rejected provider only when there is no such model, so the request still
+// reaches the routing-profile refusal. Otherwise, and with a nil acceptProvider,
+// it resolves like ResolveAutoModel. A nil routeModel counts each model on its
+// own registration.
+func ResolveAutoModelMatching(modelName string, acceptProvider func(provider string) bool, routeModel registry.ModelRouter) string {
 	if modelName != "auto" {
 		return modelName
 	}
 
 	reg := registry.GetGlobalRegistry()
 	if acceptProvider != nil {
-		if matched, errMatch := reg.GetFirstAvailableModelMatching("", acceptProvider); errMatch == nil {
+		if matched, errMatch := reg.GetFirstAvailableModelMatching("", acceptProvider, routeModel); errMatch == nil {
 			log.Infof("Resolved 'auto' model to: %s", matched)
 			return matched
 		}
 		rejected := func(provider string) bool { return !acceptProvider(provider) }
-		if refused, errRefused := reg.GetFirstRegisteredModelMatching(rejected); errRefused == nil {
-			if accepted, errAccepted := reg.GetFirstRegisteredModelMatching(acceptProvider); errAccepted == nil {
+		if refused, errRefused := reg.GetFirstRegisteredModelMatching(rejected, nil); errRefused == nil {
+			if accepted, errAccepted := reg.GetFirstRegisteredModelMatching(acceptProvider, routeModel); errAccepted == nil {
 				log.Infof("Resolved 'auto' model to: %s (no available client of an accepted provider)", accepted)
 				return accepted
 			}

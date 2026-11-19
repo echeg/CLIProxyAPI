@@ -44,13 +44,20 @@ func IsProviderDisabledError(err error) bool {
 // client receives. The message names the profile kind, never the key or its hash.
 func refuseDisabledProvider(ctx context.Context, profile *routingProfile, provider string) error {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	message := provider + " is disabled by the routing profile"
 	profileName := "shared"
 	if profile != nil && profile.fromKey {
-		message += " of this API key"
 		profileName = profile.keyHash
 	}
 	logEntryWithRequestID(ctx).WithFields(log.Fields{"provider": provider, "profile": profileName}).Info("Refusing request: provider disabled by routing profile")
+	return newProviderDisabledError(profile, provider)
+}
+
+// newProviderDisabledError builds the refusal of provider without logging it.
+func newProviderDisabledError(profile *routingProfile, provider string) error {
+	message := strings.ToLower(strings.TrimSpace(provider)) + " is disabled by the routing profile"
+	if profile != nil && profile.fromKey {
+		message += " of this API key"
+	}
 	return &providerDisabledError{message: message}
 }
 
@@ -95,6 +102,18 @@ func (m *Manager) refuseDisabledSelection(ctx context.Context, provider string, 
 	return ctx, nil
 }
 
+// WithRequestRoutingProfile returns ctx carrying the routing profile of its
+// request, resolved now unless ctx already carries one. A handler that makes
+// several provider checks before execution (ProviderEnabledForRequest,
+// DisablesProviderForRequest, RefuseDisabledProviders) passes the result to all
+// of them, so they agree even when a config reload lands in between.
+func (m *Manager) WithRequestRoutingProfile(ctx context.Context) context.Context {
+	if m == nil {
+		return ctx
+	}
+	return m.ensureRoutingProfile(ctx)
+}
+
 // ProviderEnabledForRequest returns a predicate that reports whether the routing
 // profile of the request in ctx leaves a provider enabled (providers.<p>.disabled
 // is not set). The profile is resolved once and nothing is logged, so a caller can
@@ -107,6 +126,61 @@ func (m *Manager) ProviderEnabledForRequest(ctx context.Context) func(provider s
 		policy, ok := profile.providerMode(provider)
 		return !ok || !policy.Disabled
 	}
+}
+
+// DisablesProviderForRequest reports whether the routing profile of the request
+// in ctx disables any provider. It is false under Home and a plugin scheduler,
+// where the gate enforces no provider policy.
+func (m *Manager) DisablesProviderForRequest(ctx context.Context) bool {
+	profile := routingProfileFromContext(m.ensureRoutingProfile(ctx))
+	for _, provider := range []string{"claude", "codex"} {
+		if policy, ok := profile.providerMode(provider); ok && policy.Disabled {
+			return true
+		}
+	}
+	return false
+}
+
+// RefuseDisabledProviders returns the refusal the execute gate gives a request
+// routed only to providers the routing profile of the request in ctx disables,
+// logged as the gate logs it, so a handler can refuse such a request with the
+// profile it has just read instead of leaving the decision to a later read. It
+// returns nil when providers is empty, when one of them is enabled, and when no
+// provider policy applies (Home, a scheduler plugin). A check that does not run
+// the request uses DisabledProvidersError, so the log counts refused requests.
+func (m *Manager) RefuseDisabledProviders(ctx context.Context, providers []string) error {
+	ctx, profile, provider := m.disabledProvidersRefusal(ctx, providers)
+	if provider == "" {
+		return nil
+	}
+	return refuseDisabledProvider(ctx, profile, provider)
+}
+
+// DisabledProvidersError is RefuseDisabledProviders without the log line, for a
+// probe such as an alternative-target or capability check.
+func (m *Manager) DisabledProvidersError(ctx context.Context, providers []string) error {
+	_, profile, provider := m.disabledProvidersRefusal(ctx, providers)
+	if provider == "" {
+		return nil
+	}
+	return newProviderDisabledError(profile, provider)
+}
+
+// disabledProvidersRefusal returns the context with the request's routing
+// profile, that profile, and the provider to refuse when every provider in
+// providers is disabled, or "" when the request is not refused.
+func (m *Manager) disabledProvidersRefusal(ctx context.Context, providers []string) (context.Context, *routingProfile, string) {
+	if m == nil || len(providers) == 0 {
+		return ctx, nil, ""
+	}
+	ctx = m.ensureRoutingProfile(ctx)
+	profile := routingProfileFromContext(ctx)
+	for _, provider := range providers {
+		if policy, ok := profile.providerMode(provider); !ok || !policy.Disabled {
+			return ctx, profile, ""
+		}
+	}
+	return ctx, profile, providers[0]
 }
 
 // providerPolicyAllows applies the per-provider policy of the routing profile:

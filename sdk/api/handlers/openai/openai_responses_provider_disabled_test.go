@@ -127,3 +127,54 @@ func TestResponsesCodexServedWhenProfileDisablesClaude(t *testing.T) {
 		t.Fatalf("claude calls = %d, want 0", claude.calls)
 	}
 }
+
+// When only a disabled provider registers models, "auto" resolves to its newest
+// one so the request gets the refusal. That model may be image-only: the
+// endpoint check must not answer first with an error about a model the client
+// never named.
+func TestResponsesAutoRefusedWhenOnlyDisabledProviderRegistersImageModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		clientKey = "responses-auto-image-disabled-key"
+		authID    = "responses-auto-image-disabled-codex"
+		model     = "gpt-image-2"
+	)
+	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{clientKey}}}
+	cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{
+		clientKey: {Providers: config.ProvidersRoutingConfig{Codex: config.ProviderRoutingConfig{Disabled: true}}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	codex := &providerDisabledCountingExecutor{provider: "codex"}
+	manager.RegisterExecutor(codex)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"access_token": "test-token"},
+	}); err != nil {
+		t.Fatalf("register %s: %v", authID, err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model, Created: int64(1) << 62}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+	if got, err := reg.GetFirstRegisteredModelMatching(func(provider string) bool { return provider != "codex" }, nil); err == nil {
+		t.Fatalf("GetFirstRegisteredModelMatching(not codex) = %q; the test needs a registry where only Codex registers a model", got)
+	}
+
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set("userApiKey", clientKey) })
+	router.POST("/v1/responses", h.Responses)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"auto","input":"hi","stream":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden || ojson.GetBytesNoCopy(rec.Body.Bytes(), "error.code").String() != "provider_disabled" {
+		t.Fatalf("auto status = %d, want 403 with error.code provider_disabled; body=%s", rec.Code, rec.Body.String())
+	}
+	if codex.calls != 0 {
+		t.Fatalf("codex calls = %d, want 0", codex.calls)
+	}
+}

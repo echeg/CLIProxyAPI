@@ -6,6 +6,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1882,12 +1883,16 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 func (r *ModelRegistry) GetModelCountMatching(modelID string, acceptProvider func(provider string) bool) int {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
+	return r.modelCountMatchingLocked(modelID, acceptProvider, r.now())
+}
 
+// modelCountMatchingLocked is GetModelCountMatching for a caller that holds the
+// registry mutex.
+func (r *ModelRegistry) modelCountMatchingLocked(modelID string, acceptProvider func(provider string) bool, now time.Time) int {
 	registration, exists := r.models[modelID]
-	if !exists {
+	if !exists || registration == nil {
 		return 0
 	}
-	now := r.now()
 	total := registration.Count
 	counted := func(string) bool { return true }
 	if acceptProvider != nil {
@@ -2195,14 +2200,154 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 //   - string: The model ID of the first available model, or empty string if none available
 //   - error: An error if no models are available
 func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
-	return r.GetFirstAvailableModelMatching(handlerType, nil)
+	return r.GetFirstAvailableModelMatching(handlerType, nil, nil)
+}
+
+// ModelRoute is where credential selection runs a request for a listed model.
+type ModelRoute struct {
+	// Model is the request's model, with its suffix.
+	Model string
+	// ID is the registration routing matched for the request: its base model's,
+	// or the full suffixed name's when no provider registers the base model.
+	// Selection runs the request on the clients of that registration's providers.
+	ID string
+	// BaseModel is the request's model without its suffix. Selection accepts a
+	// client of those providers that registers it, compared case-insensitively.
+	BaseModel string
+	// SelectionKeys maps a client to the model selection checks it by for the
+	// request (its base model, the upstream model of its OAuth alias, or the
+	// model without its prefix; selection also accepts a client that registers
+	// either of the latter two), with the client's state for that model, the
+	// one selection checks. A client without an entry is judged by its
+	// registration's projected state.
+	SelectionKeys map[string]SelectionKey
+}
+
+// SelectionKey is the model credential selection checks a client by and the
+// client's state for it (see ModelRoute.SelectionKeys).
+type SelectionKey struct {
+	// Model is the model, compared case-insensitively.
+	Model string
+	// Unavailable reports that selection would refuse the credential for Model
+	// on the request: cooling down, suspended, or without a valid token for it.
+	// The auth manager reports it because the client's registrations do not
+	// carry it: they hold no request-specific token state (a use_siwc
+	// credential's outer token for a Codex client), and each carries the state
+	// for the model selection maps that registration to, so with aliases
+	// "b" -> "a" and "a" -> "c" the registration of "a" carries the state of "c".
+	Unavailable bool
+}
+
+// ModelRouter maps a listed model to the route of a request for it, or reports
+// false for a model no provider routes. It runs without the registry lock, so
+// it may read the registry.
+type ModelRouter func(modelID string) (ModelRoute, bool)
+
+// routedModelClients reports whether credential selection has a client of a
+// provider acceptProvider allows (every provider when nil) for route: registered
+// for any such client whatever its state, available for one that is neither
+// cooling down nor suspended. A client with a selection key has the state
+// reported with it. A client without one (no auth manager reported it) is
+// judged by its registrations, onto each of which the auth manager projects the
+// credential's state for the model selection checks for it: its registration
+// of route.Model, compared case-insensitively, else of the base model it is
+// accepted for.
+func (r *ModelRegistry) routedModelClients(route ModelRoute, acceptProvider func(provider string) bool) (registered, available bool) {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	registration := r.models[route.ID]
+	if registration == nil {
+		return false, false
+	}
+	now := r.now()
+	for clientID, models := range r.clientModels {
+		provider, hasProvider := r.clientProviders[clientID]
+		if !hasProvider || registration.Providers[provider] <= 0 || (acceptProvider != nil && !acceptProvider(provider)) {
+			continue
+		}
+		selectionKey, hasSelectionKey := route.SelectionKeys[clientID]
+		hasSelectionKey = hasSelectionKey && selectionKey.Model != ""
+		acceptedIndex := slices.IndexFunc(models, func(id string) bool {
+			id = strings.TrimSpace(id)
+			return strings.EqualFold(id, route.BaseModel) || (hasSelectionKey && strings.EqualFold(id, selectionKey.Model))
+		})
+		if acceptedIndex < 0 {
+			continue
+		}
+		if hasSelectionKey {
+			registered = true
+			if !selectionKey.Unavailable {
+				return true, true
+			}
+			continue
+		}
+		// Selection resolves an OAuth alias of the full name case-insensitively,
+		// so a registration "x(HIGH)" carries the state a request for "x(high)"
+		// is checked by, which the base registration "x" may not.
+		stateIndex := -1
+		if requested := strings.TrimSpace(route.Model); requested != "" {
+			stateIndex = slices.IndexFunc(models, func(id string) bool {
+				return strings.EqualFold(strings.TrimSpace(id), requested)
+			})
+		}
+		if stateIndex < 0 {
+			stateIndex = acceptedIndex
+		}
+		state := r.models[models[stateIndex]]
+		if state == nil {
+			continue
+		}
+		registered = true
+		if !clientModelUnavailable(state, clientID, now) {
+			return true, true
+		}
+	}
+	return registered, false
+}
+
+// registrationHasProvider reports whether a client of a provider acceptProvider
+// allows (any provider when nil) registers the model of registration.
+func registrationHasProvider(registration *ModelRegistration, acceptProvider func(provider string) bool) bool {
+	for provider, count := range registration.Providers {
+		if count > 0 && (acceptProvider == nil || acceptProvider(provider)) {
+			return true
+		}
+	}
+	return false
+}
+
+// clientModelUnavailable reports whether clientID is cooling down or suspended
+// for the model of registration, the clients GetModelCountMatching leaves out.
+func clientModelUnavailable(registration *ModelRegistration, clientID string, now time.Time) bool {
+	if recoveryAt, ok := clientQuotaRecoveryAt(registration, clientID, registration.QuotaExceededClients[clientID]); ok && now.Before(recoveryAt) {
+		return true
+	}
+	_, _, suspended := clientSuspensionActive(registration, clientID, now)
+	return suspended
 }
 
 // GetFirstAvailableModelMatching is GetFirstAvailableModel counting only the
 // available clients whose provider acceptProvider allows, so a model whose
-// available clients all belong to rejected providers is skipped. A nil
-// acceptProvider counts every client.
-func (r *ModelRegistry) GetFirstAvailableModelMatching(handlerType string, acceptProvider func(provider string) bool) (string, error) {
+// available clients all belong to rejected providers is skipped. routeModel maps
+// a model to the clients that serve a request for it, which are the ones
+// counted, or reports false to skip the model; with it every registered model is
+// a candidate, not only the listed ones, since the listing judges a model by its
+// own registration and so may hide one whose routed request is servable. A nil
+// acceptProvider counts every client and a nil routeModel counts each listed
+// model on its own registration.
+func (r *ModelRegistry) GetFirstAvailableModelMatching(handlerType string, acceptProvider func(provider string) bool, routeModel ModelRouter) (string, error) {
+	if routeModel != nil {
+		for _, modelID := range r.registeredModelsNewestFirst(nil) {
+			if route, routed := routeModel(modelID); routed {
+				if _, available := r.routedModelClients(route, acceptProvider); available {
+					return modelID, nil
+				}
+			}
+		}
+		return "", fmt.Errorf("no available clients for any routed model")
+	}
+
 	// Get all available models for this handler type
 	models := r.GetAvailableModels(handlerType)
 	if len(models) == 0 {
@@ -2222,52 +2367,72 @@ func (r *ModelRegistry) GetFirstAvailableModelMatching(handlerType string, accep
 
 	// Find the first model with available clients
 	for _, model := range models {
-		if modelID, ok := model["id"].(string); ok {
-			if count := r.GetModelCountMatching(modelID, acceptProvider); count > 0 {
-				return modelID, nil
-			}
+		modelID, ok := model["id"].(string)
+		if !ok {
+			continue
+		}
+		if r.GetModelCountMatching(modelID, acceptProvider) > 0 {
+			return modelID, nil
 		}
 	}
 
 	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
 }
 
-// GetFirstRegisteredModelMatching returns the newest model that a client of a
-// provider acceptProvider allows registers, whatever the state of that client.
-// Unlike the listing behind GetFirstAvailableModel, it also sees a model whose
-// clients are all suspended. A nil acceptProvider accepts every provider.
-func (r *ModelRegistry) GetFirstRegisteredModelMatching(acceptProvider func(provider string) bool) (string, error) {
+// registeredModelsNewestFirst returns the IDs of the registered models that a
+// client of a provider acceptProvider allows (any provider when nil) registers,
+// newest first; ties go to the smaller ID so the order does not depend on map
+// order.
+func (r *ModelRegistry) registeredModelsNewestFirst(acceptProvider func(provider string) bool) []string {
+	type candidate struct {
+		id      string
+		created int64
+	}
 	r.mutex.RLock()
-	defer r.mutex.RUnlock()
-
-	newestID, newestCreated := "", int64(0)
+	candidates := make([]candidate, 0, len(r.models))
 	for modelID, registration := range r.models {
-		if registration == nil {
-			continue
-		}
-		accepted := false
-		for provider, count := range registration.Providers {
-			if count > 0 && (acceptProvider == nil || acceptProvider(provider)) {
-				accepted = true
-				break
-			}
-		}
-		if !accepted {
+		if registration == nil || !registrationHasProvider(registration, acceptProvider) {
 			continue
 		}
 		created := int64(0)
 		if registration.Info != nil {
 			created = registration.Info.Created
 		}
-		// Ties go to the smaller ID so the choice does not depend on map order.
-		if newestID == "" || created > newestCreated || (created == newestCreated && modelID < newestID) {
-			newestID, newestCreated = modelID, created
+		candidates = append(candidates, candidate{id: modelID, created: created})
+	}
+	r.mutex.RUnlock()
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].created != candidates[j].created {
+			return candidates[i].created > candidates[j].created
+		}
+		return candidates[i].id < candidates[j].id
+	})
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.id
+	}
+	return ids
+}
+
+// GetFirstRegisteredModelMatching returns the newest model that a client of a
+// provider acceptProvider allows registers, whatever the state of that client.
+// With a routeModel, a model also needs such a client among those that serve a
+// request for it (see ModelRouter). Unlike the listing behind
+// GetFirstAvailableModel, it also sees a model whose clients are all suspended.
+// A nil acceptProvider accepts every provider and a nil routeModel every model.
+func (r *ModelRegistry) GetFirstRegisteredModelMatching(acceptProvider func(provider string) bool, routeModel ModelRouter) (string, error) {
+	for _, modelID := range r.registeredModelsNewestFirst(acceptProvider) {
+		if routeModel == nil {
+			return modelID, nil
+		}
+		if route, routed := routeModel(modelID); routed {
+			if registered, _ := r.routedModelClients(route, acceptProvider); registered {
+				return modelID, nil
+			}
 		}
 	}
-	if newestID == "" {
-		return "", fmt.Errorf("no registered clients of an accepted provider")
-	}
-	return newestID, nil
+	return "", fmt.Errorf("no registered clients of an accepted provider")
 }
 
 // GetModelsAndEpochForClient atomically returns the models registered for clientID along with the client's current registration epoch.

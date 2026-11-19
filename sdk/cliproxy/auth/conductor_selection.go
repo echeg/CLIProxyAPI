@@ -1541,6 +1541,50 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	return selectionKey != "" && !sameCanonicalModelKey(selectionKey, routeKey) && registryRef.ClientSupportsModel(auth.ID, selectionKey)
 }
 
+// RouteModelSelectionKeys returns, for each auth of providers, the model
+// selection checks it by for routeModel (its base model, the upstream model of
+// its OAuth alias, or the model without its prefix; authSupportsRouteModel also
+// accepts an auth that registers the latter two) and whether the auth is blocked
+// for it as selection checks it for the request in ctx (a Codex client's request
+// checks a use_siwc credential's outer token, not the nested one), which the
+// registry's projected state does not reflect. The registry counts a client for
+// a request with it (registry.ModelRoute.SelectionKeys) as selection matches and
+// checks it.
+func (m *Manager) RouteModelSelectionKeys(ctx context.Context, providers []string, routeModel string) map[string]registry.SelectionKey {
+	routeKey := canonicalModelKey(routeModel)
+	if m == nil || routeKey == "" || len(providers) == 0 {
+		return nil
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		if p := canonicalSchedulingProvider(provider); p != "" {
+			providerSet[p] = struct{}{}
+		}
+	}
+	now := time.Now()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var keys map[string]registry.SelectionKey
+	for id, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if _, ok := providerSet[executorKeyFromAuth(auth)]; !ok {
+			continue
+		}
+		selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
+		if selectionKey == "" {
+			continue
+		}
+		if keys == nil {
+			keys = make(map[string]registry.SelectionKey)
+		}
+		blocked, _, _ := isAuthBlockedForModelForRequest(ctx, auth, selectionKey, now)
+		keys[id] = registry.SelectionKey{Model: selectionKey, Unavailable: blocked}
+	}
+	return keys
+}
+
 func (m *Manager) normalizeProviders(providers []string) []string {
 	if len(providers) == 0 {
 		return nil

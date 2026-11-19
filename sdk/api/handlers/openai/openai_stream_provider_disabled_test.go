@@ -32,7 +32,7 @@ func streamProviderDisabledRefusal(t *testing.T) error {
 	manager.SetConfig(cfg)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Set("userApiKey", clientKey)
-	_, err := manager.ExecuteStream(context.WithValue(context.Background(), "gin", c), []string{"claude"}, coreexecutor.Request{Model: "stream-disabled-model"}, coreexecutor.Options{Stream: true})
+	_, err := manager.ExecuteStream(context.WithValue(context.Background(), "gin", c), []string{"claude"}, coreexecutor.Request{Model: "stream-disabled-model"}, coreexecutor.Options{Stream: true}) //nolint:staticcheck // "gin" is the shared Gin context key contract.
 	if !coreauth.IsProviderDisabledError(err) {
 		t.Fatalf("ExecuteStream err = %v, want a provider disabled refusal", err)
 	}

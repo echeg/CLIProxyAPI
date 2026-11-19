@@ -2,7 +2,6 @@ package openai
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -167,23 +167,15 @@ func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, resolvedModel
 }
 
 // responsesWebsocketResolvedModel resolves "auto" with the routing profile of the
-// connection's key in ctx, as execution does (BaseAPIHandler.AutoModelProviderFilter),
+// connection's key in ctx, as execution does (BaseAPIHandler.ResolveAutoModelForRequest),
 // so pin matching and transport choices follow the model the turn runs on.
 // Any other model name is returned unchanged.
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketResolvedModel(ctx context.Context, modelName string) string {
-	initialSuffix := thinking.ParseSuffix(modelName)
-	if initialSuffix.ModelName != "auto" {
-		return modelName
-	}
-	var acceptProvider func(provider string) bool
+	var base *handlers.BaseAPIHandler
 	if h != nil {
-		acceptProvider = h.AutoModelProviderFilter(ctx)
+		base = h.BaseAPIHandler
 	}
-	resolvedBase := util.ResolveAutoModelMatching(initialSuffix.ModelName, acceptProvider)
-	if initialSuffix.HasSuffix {
-		return fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
-	}
-	return resolvedBase
+	return base.ResolveAutoModelForRequest(ctx, modelName)
 }
 
 func responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string]struct{}, string) {

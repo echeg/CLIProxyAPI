@@ -1,20 +1,22 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
 
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"golang.org/x/net/context"
 )
 
 // PluginModelRouterHost routes matching requests to a plugin executor, the router's own executor,
@@ -98,7 +100,7 @@ func excludeExecutionProvider(providers []string, excluded string) []string {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	return h.getRequestDetailsWithOptions(context.Background(), modelName, false, false)
+	return h.getRequestDetailsWithOptions(context.Background(), modelName, false, modelExecutionOptions{Probe: true})
 }
 
 func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
@@ -159,41 +161,130 @@ func (h *BaseAPIHandler) providersForExecution(ctx context.Context, modelName, o
 		}
 		return []string{routeDecision.Provider}, normalizedModel, nil
 	}
-	return h.getRequestDetailsWithOptions(ctx, modelName, allowImageModel, execOptions.AllowSpeechModel)
+	return h.getRequestDetailsWithOptions(ctx, modelName, allowImageModel, execOptions)
 }
 
 // AutoModelProviderFilter returns the providers "auto" may resolve to for the
-// request in ctx: those its routing profile leaves enabled. Passed to
-// util.ResolveAutoModelMatching, it makes "auto" skip a model without an
-// available client of an enabled provider. Every resolution of "auto" for one
-// request (execution, Responses websocket pin matching) must use the same
-// filter. Without an auth manager it returns nil, which allows every provider.
+// request in ctx: those its routing profile leaves enabled. It returns nil, which
+// allows every provider and keeps the unfiltered resolution, when the profile
+// disables no provider and without an auth manager. ResolveAutoModelForRequest
+// resolves "auto" with it.
 func (h *BaseAPIHandler) AutoModelProviderFilter(ctx context.Context) func(provider string) bool {
 	if h == nil || h.AuthManager == nil {
+		return nil
+	}
+	ctx = h.AuthManager.WithRequestRoutingProfile(ctx)
+	if !h.AuthManager.DisablesProviderForRequest(ctx) {
 		return nil
 	}
 	return h.AuthManager.ProviderEnabledForRequest(ctx)
 }
 
-func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, modelName string, allowImageModel, allowSpeechModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	resolvedModelName := modelName
+// withRequestRoutingProfile returns ctx carrying the routing profile of its
+// request (coreauth.Manager.WithRequestRoutingProfile). Every execution entry
+// point calls it before routing, so resolving "auto", the refusal of an "auto"
+// routed only to disabled providers, and execution with its retries and
+// fallback legs read one profile even when a config reload lands in between.
+func (h *BaseAPIHandler) withRequestRoutingProfile(ctx context.Context) context.Context {
+	if h == nil || h.AuthManager == nil {
+		return ctx
+	}
+	return h.AuthManager.WithRequestRoutingProfile(ctx)
+}
+
+// ResolveAutoModelForRequest resolves "auto", with or without a thinking suffix,
+// for the request in ctx: the newest model that, with that suffix appended, has
+// an available client of a provider AutoModelProviderFilter allows among the
+// clients execution would run it on (see util.ResolveAutoModelMatching). Every
+// resolution of "auto" for one request (execution, Responses websocket pin
+// matching) must use it. Any other model name is returned unchanged.
+func (h *BaseAPIHandler) ResolveAutoModelForRequest(ctx context.Context, modelName string) string {
 	initialSuffix := thinking.ParseSuffix(modelName)
-	if initialSuffix.ModelName == "auto" {
-		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
-			resolvedModelName = modelName
-		} else {
-			resolvedBase := util.ResolveAutoModelMatching(initialSuffix.ModelName, h.AutoModelProviderFilter(ctx))
-			if initialSuffix.HasSuffix {
-				resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
-			} else {
-				resolvedModelName = resolvedBase
-			}
+	if initialSuffix.ModelName != "auto" {
+		return modelName
+	}
+	withSuffix := func(model string) string {
+		if !initialSuffix.HasSuffix {
+			return model
 		}
-	} else {
-		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
-			resolvedModelName = modelName
-		} else {
-			resolvedModelName = util.ResolveAutoModel(modelName)
+		return fmt.Sprintf("%s(%s)", model, initialSuffix.RawSuffix)
+	}
+	acceptProvider := h.AutoModelProviderFilter(ctx)
+	var routeModel registry.ModelRouter
+	if acceptProvider != nil {
+		// Judge a listed model by the request execution makes: the client's
+		// suffix is appended first, routing picks the registration (routedModel:
+		// the base model's, so one provider may register "x(high)" while another
+		// registers "x", or the full name's when no provider registers the base
+		// model), and credential selection runs the request on the clients of
+		// that registration's providers that register the base model, compared
+		// case-insensitively, or the model their OAuth alias or prefix maps it
+		// to (authSupportsRouteModel), each available when it is not cooling
+		// down for the model selection checks (the alias's upstream model, not
+		// the base model). So a model registered only under its suffixed name
+		// is skipped, while one that a client serves through "X" or a forked
+		// alias is not. Only enabled providers' clients count, so a model
+		// routed only to disabled providers is skipped before the auths are
+		// scanned for selection keys.
+		routeModel = func(modelID string) (registry.ModelRoute, bool) {
+			model := withSuffix(modelID)
+			routedID, providers := routedModel(model)
+			enabledProviders := slices.DeleteFunc(providers, func(provider string) bool { return !acceptProvider(provider) })
+			if len(enabledProviders) == 0 {
+				return registry.ModelRoute{}, false
+			}
+			return registry.ModelRoute{
+				Model:         model,
+				ID:            routedID,
+				BaseModel:     strings.TrimSpace(thinking.ParseSuffix(model).ModelName),
+				SelectionKeys: h.AuthManager.RouteModelSelectionKeys(ctx, enabledProviders, model),
+			}, true
+		}
+	}
+	return withSuffix(util.ResolveAutoModelMatching(initialSuffix.ModelName, acceptProvider, routeModel))
+}
+
+// routedModel returns the registered model a request for model is routed by and
+// the providers it is routed to: its base model, or, when no provider registers
+// the base model, the full name, each as util.GetRegisteredModelProviders
+// matches it (possibly lowercased). The fallback supports custom models
+// registered with their full suffixed name (e.g., "my-model(8192)"); it was
+// evaluated in Story 11.8 and is intentionally preserved.
+func routedModel(model string) (string, []string) {
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	registeredID, providers := util.GetRegisteredModelProviders(baseModel)
+	if len(providers) == 0 && baseModel != model {
+		return util.GetRegisteredModelProviders(model)
+	}
+	return registeredID, providers
+}
+
+// getRequestDetailsWithOptions resolves the providers and normalized model of a
+// request for modelName. execOptions supplies AllowSpeechModel and Probe.
+func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, modelName string, allowImageModel bool, execOptions modelExecutionOptions) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	resolvedModelName := modelName
+	if h == nil || h.AuthManager == nil || !h.AuthManager.HomeEnabled() {
+		requestedAuto := thinking.ParseSuffix(modelName).ModelName == "auto"
+		if requestedAuto {
+			// "auto" and its refusal below read one snapshot of the profile; the
+			// execution entry points pinned it already (withRequestRoutingProfile).
+			ctx = h.withRequestRoutingProfile(ctx)
+		}
+		resolvedModelName = h.ResolveAutoModelForRequest(ctx, modelName)
+		// "auto" resolves to a model only disabled providers serve when no enabled
+		// provider registers one. Refuse it here with the profile "auto" was
+		// resolved with: an endpoint check below must not answer first with an
+		// error about a model the client never named. A probe gets the refusal
+		// without the log line the request itself writes.
+		if requestedAuto && h != nil && h.AuthManager != nil {
+			_, routedProviders := routedModel(resolvedModelName)
+			refuse := h.AuthManager.RefuseDisabledProviders
+			if execOptions.Probe {
+				refuse = h.AuthManager.DisabledProvidersError
+			}
+			if errDisabled := refuse(ctx, routedProviders); errDisabled != nil {
+				return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusForbidden, Error: errDisabled}
+			}
 		}
 	}
 
@@ -203,7 +294,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, model
 	if errMsg := h.validateImageOnlyModel(baseModel, allowImageModel); errMsg != nil {
 		return nil, "", errMsg
 	}
-	if errMsg := h.validateSpeechOnlyModel(baseModel, allowSpeechModel); errMsg != nil {
+	if errMsg := h.validateSpeechOnlyModel(baseModel, execOptions.AllowSpeechModel); errMsg != nil {
 		return nil, "", errMsg
 	}
 
@@ -211,15 +302,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, model
 		return []string{"home"}, resolvedModelName, nil
 	}
 
-	providers = util.GetProviderName(baseModel)
-	// Fallback: if baseModel has no provider but differs from resolvedModelName,
-	// try using the full model name. This handles edge cases where custom models
-	// may be registered with their full suffixed name (e.g., "my-model(8192)").
-	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
-	// custom model registrations that include thinking suffixes.
-	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
-	}
+	_, providers = routedModel(resolvedModelName)
 
 	if len(providers) == 0 {
 		// The client asked for a model this proxy cannot route. Report it as a request

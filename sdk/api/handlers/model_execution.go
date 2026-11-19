@@ -30,6 +30,9 @@ type modelExecutionOptions struct {
 	Path                    string
 	CallerScope             string
 	AllowSpeechModel        bool
+	// Probe marks a check that does not run the request (an alternative-target
+	// or capability check): its routing refusals are not logged.
+	Probe bool
 }
 
 // ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.

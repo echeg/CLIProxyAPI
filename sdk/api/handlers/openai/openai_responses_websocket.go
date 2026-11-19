@@ -778,6 +778,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 		executionParent := context.WithValue(c.Request.Context(), "gin", c)
+		// Pin the key's routing profile once per turn, after the turn's
+		// authentication set the key: resolving "auto", the pin checks, and the
+		// turn's execution with its retries then read one snapshot even when a
+		// config reload lands in between, and the next turn reads the new one.
+		if h.AuthManager != nil {
+			executionParent = h.AuthManager.WithRequestRoutingProfile(executionParent)
+		}
 		executionParent, routeOverridesModelResolution := h.PrepareStreamModelRoute(
 			executionParent,
 			h.HandlerType(),
@@ -789,6 +796,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// Resolve "auto" once per turn with the key's routing profile, as execution
 		// does, so a pin is matched against the model the turn runs on.
 		resolvedRequestModelName := h.responsesWebsocketResolvedModel(executionParent, requestModelName)
+		providerEnabled := func(string) bool { return true }
+		if h.AuthManager != nil {
+			providerEnabled = h.AuthManager.ProviderEnabledForRequest(executionParent)
+		}
+		pinnedProviderDisabled := false
 		if pinnedAuthID != "" {
 			pinnedAuth, homeRuntime, ok := sessionAuthByIDWithSource(pinnedAuthID)
 			providerKey := ""
@@ -798,10 +810,21 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			state, hasState := pinnedAuthByProvider[providerKey]
 			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, resolvedRequestModelName, state.modelKey, homeRuntime) {
 				pinnedAuthID = ""
+			} else {
+				pinnedProviderDisabled = !providerEnabled(providerKey)
 			}
 		}
-		if pinnedAuthID == "" {
+		// A provider the key's routing profile disables never serves the turn, so
+		// a model it shares with one enabled provider restores that provider's
+		// pin, also in place of a kept pin of the disabled provider. Without one
+		// to restore, that pin stays for the policy release below.
+		if pinnedAuthID == "" || pinnedProviderDisabled {
 			providerSet, _ := responsesWebsocketProviderSetForModel(resolvedRequestModelName)
+			for providerKey := range providerSet {
+				if !providerEnabled(providerKey) {
+					delete(providerSet, providerKey)
+				}
+			}
 			if len(providerSet) == 1 {
 				for providerKey := range providerSet {
 					state, ok := pinnedAuthByProvider[providerKey]

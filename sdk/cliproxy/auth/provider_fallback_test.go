@@ -1225,9 +1225,16 @@ func TestProviderEnabledForRequest(t *testing.T) {
 		if enabled(" Claude ") != tc.claude || enabled("codex") != tc.codex || !enabled("gemini") {
 			t.Fatalf("%s: claude = %t, codex = %t, gemini = %t; want %t, %t, true", tc.name, enabled(" Claude "), enabled("codex"), enabled("gemini"), tc.claude, tc.codex)
 		}
+		if !m.DisablesProviderForRequest(ginContextWithKey(tc.key)) {
+			t.Fatalf("%s: DisablesProviderForRequest = false, want true", tc.name)
+		}
 	}
 	if entries := disabledRefusalEntries(hook); len(entries) != 0 {
 		t.Fatalf("ProviderEnabledForRequest logged %d refusals, want none", len(entries))
+	}
+	plain, _ := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, nil), disabledClaudeOAuth, disabledCodexOAuth)
+	if plain.DisablesProviderForRequest(ginContextWithKey(routingTestKeyA)) {
+		t.Fatal("DisablesProviderForRequest = true for a profile that disables nothing, want false")
 	}
 
 	homeCfg := *cfg
@@ -1239,6 +1246,79 @@ func TestProviderEnabledForRequest(t *testing.T) {
 		enabled := manager.ProviderEnabledForRequest(ginContextWithKey(routingTestKeyA))
 		if !enabled("claude") || !enabled("codex") {
 			t.Fatalf("%s: claude = %t, codex = %t; want both enabled", name, enabled("claude"), enabled("codex"))
+		}
+		if manager.DisablesProviderForRequest(ginContextWithKey(routingTestKeyA)) {
+			t.Fatalf("%s: DisablesProviderForRequest = true, want false", name)
+		}
+	}
+}
+
+// A context from WithRequestRoutingProfile keeps the profile read when it was
+// made, so the provider checks a handler makes before execution agree even when a
+// config reload lands between them.
+func TestWithRequestRoutingProfileKeepsOneSnapshot(t *testing.T) {
+	codexOnly := disabledProviders(true, false)
+	m, _ := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &codexOnly), disabledClaudeOAuth, disabledCodexOAuth)
+	pinned := m.WithRequestRoutingProfile(ginContextWithKey(routingTestKeyA))
+
+	claudeOnly := disabledProviders(false, true)
+	m.SetConfig(disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &claudeOnly))
+	if enabled := m.ProviderEnabledForRequest(pinned); enabled("claude") || !enabled("codex") {
+		t.Fatalf("pinned profile after reload: claude = %t, codex = %t; want false, true", enabled("claude"), enabled("codex"))
+	}
+	if err := m.RefuseDisabledProviders(pinned, []string{"codex"}); err != nil {
+		t.Fatalf("pinned profile after reload refused codex: %v", err)
+	}
+	if enabled := m.ProviderEnabledForRequest(ginContextWithKey(routingTestKeyA)); !enabled("claude") || enabled("codex") {
+		t.Fatalf("fresh profile after reload: claude = %t, codex = %t; want true, false", enabled("claude"), enabled("codex"))
+	}
+}
+
+// RefuseDisabledProviders gives the gate's refusal, logged once, only when every
+// listed provider is disabled, and never under Home or a plugin scheduler.
+func TestRefuseDisabledProviders(t *testing.T) {
+	keyProfile := disabledProviders(true, false)
+	cfg := disabledProviderConfig(disabledProviders(false, true), &keyProfile)
+	m, _ := providerPolicyTestManager(t, cfg, disabledClaudeOAuth, disabledCodexOAuth)
+	hook := newStandardLogHook(t)
+	ctx := ginContextWithKey(routingTestKeyA)
+	for _, providers := range [][]string{nil, {"codex"}, {"claude", "gemini"}, {"gemini", "claude"}} {
+		if err := m.RefuseDisabledProviders(ctx, providers); err != nil {
+			t.Fatalf("providers %v: %v, want no refusal", providers, err)
+		}
+	}
+	if entries := disabledRefusalEntries(hook); len(entries) != 0 {
+		t.Fatalf("logged %d refusals while a provider was enabled, want none", len(entries))
+	}
+	// A probe gets the same refusal without a log line.
+	for _, providers := range [][]string{nil, {"codex"}, {"claude", "gemini"}} {
+		if err := m.DisabledProvidersError(ctx, providers); err != nil {
+			t.Fatalf("probe of providers %v: %v, want no refusal", providers, err)
+		}
+	}
+	errProbe := m.DisabledProvidersError(ctx, []string{"claude"})
+	if !IsProviderDisabledError(errProbe) || errProbe.Error() != "claude is disabled by the routing profile of this API key" {
+		t.Fatalf("probe of claude only: %v, want the Claude refusal", errProbe)
+	}
+	if entries := disabledRefusalEntries(hook); len(entries) != 0 {
+		t.Fatalf("probe logged %d refusals, want none", len(entries))
+	}
+	err := m.RefuseDisabledProviders(ctx, []string{"claude"})
+	if !IsProviderDisabledError(err) || err.Error() != "claude is disabled by the routing profile of this API key" {
+		t.Fatalf("claude only: %v, want the Claude refusal", err)
+	}
+	if entries := disabledRefusalEntries(hook); len(entries) != 1 {
+		t.Fatalf("logged %d refusals, want 1", len(entries))
+	}
+
+	homeCfg := *cfg
+	homeCfg.Home.Enabled = true
+	home := NewManager(nil, &RoundRobinSelector{}, nil)
+	home.SetConfig(&homeCfg)
+	m.SetPluginScheduler(&fakePluginScheduler{})
+	for name, manager := range map[string]*Manager{"home": home, "plugin scheduler": m} {
+		if err := manager.RefuseDisabledProviders(ginContextWithKey(routingTestKeyA), []string{"claude"}); err != nil {
+			t.Fatalf("%s: %v, want no refusal", name, err)
 		}
 	}
 }

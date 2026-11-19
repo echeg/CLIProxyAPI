@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -15,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 const wsDisabledClientKey = "ws-disabled-client-key"
@@ -178,7 +180,7 @@ func TestResponsesWebsocketCompactionReplayIgnoresDisabledProvider(t *testing.T)
 	ctxWithKey := func(key string) context.Context {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Set("userApiKey", key)
-		return context.WithValue(context.Background(), "gin", c)
+		return context.WithValue(context.Background(), "gin", c) //nolint:staticcheck // "gin" is the shared Gin context key contract.
 	}
 
 	if !h.websocketUpstreamSupportsCompactionReplayForModel(ctxWithKey(disabledKey), model) {
@@ -218,5 +220,264 @@ func TestResponsesWebsocketReleasesDisabledPinWhenAnotherProviderServes(t *testi
 	}
 	if !policyPinReleaseLogged(hook) {
 		t.Fatalf("missing log %q", policyPinReleaseLogMessage)
+	}
+}
+
+// A provider the key disables never serves a turn, so on a model it shares with
+// one enabled provider the connection restores that provider's remembered pin
+// after a switch to another provider's model and back, instead of selecting
+// afresh among the enabled provider's accounts.
+func TestResponsesWebsocketRestoresPinOnModelSharedWithDisabledProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	name := strings.NewReplacer("/", "-", " ", "-").Replace(t.Name())
+	sharedModel := "ws-restore-shared-" + name
+	otherModel := "ws-restore-other-" + name
+	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{wsDisabledClientKey}}}
+	cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{
+		wsDisabledClientKey: {Providers: config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Disabled: true}}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	codex := &websocketPolicyPinExecutor{provider: "codex"}
+	gemini := &websocketPolicyPinExecutor{provider: "gemini"}
+	claude := &websocketPolicyPinExecutor{provider: "claude"}
+	for _, executor := range []*websocketPolicyPinExecutor{codex, gemini, claude} {
+		manager.RegisterExecutor(executor)
+	}
+	// The Codex accounts run on upstream websockets, the transport that remembers a pin.
+	geminiID := "ws-restore-gemini-" + name
+	for _, auth := range []struct{ id, provider, model string }{
+		{"ws-restore-codex-a-" + name, "codex", sharedModel},
+		{"ws-restore-codex-b-" + name, "codex", sharedModel},
+		{"ws-restore-claude-" + name, "claude", sharedModel},
+		{geminiID, "gemini", otherModel},
+	} {
+		attributes := map[string]string{}
+		if auth.provider == "codex" {
+			attributes["websockets"] = "true"
+		}
+		if _, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID:         auth.id,
+			Provider:   auth.provider,
+			Status:     coreauth.StatusActive,
+			Attributes: attributes,
+			Metadata:   map[string]any{"access_token": "test-token"},
+		}); err != nil {
+			t.Fatalf("register %s: %v", auth.id, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.id, auth.provider, []*registry.ModelInfo{{ID: auth.model}})
+		id := auth.id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set("userApiKey", wsDisabledClientKey) })
+	router.GET("/v1/responses", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+	f := &policyPinFixture{t: t, wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"}
+	conn := f.dial()
+	create := func(model, msgID string) string {
+		return `{"type":"response.create","model":"` + model + `","input":[{"type":"message","id":"` + msgID + `"}]}`
+	}
+
+	policyPinSendCompleted(t, conn, create(sharedModel, "msg-1"))
+	policyPinSendCompleted(t, conn, create(otherModel, "msg-2"))
+	if got := gemini.turns(geminiID); got != 1 {
+		t.Fatalf("gemini turns = %d, want 1; auth IDs %v", got, gemini.AuthIDs())
+	}
+	policyPinSendCompleted(t, conn, create(sharedModel, "msg-3"))
+	if got := codex.AuthIDs(); len(got) != 2 || got[0] != got[1] {
+		t.Fatalf("codex auth IDs = %v, want the turn-1 account twice", got)
+	}
+	if got := claude.AuthIDs(); len(got) != 0 {
+		t.Fatalf("claude auth IDs = %v, want none", got)
+	}
+}
+
+// A kept pin of a provider the key has since disabled gives way to the
+// remembered pin of the one enabled provider serving the model, not to a fresh
+// selection: after a switch from xAI to Codex and a reload that disables Codex,
+// a full response.create on a model both serve returns to the turn-1 xAI
+// account, although selection would prefer the other, higher-priority one.
+func TestResponsesWebsocketRestoresPinInPlaceOfDisabledProviderPin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	name := strings.NewReplacer("/", "-", " ", "-").Replace(t.Name())
+	sharedModel := "ws-swap-shared-" + name
+	xaiModel := "ws-swap-xai-" + name
+	codexModel := "ws-swap-codex-" + name
+	profile := func(codexDisabled bool) *config.Config {
+		cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{wsDisabledClientKey}}}
+		cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{wsDisabledClientKey: {
+			Selection: config.SelectionConfig{Primary: config.SelectionPriority, Tiebreak: config.SelectionRoundRobin},
+			Providers: config.ProvidersRoutingConfig{Codex: config.ProviderRoutingConfig{Disabled: codexDisabled}},
+		}}
+		return cfg
+	}
+	cfg := profile(false)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	xai := &websocketPolicyPinExecutor{provider: "xai"}
+	codex := &websocketPolicyPinExecutor{provider: "codex"}
+	manager.RegisterExecutor(xai)
+	manager.RegisterExecutor(codex)
+	pinnedXAIID := "ws-swap-xai-a-" + name
+	preferredXAIID := "ws-swap-xai-b-" + name
+	codexID := "ws-swap-codex-" + name
+	// Every account runs on an upstream websocket, the transport that remembers
+	// a pin. Only the pinned xAI account serves the turn-1 model.
+	for _, auth := range []struct {
+		id, provider, priority string
+		models                 []string
+	}{
+		{pinnedXAIID, "xai", "0", []string{xaiModel, sharedModel}},
+		{preferredXAIID, "xai", "10", []string{sharedModel}},
+		{codexID, "codex", "0", []string{codexModel, sharedModel}},
+	} {
+		if _, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID:         auth.id,
+			Provider:   auth.provider,
+			Status:     coreauth.StatusActive,
+			Attributes: map[string]string{"websockets": "true", "priority": auth.priority},
+			Metadata:   map[string]any{"access_token": "test-token"},
+		}); err != nil {
+			t.Fatalf("register %s: %v", auth.id, err)
+		}
+		models := make([]*registry.ModelInfo, 0, len(auth.models))
+		for _, model := range auth.models {
+			models = append(models, &registry.ModelInfo{ID: model})
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.id, auth.provider, models)
+		id := auth.id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set("userApiKey", wsDisabledClientKey) })
+	router.GET("/v1/responses", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+	f := &policyPinFixture{t: t, wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"}
+	conn := f.dial()
+	create := func(model, msgID string) string {
+		return `{"type":"response.create","model":"` + model + `","input":[{"type":"message","id":"` + msgID + `"}]}`
+	}
+
+	policyPinSendCompleted(t, conn, create(xaiModel, "msg-1"))
+	policyPinSendCompleted(t, conn, create(codexModel, "msg-2"))
+	if got := codex.turns(codexID); got != 1 {
+		t.Fatalf("codex turns = %d, want 1; auth IDs %v", got, codex.AuthIDs())
+	}
+	manager.SetConfig(profile(true))
+	policyPinSendCompleted(t, conn, create(sharedModel, "msg-3"))
+	if got := xai.AuthIDs(); len(got) != 2 || got[0] != pinnedXAIID || got[1] != pinnedXAIID {
+		t.Fatalf("xai auth IDs = %v, want %s twice", got, pinnedXAIID)
+	}
+	if got := codex.turns(codexID); got != 1 {
+		t.Fatalf("codex turns = %d, want 1 (turn 3 reached the disabled Codex)", got)
+	}
+}
+
+// reloadOnTurnModelRouter routes nothing. It runs reload once, from the model
+// router call of the turn whose body contains reloadMarker, so the reload lands
+// after that turn started.
+type reloadOnTurnModelRouter struct {
+	reloadMarker string
+	reload       func()
+	once         sync.Once
+}
+
+func (*reloadOnTurnModelRouter) HasModelRouters() bool { return true }
+
+func (r *reloadOnTurnModelRouter) RouteModel(_ context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+	if strings.Contains(string(req.Body), r.reloadMarker) {
+		r.once.Do(r.reload)
+	}
+	return pluginapi.ModelRouteResponse{}, false
+}
+
+// A turn reads the key's routing profile once, when it starts. A reload that
+// turns a Codex-only key into a Claude-only one during a self-contained "auto"
+// turn leaves the turn on the Codex pin it kept, instead of refusing that pin at
+// execution with a 403 neither profile gives on its own. The next turn reads the
+// new profile and runs on Claude.
+func TestResponsesWebsocketTurnKeepsProfileAcrossReload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	name := strings.NewReplacer("/", "-", " ", "-").Replace(t.Name())
+	profileConfig := func(claudeDisabled, codexDisabled bool) *config.Config {
+		cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{wsDisabledClientKey}}}
+		cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{wsDisabledClientKey: {Providers: config.ProvidersRoutingConfig{
+			Claude: config.ProviderRoutingConfig{Disabled: claudeDisabled},
+			Codex:  config.ProviderRoutingConfig{Disabled: codexDisabled},
+		}}}
+		return cfg
+	}
+	codexOnly := profileConfig(true, false)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(codexOnly)
+	codex := &websocketPolicyPinExecutor{provider: "codex"}
+	claude := &websocketPolicyPinExecutor{provider: "claude"}
+	manager.RegisterExecutor(codex)
+	manager.RegisterExecutor(claude)
+	codexID := "ws-reload-codex-" + name
+	claudeID := "ws-reload-claude-" + name
+	const newest = int64(1) << 62
+	// The Claude model is the newest, so "auto" follows the profile: Codex while
+	// Claude is disabled, Claude once Codex is.
+	for _, auth := range []struct {
+		id, provider, model string
+		created             int64
+	}{
+		{codexID, "codex", "ws-reload-codex-model-" + name, newest - 1},
+		{claudeID, "claude", "ws-reload-claude-model-" + name, newest},
+	} {
+		attributes := map[string]string{}
+		if auth.provider == "codex" {
+			// An upstream websocket remembers the turn's pin.
+			attributes["websockets"] = "true"
+		}
+		if _, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID:         auth.id,
+			Provider:   auth.provider,
+			Status:     coreauth.StatusActive,
+			Attributes: attributes,
+			Metadata:   map[string]any{"access_token": "test-token"},
+		}); err != nil {
+			t.Fatalf("register %s: %v", auth.id, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.id, auth.provider, []*registry.ModelInfo{{ID: auth.model, Created: auth.created}})
+		id := auth.id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&codexOnly.SDKConfig, manager))
+	h.SetModelRouterHost(&reloadOnTurnModelRouter{
+		reloadMarker: "msg-2",
+		reload:       func() { manager.SetConfig(profileConfig(false, true)) },
+	})
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set("userApiKey", wsDisabledClientKey) })
+	router.GET("/v1/responses", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+	f := &policyPinFixture{t: t, wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"}
+	conn := f.dial()
+	create := func(msgID string) string {
+		return `{"type":"response.create","model":"auto","input":[{"type":"message","id":"` + msgID + `"}]}`
+	}
+
+	policyPinSendCompleted(t, conn, create("msg-1"))
+	policyPinSendCompleted(t, conn, create("msg-2"))
+	if got := codex.turns(codexID); got != 2 {
+		t.Fatalf("codex turns = %d, want 2 (turn 2 kept the profile it started with); codex %v, claude %v", got, codex.AuthIDs(), claude.AuthIDs())
+	}
+	policyPinSendCompleted(t, conn, create("msg-3"))
+	if got := claude.turns(claudeID); got != 1 {
+		t.Fatalf("claude turns = %d, want 1 (turn 3 reads the reloaded profile); codex %v, claude %v", got, codex.AuthIDs(), claude.AuthIDs())
+	}
+	if got := codex.turns(codexID); got != 2 {
+		t.Fatalf("codex turns = %d, want 2", got)
 	}
 }

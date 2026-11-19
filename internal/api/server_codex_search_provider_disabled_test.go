@@ -42,7 +42,7 @@ func TestCodexAlphaSearchRefusesDisabledCodex(t *testing.T) {
 	}
 
 	upstreamCalls := 0
-	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", codexSearchSIWCTransport(func(req *http.Request) (*http.Response, error) {
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", codexSearchSIWCTransport(func(req *http.Request) (*http.Response, error) { //nolint:staticcheck // "cliproxy.roundtripper" is the shared round tripper context key contract.
 		upstreamCalls++
 		return &http.Response{
 			StatusCode: http.StatusOK,
