@@ -64,6 +64,14 @@ const (
 	maxStreamInterceptorHistoryBytes  = 1 << 20
 )
 
+// The OpenAI error type and code of a routing-profile refusal
+// (coreauth.IsProviderDisabledError), used by the HTTP body and the Responses
+// stream chunk alike.
+const (
+	providerDisabledErrorType = "permission_error"
+	providerDisabledErrorCode = "provider_disabled"
+)
+
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is compacted to ensure single-line SSE compatibility
 // while preserving upstream error payloads.
@@ -130,6 +138,11 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	case http.StatusForbidden:
 		errType = "permission_error"
 		code = "insufficient_quota"
+		if coreauth.IsProviderDisabledError(err) {
+			// A routing-profile refusal, not a billing problem.
+			errType = providerDisabledErrorType
+			code = providerDisabledErrorCode
+		}
 	case http.StatusTooManyRequests:
 		errType = "rate_limit_error"
 		code = "rate_limit_exceeded"

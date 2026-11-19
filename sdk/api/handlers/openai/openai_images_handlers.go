@@ -147,7 +147,7 @@ func writeImagesStreamErrorEvent(c *gin.Context, errMsg *interfaces.ErrorMessage
 	}
 	status := errMsg.StatusCode
 	errText := responsesStreamErrorText(errMsg, status)
-	body := handlers.BuildErrorResponseBody(status, errText)
+	body := handlers.BuildErrorResponseBodyWithError(status, errText, errMsg.Error)
 	_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
 	return errMsg
 }

@@ -4390,7 +4390,7 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
-	if !h.websocketUpstreamSupportsIncrementalInputForModel("test-model") {
+	if !h.websocketUpstreamSupportsIncrementalInputForModel(context.Background(), "test-model") {
 		t.Fatalf("expected websocket-capable upstream for test-model")
 	}
 }
@@ -4413,7 +4413,7 @@ func TestWebsocketUpstreamSupportsIncrementalInputForXAI(t *testing.T) {
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
-	if !h.websocketUpstreamSupportsIncrementalInputForModel("xai-test-model") {
+	if !h.websocketUpstreamSupportsIncrementalInputForModel(context.Background(), "xai-test-model") {
 		t.Fatalf("expected xai websocket upstream to support previous_response_id incremental input")
 	}
 }
@@ -4440,7 +4440,7 @@ func TestResponsesWebsocketUsesUpstreamWebsocketPassthroughForXAI(t *testing.T) 
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
-	if !h.responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName) {
+	if !h.responsesWebsocketUsesUpstreamWebsocketPassthrough(context.Background(), modelName) {
 		t.Fatalf("expected xai websocket upstream passthrough for %s", modelName)
 	}
 }
@@ -4462,7 +4462,7 @@ func TestWebsocketUpstreamSupportsCompactionReplayForModel(t *testing.T) {
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
-	if !h.websocketUpstreamSupportsCompactionReplayForModel("test-model") {
+	if !h.websocketUpstreamSupportsCompactionReplayForModel(context.Background(), "test-model") {
 		t.Fatalf("expected codex upstream to support compaction replay")
 	}
 }
@@ -4487,7 +4487,7 @@ func TestWebsocketUpstreamSupportsCompactionReplayForModelFalseWhenMixedBackends
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
-	if h.websocketUpstreamSupportsCompactionReplayForModel("test-model") {
+	if h.websocketUpstreamSupportsCompactionReplayForModel(context.Background(), "test-model") {
 		t.Fatalf("expected mixed backend model to disable compaction replay bypass")
 	}
 }

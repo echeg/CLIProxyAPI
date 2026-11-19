@@ -649,7 +649,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		return responsesWebsocketUpstreamModeHTTP
 	}
-	rememberPinnedAuth := func(authID string, modelName string) {
+	rememberPinnedAuth := func(ctx context.Context, authID string, modelName string) {
 		authID = strings.TrimSpace(authID)
 		auth, ok := sessionAuthByID(authID)
 		if authID == "" || !ok || auth == nil {
@@ -657,7 +657,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		pinnedAuthID = authID
 		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
-		_, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+		_, modelKey := responsesWebsocketProviderSetForModel(h.responsesWebsocketResolvedModel(ctx, modelName))
 		if providerKey != "" {
 			pinnedAuthByProvider[providerKey] = responsesWebsocketPinnedAuthState{authID: authID, modelKey: modelKey}
 		}
@@ -786,6 +786,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		)
 		pluginExecutorID := handlers.PreparedStreamPluginExecutor(executionParent)
 		isPluginExecutorRoute := pluginExecutorID != ""
+		// Resolve "auto" once per turn with the key's routing profile, as execution
+		// does, so a pin is matched against the model the turn runs on.
+		resolvedRequestModelName := h.responsesWebsocketResolvedModel(executionParent, requestModelName)
 		if pinnedAuthID != "" {
 			pinnedAuth, homeRuntime, ok := sessionAuthByIDWithSource(pinnedAuthID)
 			providerKey := ""
@@ -793,17 +796,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
 			}
 			state, hasState := pinnedAuthByProvider[providerKey]
-			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, requestModelName, state.modelKey, homeRuntime) {
+			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, resolvedRequestModelName, state.modelKey, homeRuntime) {
 				pinnedAuthID = ""
 			}
 		}
 		if pinnedAuthID == "" {
-			providerSet, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(requestModelName))
+			providerSet, _ := responsesWebsocketProviderSetForModel(resolvedRequestModelName)
 			if len(providerSet) == 1 {
 				for providerKey := range providerSet {
 					state, ok := pinnedAuthByProvider[providerKey]
 					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
-					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
+					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, resolvedRequestModelName, state.modelKey, homeRuntime) {
 						pinnedAuthID = state.authID
 					} else {
 						delete(pinnedAuthByProvider, providerKey)
@@ -820,7 +823,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			releasedPinnedAuthID = pinnedAuthID
 			forgetPinnedAuth()
 		}
-		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
+		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(executionParent, requestModelName)
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth) {
 				provider := strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
@@ -870,7 +873,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		observedCompactionReplayAuthID := ""
 		observedCompactionSupported := false
 		if observedCompaction.modelName != "" &&
-			responsesWebsocketResolvedModelName(observedCompaction.modelName) == responsesWebsocketResolvedModelName(requestModelName) {
+			h.responsesWebsocketResolvedModel(executionParent, observedCompaction.modelName) == resolvedRequestModelName {
 			if isPluginExecutorRoute {
 				if observedCompaction.pluginID != "" && observedCompaction.pluginID == pluginExecutorID {
 					observedCompactionSupported = true
@@ -901,7 +904,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 									observedCompactionSupported = true
 									observedCompactionReplayAuthID = observedCompaction.authID
 								}
-							} else if responsesWebsocketPinnedAuthMatchesModel(compactionAuth, requestModelName, observedCompaction.modelKey, false) {
+							} else if responsesWebsocketPinnedAuthMatchesModel(compactionAuth, resolvedRequestModelName, observedCompaction.modelKey, false) {
 								observedCompactionSupported = true
 								observedCompactionReplayAuthID = observedCompaction.authID
 							}
@@ -927,7 +930,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					allowCompactionReplayBypass = allowCompactionReplayBypass || responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
 				}
 			} else {
-				allowCompactionReplayBypass = allowCompactionReplayBypass || h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
+				allowCompactionReplayBypass = allowCompactionReplayBypass || h.websocketUpstreamSupportsCompactionReplayForModel(executionParent, requestModelName)
 			}
 		}
 
@@ -1253,7 +1256,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if (attemptedUpstreamMode == responsesWebsocketUpstreamModeWS || upstreamMode == responsesWebsocketUpstreamModeWS) && lastAttemptedAuthID != "" {
 					upstreamMode = responsesWebsocketUpstreamModeWS
 					upstreamWebsocketAuthID = lastAttemptedAuthID
-					rememberPinnedAuth(lastAttemptedAuthID, modelName)
+					rememberPinnedAuth(executionParent, lastAttemptedAuthID, modelName)
 					passthroughModelName = modelName
 				}
 				break
@@ -1305,7 +1308,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if localTurnExecuted {
 			attemptedUpstreamMode = responsesWebsocketUpstreamModeHTTP
 			if lastAttemptedAuthID != "" {
-				rememberPinnedAuth(lastAttemptedAuthID, modelName)
+				rememberPinnedAuth(executionParent, lastAttemptedAuthID, modelName)
 			}
 			nextLastRequest = responsesWebsocketLocalCompactionBoundaryRequest(requestJSON)
 		}
@@ -1314,7 +1317,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if upstreamMode == responsesWebsocketUpstreamModeWS {
 			upstreamWebsocketAuthID = lastAttemptedAuthID
 			if lastAttemptedAuthID != "" {
-				rememberPinnedAuth(lastAttemptedAuthID, modelName)
+				rememberPinnedAuth(executionParent, lastAttemptedAuthID, modelName)
 			}
 			passthroughModelName = modelName
 			lastRequest = nil
@@ -1327,7 +1330,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastRequest = nextLastRequest
 			lastResponseOutput = completedOutput
 			if inputContainsFullTranscript(util.ParseGJSONBytesNoCopy(completedOutput)) {
-				_, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+				_, modelKey := responsesWebsocketProviderSetForModel(h.responsesWebsocketResolvedModel(executionParent, modelName))
 				if isPluginExecutorRoute {
 					observedCompaction = responsesWebsocketObservedCompactionState{
 						modelName: modelName,
@@ -1347,7 +1350,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			} else if observedCompaction.modelName != "" {
 				targetMismatch := false
 				currentProvider, currentTargetModel := handlers.PreparedStreamProviderRoute(executionParent)
-				if responsesWebsocketResolvedModelName(observedCompaction.modelName) != responsesWebsocketResolvedModelName(modelName) {
+				if h.responsesWebsocketResolvedModel(executionParent, observedCompaction.modelName) != h.responsesWebsocketResolvedModel(executionParent, modelName) {
 					targetMismatch = true
 				} else if isPluginExecutorRoute {
 					if pluginExecutorID != observedCompaction.pluginID {

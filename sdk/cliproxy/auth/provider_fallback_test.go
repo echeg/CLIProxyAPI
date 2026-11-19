@@ -12,9 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -777,7 +780,7 @@ func TestFilterDisabledProvidersKeepsOrderAndInput(t *testing.T) {
 		{[]string{"claude", "gemini", " Claude ", "codex"}, []string{"gemini", "codex"}},
 	} {
 		in := slices.Clone(tc.in)
-		got, err := m.filterDisabledProviders(ctx, in, cliproxyexecutor.Options{})
+		got, err := m.filterDisabledProviders(ctx, in, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
 		if err != nil || !reflect.DeepEqual(got, tc.want) {
 			t.Fatalf("filterDisabledProviders(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
 		}
@@ -838,12 +841,12 @@ func TestDisabledProviderNotEnforcedWithoutProviderPolicy(t *testing.T) {
 		m := NewManager(nil, &RoundRobinSelector{}, nil)
 		m.SetConfig(&homeCfg)
 		ctx := m.ensureRoutingProfile(ginContextWithKey(routingTestKeyA))
-		providers, err := m.filterDisabledProviders(ctx, []string{"claude", "codex"}, cliproxyexecutor.Options{})
+		providers, err := m.filterDisabledProviders(ctx, []string{"claude", "codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
 		if err != nil || !reflect.DeepEqual(providers, []string{"claude", "codex"}) {
 			t.Fatalf("Home filter = %v, %v; want both providers kept", providers, err)
 		}
 		for _, provider := range []string{"claude", "codex"} {
-			if _, errSelect := m.refuseDisabledSelection(ginContextWithKey(routingTestKeyA), provider); errSelect != nil {
+			if _, errSelect := m.refuseDisabledSelection(ginContextWithKey(routingTestKeyA), provider, cliproxyexecutor.Options{}); errSelect != nil {
 				t.Fatalf("Home direct selection of %s refused: %v", provider, errSelect)
 			}
 		}
@@ -1027,6 +1030,183 @@ func TestHasProviderFallbackAfterErrorWithDisabledCodex(t *testing.T) {
 			if got == codexDisabled {
 				t.Fatalf("codex disabled=%t status %d: hasProviderFallbackAfterError = %t", codexDisabled, status, got)
 			}
+		}
+	}
+}
+
+// A Claude Thread continuation belongs to its Claude owner credential, so a
+// dropped Claude refuses it instead of sending it to another provider without the
+// conversation history; fresh requests and unbound continuations still run on
+// the enabled provider.
+func TestDisabledClaudeRefusesOwnedThreadContinuation(t *testing.T) {
+	keyProfile := disabledProviders(true, false)
+	providers := []string{"claude", "gemini"}
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			m, calls := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile), disabledClaudeOAuth, disabledGeminiKey)
+			caller := t.Name() + "-" + uuid.NewString()
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatClaude,
+				Metadata:     map[string]any{cliproxyexecutor.CallerScopeMetadataKey: caller},
+			}
+			ownedID := "msg_owned_" + uuid.NewString()
+			cliproxysession.RememberClaudeThreadAuth(cliproxysession.ClaudeThreadCallerScope("", opts.Metadata), ownedID, disabledClaudeOAuth.id)
+			request := func(previousID string) cliproxyexecutor.Request {
+				payload := `{"model":"` + providerPolicyTestModel + `","messages":[{"role":"user","content":"next"}]}`
+				if previousID != "" {
+					payload = `{"model":"` + providerPolicyTestModel + `","thread":{"type":"continue","previous_message_id":"` + previousID + `"},"messages":[{"role":"user","content":"next"}]}`
+				}
+				return cliproxyexecutor.Request{Model: providerPolicyTestModel, Payload: []byte(payload)}
+			}
+
+			_, err := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, providers, request(ownedID), opts)
+			assertProviderDisabledError(t, err, disabledKeyMessage)
+			if len(*calls) != 0 {
+				t.Fatalf("executor calls = %v, want none", *calls)
+			}
+
+			for _, previousID := range []string{"", "msg_unbound_" + uuid.NewString()} {
+				if _, errRun := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, providers, request(previousID), opts); errRun != nil {
+					t.Fatalf("request with previous_message_id %q: %v", previousID, errRun)
+				}
+			}
+			if !reflect.DeepEqual(*calls, []string{disabledGeminiKey.id, disabledGeminiKey.id}) {
+				t.Fatalf("calls = %v, want two gemini calls", *calls)
+			}
+		})
+	}
+}
+
+// The handler resolves "auto" to a model of an enabled provider, so a Thread
+// continuation of the disabled Claude arrives without claude in the list. The
+// gate still refuses it when Claude owns the Thread; an explicit model choice and
+// an unowned continuation still run.
+func TestDisabledClaudeRefusesOwnedThreadContinuationResolvedFromAuto(t *testing.T) {
+	keyProfile := disabledProviders(true, false)
+	providers := []string{"gemini"}
+	for _, path := range []string{"execute", "count", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			m, calls := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile), disabledClaudeOAuth, disabledGeminiKey)
+			caller := t.Name() + "-" + uuid.NewString()
+			options := func(requestedModel string) cliproxyexecutor.Options {
+				return cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatClaude,
+					Metadata: map[string]any{
+						cliproxyexecutor.CallerScopeMetadataKey:    caller,
+						cliproxyexecutor.RequestedModelMetadataKey: requestedModel,
+					},
+				}
+			}
+			ownedID := "msg_owned_" + uuid.NewString()
+			cliproxysession.RememberClaudeThreadAuth(cliproxysession.ClaudeThreadCallerScope("", options("auto").Metadata), ownedID, disabledClaudeOAuth.id)
+			request := func(previousID string) cliproxyexecutor.Request {
+				payload := `{"model":"` + providerPolicyTestModel + `","thread":{"type":"continue","previous_message_id":"` + previousID + `"},"messages":[{"role":"user","content":"next"}]}`
+				return cliproxyexecutor.Request{Model: providerPolicyTestModel, Payload: []byte(payload)}
+			}
+
+			for _, requested := range []string{"auto", "auto(high)"} {
+				_, err := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, providers, request(ownedID), options(requested))
+				assertProviderDisabledError(t, err, disabledKeyMessage)
+			}
+			if len(*calls) != 0 {
+				t.Fatalf("executor calls = %v, want none", *calls)
+			}
+
+			if _, errRun := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, providers, request("msg_unbound_"+uuid.NewString()), options("auto")); errRun != nil {
+				t.Fatalf("unowned auto continuation: %v", errRun)
+			}
+			if _, errRun := runFallbackPath(ginContextWithKey(routingTestKeyA), m, path, providers, request(ownedID), options(providerPolicyTestModel)); errRun != nil {
+				t.Fatalf("explicit model continuation: %v", errRun)
+			}
+			if !reflect.DeepEqual(*calls, []string{disabledGeminiKey.id, disabledGeminiKey.id}) {
+				t.Fatalf("calls = %v, want two gemini calls", *calls)
+			}
+		})
+	}
+}
+
+// WithOpenSessionPin skips only the providers.<p>.disabled switch for a pinned
+// direct selection: the pin still has to name an enabled OAuth auth of the
+// requested provider, and nothing is logged as a refusal.
+func TestOpenSessionPinSkipsOnlyTheDisabledSwitch(t *testing.T) {
+	codexKey := providerPolicyTestAuth{"pd-codex-key", "codex", AuthKindAPIKey, "codex-key"}
+	keyProfile := disabledProviders(false, true)
+	m, _ := providerPolicyTestManager(t, disabledProviderConfig(internalconfig.ProvidersRoutingConfig{}, &keyProfile), disabledClaudeOAuth, disabledCodexOAuth, codexKey)
+	pin := func(id string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: id}}
+	}
+	selectCodex := func(ctx context.Context, opts cliproxyexecutor.Options) (*Auth, error) {
+		return m.SelectAuthByKind(ctx, "codex", "", AuthKindOAuth, opts)
+	}
+	const codexKeyMessage = "codex is disabled by the routing profile of this API key"
+
+	hook := newStandardLogHook(t)
+	selected, err := selectCodex(WithOpenSessionPin(ginContextWithKey(routingTestKeyA)), pin(disabledCodexOAuth.id))
+	if err != nil || selected == nil || selected.ID != disabledCodexOAuth.id {
+		t.Fatalf("open-session pin selected %v, %v; want %s", selected, err, disabledCodexOAuth.id)
+	}
+	if entries := disabledRefusalEntries(hook); len(entries) != 0 {
+		t.Fatalf("open-session pin logged %d refusals, want none", len(entries))
+	}
+
+	// Without the marker, or without a pin, the disable still refuses.
+	_, err = selectCodex(ginContextWithKey(routingTestKeyA), pin(disabledCodexOAuth.id))
+	assertProviderDisabledError(t, err, codexKeyMessage)
+	_, err = selectCodex(WithOpenSessionPin(ginContextWithKey(routingTestKeyA)), cliproxyexecutor.Options{})
+	assertProviderDisabledError(t, err, codexKeyMessage)
+
+	// The other selection checks still apply to the pinned auth.
+	for _, id := range []string{disabledClaudeOAuth.id, codexKey.id, "pd-missing"} {
+		selected, err = selectCodex(WithOpenSessionPin(ginContextWithKey(routingTestKeyA)), pin(id))
+		if err == nil || selected != nil || IsProviderDisabledError(err) {
+			t.Fatalf("open-session pin to %s = %v, %v; want a selection error", id, selected, err)
+		}
+	}
+	disabledAuth, _ := m.GetByID(disabledCodexOAuth.id)
+	disabledAuth.Disabled = true
+	if _, errUpdate := m.Update(WithSkipPersist(context.Background()), disabledAuth); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	selected, err = selectCodex(WithOpenSessionPin(ginContextWithKey(routingTestKeyA)), pin(disabledCodexOAuth.id))
+	if err == nil || selected != nil {
+		t.Fatalf("open-session pin to a disabled auth = %v, %v; want a selection error", selected, err)
+	}
+}
+
+// ProviderEnabledForRequest reads the switch the execute gate enforces, for the
+// key profile or the shared one, without logging a refusal; Home and a plugin
+// scheduler enable every provider.
+func TestProviderEnabledForRequest(t *testing.T) {
+	keyProfile := disabledProviders(true, false)
+	cfg := disabledProviderConfig(disabledProviders(false, true), &keyProfile)
+	m, _ := providerPolicyTestManager(t, cfg, disabledClaudeOAuth, disabledCodexOAuth)
+	hook := newStandardLogHook(t)
+	for _, tc := range []struct {
+		name          string
+		key           string
+		claude, codex bool
+	}{
+		{"key profile disables claude", routingTestKeyA, false, true},
+		{"shared profile disables codex", routingTestKeyB, true, false},
+	} {
+		enabled := m.ProviderEnabledForRequest(ginContextWithKey(tc.key))
+		if enabled(" Claude ") != tc.claude || enabled("codex") != tc.codex || !enabled("gemini") {
+			t.Fatalf("%s: claude = %t, codex = %t, gemini = %t; want %t, %t, true", tc.name, enabled(" Claude "), enabled("codex"), enabled("gemini"), tc.claude, tc.codex)
+		}
+	}
+	if entries := disabledRefusalEntries(hook); len(entries) != 0 {
+		t.Fatalf("ProviderEnabledForRequest logged %d refusals, want none", len(entries))
+	}
+
+	homeCfg := *cfg
+	homeCfg.Home.Enabled = true
+	home := NewManager(nil, &RoundRobinSelector{}, nil)
+	home.SetConfig(&homeCfg)
+	m.SetPluginScheduler(&fakePluginScheduler{})
+	for name, manager := range map[string]*Manager{"home": home, "plugin scheduler": m} {
+		enabled := manager.ProviderEnabledForRequest(ginContextWithKey(routingTestKeyA))
+		if !enabled("claude") || !enabled("codex") {
+			t.Fatalf("%s: claude = %t, codex = %t; want both enabled", name, enabled("claude"), enabled("codex"))
 		}
 	}
 }

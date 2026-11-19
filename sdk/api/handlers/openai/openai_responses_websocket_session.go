@@ -42,8 +42,8 @@ func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, met
 	return false
 }
 
-func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputForModel(modelName string) bool {
-	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
+func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputForModel(ctx context.Context, modelName string) bool {
+	auths, _ := h.responsesWebsocketAvailableAuthsForModel(ctx, modelName)
 	for _, auth := range auths {
 		if responsesWebsocketAuthSupportsIncrementalInput(auth) {
 			return true
@@ -52,8 +52,8 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 	return false
 }
 
-func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsCompactionReplayForModel(modelName string) bool {
-	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
+func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsCompactionReplayForModel(ctx context.Context, modelName string) bool {
+	auths, _ := h.responsesWebsocketAvailableAuthsForModel(ctx, modelName)
 	if len(auths) == 0 {
 		return false
 	}
@@ -65,11 +65,15 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsCompactionReplayFor
 	return true
 }
 
-func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(modelName string) ([]*coreauth.Auth, string) {
+// responsesWebsocketAvailableAuthsForModel lists the available auths that can
+// serve modelName for the connection in ctx. Auths of a provider the key's
+// routing profile disables are left out: the turn can never run on them, so they
+// must not shape transport or replay choices.
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(ctx context.Context, modelName string) ([]*coreauth.Auth, string) {
 	if h == nil || h.AuthManager == nil {
 		return nil, ""
 	}
-	resolvedModelName := responsesWebsocketResolvedModelName(modelName)
+	resolvedModelName := h.responsesWebsocketResolvedModel(ctx, modelName)
 	providerSet, modelKey := responsesWebsocketProviderSetForModel(resolvedModelName)
 	if len(providerSet) == 0 {
 		return nil, modelKey
@@ -77,10 +81,14 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 
 	registryRef := registry.GetGlobalRegistry()
 	now := time.Now()
+	providerEnabled := h.AuthManager.ProviderEnabledForRequest(ctx)
 	auths := h.AuthManager.List()
 	available := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
 		if !responsesWebsocketAuthMatchesModel(auth, providerSet, modelKey, registryRef, now) {
+			continue
+		}
+		if !providerEnabled(auth.Provider) {
 			continue
 		}
 		available = append(available, auth)
@@ -95,16 +103,12 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketHasAlternativeReplayTarget
 	return h.HasAlternativeExecutionTarget(ctx, h.HandlerType(), modelName, rawJSON, failedAuthID)
 }
 
-func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesCodexWebsocketPassthrough(modelName string) bool {
-	return h.responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName)
-}
-
-func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName string) bool {
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesUpstreamWebsocketPassthrough(ctx context.Context, modelName string) bool {
 	modelName = strings.TrimSpace(modelName)
 	if h == nil || h.AuthManager == nil || modelName == "" {
 		return false
 	}
-	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
+	auths, _ := h.responsesWebsocketAvailableAuthsForModel(ctx, modelName)
 	if len(auths) == 0 {
 		return false
 	}
@@ -139,11 +143,13 @@ func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
 	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
 }
 
-func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName string, pinnedModelKey string, homeRuntime bool) bool {
+// responsesWebsocketPinnedAuthMatchesModel reports whether a pinned auth can serve
+// resolvedModelName, the turn's model after responsesWebsocketResolvedModel.
+func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, resolvedModelName string, pinnedModelKey string, homeRuntime bool) bool {
 	if auth == nil {
 		return false
 	}
-	providerSet, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+	providerSet, modelKey := responsesWebsocketProviderSetForModel(resolvedModelName)
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if !homeRuntime || len(providerSet) > 0 {
 		if _, ok := providerSet[providerKey]; !ok {
@@ -160,10 +166,21 @@ func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName str
 	return registry.GetGlobalRegistry().ClientSupportsModel(auth.ID, modelKey)
 }
 
-func responsesWebsocketResolvedModelName(modelName string) string {
+// responsesWebsocketResolvedModel resolves "auto" with the routing profile of the
+// connection's key in ctx, as execution does (BaseAPIHandler.AutoModelProviderFilter),
+// so pin matching and transport choices follow the model the turn runs on.
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketResolvedModel(ctx context.Context, modelName string) string {
+	var acceptProvider func(provider string) bool
+	if h != nil && h.BaseAPIHandler != nil {
+		acceptProvider = h.AutoModelProviderFilter(ctx)
+	}
+	return responsesWebsocketResolvedModelName(modelName, acceptProvider)
+}
+
+func responsesWebsocketResolvedModelName(modelName string, acceptProvider func(provider string) bool) string {
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
-		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+		resolvedBase := util.ResolveAutoModelMatching(initialSuffix.ModelName, acceptProvider)
 		if initialSuffix.HasSuffix {
 			return fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 		}

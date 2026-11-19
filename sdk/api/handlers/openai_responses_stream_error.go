@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type openAIResponsesStreamErrorChunk struct {
@@ -66,6 +67,22 @@ func openAIResponsesStreamErrorCode(status int) string {
 
 func openAIResponsesStreamErrorType(status int) string {
 	return openAIResponsesStreamErrorClassFor(status).errorType
+}
+
+// ResponsesStreamErrorTextWithError returns the text a Responses stream error
+// chunk is built from. A routing-profile refusal (coreauth.IsProviderDisabledError)
+// becomes an error object with type permission_error and code provider_disabled,
+// which the chunk builders keep, because the 403 default would report it as
+// insufficient_quota. Any other error returns errText unchanged.
+func ResponsesStreamErrorTextWithError(errText string, err error) string {
+	if !coreauth.IsProviderDisabledError(err) {
+		return errText
+	}
+	doc := ojson.NewDocString(`{"error":{"type":"","code":"","message":"","param":null}}`)
+	_ = doc.Set("error.type", providerDisabledErrorType)
+	_ = doc.Set("error.code", providerDisabledErrorCode)
+	_ = doc.Set("error.message", errText)
+	return doc.String()
 }
 
 // BuildOpenAIResponsesStreamErrorChunk builds an OpenAI Responses streaming error chunk.

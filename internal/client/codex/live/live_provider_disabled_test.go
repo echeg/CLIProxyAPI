@@ -61,10 +61,16 @@ func TestHandlerRefusesDisabledCodex(t *testing.T) {
 				var body struct {
 					Error struct {
 						Message string `json:"message"`
+						Type    string `json:"type"`
+						Code    string `json:"code"`
 					} `json:"error"`
 				}
 				if errUnmarshal := json.Unmarshal(refused.Body.Bytes(), &body); errUnmarshal != nil {
 					t.Fatalf("decode body %s: %v", refused.Body.String(), errUnmarshal)
+				}
+				// The OpenAI-format body carries the refusal's own type and code.
+				if body.Error.Type != "permission_error" || body.Error.Code != "provider_disabled" {
+					t.Fatalf("error type = %q, code = %q; want permission_error, provider_disabled; body=%s", body.Error.Type, body.Error.Code, refused.Body.String())
 				}
 				got = body.Error.Message
 			} else {

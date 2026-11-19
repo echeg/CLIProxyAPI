@@ -339,7 +339,7 @@ routing:
   #           mappings:
   #             - from: "claude-opus-*"
   #               to: "gpt-6-astra"
-  #   "your-api-key-3": # Codex only
+  #   "your-api-key-3": # Claude disabled; Codex and other providers stay available
   #     providers:
   #       claude:
   #         disabled: true

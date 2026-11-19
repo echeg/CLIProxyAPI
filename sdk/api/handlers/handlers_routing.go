@@ -98,7 +98,7 @@ func excludeExecutionProvider(providers []string, excluded string) []string {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	return h.getRequestDetailsWithOptions(modelName, false, false)
+	return h.getRequestDetailsWithOptions(context.Background(), modelName, false, false)
 }
 
 func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
@@ -125,7 +125,7 @@ func nativeInteractionsExecutionError() *interfaces.ErrorMessage {
 // providersForExecution resolves the providers and normalized model for a request. When a model
 // router selected a built-in provider, it skips model->provider resolution and uses the router's
 // provider (with an optional target model); otherwise it falls back to the registry-based path.
-func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision, execOptions modelExecutionOptions) ([]string, string, *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) providersForExecution(ctx context.Context, modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision, execOptions modelExecutionOptions) ([]string, string, *interfaces.ErrorMessage) {
 	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
 	if forcedProvider != "" {
 		if routeDecision.ExecutorPluginID != "" {
@@ -159,17 +159,30 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 		}
 		return []string{routeDecision.Provider}, normalizedModel, nil
 	}
-	return h.getRequestDetailsWithOptions(modelName, allowImageModel, execOptions.AllowSpeechModel)
+	return h.getRequestDetailsWithOptions(ctx, modelName, allowImageModel, execOptions.AllowSpeechModel)
 }
 
-func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel, allowSpeechModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+// AutoModelProviderFilter returns the providers "auto" may resolve to for the
+// request in ctx: those its routing profile leaves enabled. Passed to
+// util.ResolveAutoModelMatching, it makes "auto" skip a model without an
+// available client of an enabled provider. Every resolution of "auto" for one
+// request (execution, Responses websocket pin matching) must use the same
+// filter. Without an auth manager it returns nil, which allows every provider.
+func (h *BaseAPIHandler) AutoModelProviderFilter(ctx context.Context) func(provider string) bool {
+	if h == nil || h.AuthManager == nil {
+		return nil
+	}
+	return h.AuthManager.ProviderEnabledForRequest(ctx)
+}
+
+func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, modelName string, allowImageModel, allowSpeechModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
 		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 			resolvedModelName = modelName
 		} else {
-			resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+			resolvedBase := util.ResolveAutoModelMatching(initialSuffix.ModelName, h.AutoModelProviderFilter(ctx))
 			if initialSuffix.HasSuffix {
 				resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 			} else {

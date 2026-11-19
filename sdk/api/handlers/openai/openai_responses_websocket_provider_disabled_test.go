@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -85,6 +86,9 @@ func expectDisabledError(t *testing.T, conn *websocket.Conn, request string) {
 	if got := ojson.GetBytesNoCopy(payload, "error.message").String(); got != "codex is disabled by the routing profile of this API key" {
 		t.Fatalf("error message = %q: %s", got, payload)
 	}
+	if got := ojson.GetBytesNoCopy(payload, "error.code").String(); got != "provider_disabled" {
+		t.Fatalf("error code = %q, want provider_disabled: %s", got, payload)
+	}
 }
 
 func TestResponsesWebsocketPinnedTurnRefusedWhenCodexDisabled(t *testing.T) {
@@ -108,5 +112,79 @@ func TestResponsesWebsocketPinnedTurnRefusedWhenCodexDisabled(t *testing.T) {
 				t.Fatalf("subscription turns = %d, want 1 (refused turn reached upstream); auth IDs %v", got, f.executor.AuthIDs())
 			}
 		})
+	}
+}
+
+// Execution resolves "auto" with the key's routing profile, so the pin matcher
+// must too: when the global "auto" is a Claude model but the key disables Claude,
+// turn 1 runs on the Codex websocket and an incremental turn 2 keeps that pin
+// instead of dropping it and closing the connection for replay.
+func TestResponsesWebsocketAutoModelKeepsCodexPinWhenProfileDisablesClaude(t *testing.T) {
+	f := newDisabledCodexPinFixture(t)
+	const newest = int64(1) << 62
+	claudeClientID := "ws-auto-claude-" + f.subID
+	claudeModel := "ws-auto-claude-model-" + f.subID
+	registry.GetGlobalRegistry().RegisterClient(claudeClientID, "claude", []*registry.ModelInfo{{ID: claudeModel, Created: newest}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(claudeClientID) })
+	registry.GetGlobalRegistry().RegisterClient(f.subID, "codex", []*registry.ModelInfo{{ID: f.model, Created: newest - 1}})
+
+	reloaded := *f.cfg
+	reloaded.Routing.KeyProfiles = map[string]*config.RoutingProfile{
+		wsDisabledClientKey: {Providers: config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Disabled: true}}},
+	}
+	f.manager.SetConfig(&reloaded)
+	if got := util.ResolveAutoModel("auto"); got != claudeModel {
+		t.Fatalf("global auto = %q, want %q", got, claudeModel)
+	}
+
+	f.model = "auto"
+	conn := f.dial()
+	responseID := f.pinSubscription(conn)
+	policyPinSendCompleted(t, conn, policyPinIncremental(responseID, "msg-2"))
+	if got := f.executor.turns(f.subID); got != 2 {
+		t.Fatalf("subscription turns = %d, want 2; auth IDs %v", got, f.executor.AuthIDs())
+	}
+}
+
+// A disabled provider never serves the turn, so its auths must not decide the
+// replay shape: on a model shared by a disabled Claude and an enabled HTTP Codex,
+// compaction replay follows Codex alone, and a key without the profile still sees
+// the mixed backends.
+func TestResponsesWebsocketCompactionReplayIgnoresDisabledProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		disabledKey = "ws-compaction-claude-disabled-key"
+		plainKey    = "ws-compaction-plain-key"
+		model       = "ws-compaction-shared-model"
+	)
+	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{disabledKey, plainKey}}}
+	cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{
+		disabledKey: {Providers: config.ProvidersRoutingConfig{Claude: config.ProviderRoutingConfig{Disabled: true}}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	for _, auth := range []*coreauth.Auth{
+		{ID: "ws-compaction-codex", Provider: "codex", Status: coreauth.StatusActive},
+		{ID: "ws-compaction-claude", Provider: "claude", Status: coreauth.StatusActive},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register %s: %v", auth.ID, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		id := auth.ID
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+	ctxWithKey := func(key string) context.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Set("userApiKey", key)
+		return context.WithValue(context.Background(), "gin", c)
+	}
+
+	if !h.websocketUpstreamSupportsCompactionReplayForModel(ctxWithKey(disabledKey), model) {
+		t.Fatal("Claude-disabled key: compaction replay = false, want true (only Codex can serve the turn)")
+	}
+	if h.websocketUpstreamSupportsCompactionReplayForModel(ctxWithKey(plainKey), model) {
+		t.Fatal("plain key: compaction replay = true, want false (mixed Claude and Codex backends)")
 	}
 }

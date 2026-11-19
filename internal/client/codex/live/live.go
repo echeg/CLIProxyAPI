@@ -820,8 +820,14 @@ func writeResponseHeaders(destination, source http.Header) {
 	}
 }
 
+// isRealtimeRequest reports whether c serves an OpenAI Realtime route, whose
+// errors use the OpenAI error object instead of the bare /v1/live message.
+func isRealtimeRequest(c *gin.Context) bool {
+	return c != nil && c.Request != nil && c.Request.URL != nil && strings.HasPrefix(c.Request.URL.Path, "/v1/realtime")
+}
+
 func writeLiveError(c *gin.Context, status int, message string) {
-	if c != nil && c.Request != nil && c.Request.URL != nil && strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
+	if isRealtimeRequest(c) {
 		errorType := "api_error"
 		if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
 			errorType = "invalid_request_error"
@@ -839,6 +845,12 @@ func writeSelectionError(c *gin.Context, err error) {
 	status := clienterror.HTTPStatusFromErrorOr(err, http.StatusServiceUnavailable)
 	for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
 		c.Writer.Header().Add("Retry-After", value)
+	}
+	if auth.IsProviderDisabledError(err) && isRealtimeRequest(c) {
+		// A routing-profile refusal keeps the OpenAI type and code the other
+		// endpoints report for it.
+		writeRealtimeError(c, status, err.Error(), "permission_error", "provider_disabled")
+		return
 	}
 	writeLiveError(c, status, err.Error())
 }

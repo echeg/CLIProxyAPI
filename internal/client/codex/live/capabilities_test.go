@@ -11,6 +11,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 func TestHandleHangupForwardsPinnedOAuthCall(t *testing.T) {
@@ -56,54 +58,92 @@ func TestHandleHangupForwardsPinnedOAuthCall(t *testing.T) {
 }
 
 // A disable applies to new calls only, so the hangup of a call opened before
-// Codex was disabled still reaches upstream and ends the session.
+// Codex was disabled still reaches upstream and ends the session without being
+// logged as a refusal. The exception skips only the disabled switch: a pinned ID
+// that now names another provider's credential or a Codex API key is never sent.
 func TestHandleHangupForwardsOpenCallAfterCodexDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const ownerKey = "owner-key"
-	manager := auth.NewManager(nil, nil, nil)
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{ownerKey}}}
-	cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{
-		ownerKey: {Providers: config.ProvidersRoutingConfig{Codex: config.ProviderRoutingConfig{Disabled: true}}},
-	}
-	manager.SetConfig(cfg)
-	executor := &captureExecutor{
-		statusCode:   http.StatusOK,
-		responseBody: io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
-	}
-	manager.RegisterExecutor(executor)
-	registerCredential(t, manager, &auth.Auth{
-		ID:       "codex-oauth",
-		Provider: "codex",
-		Status:   auth.StatusActive,
-		Metadata: map[string]any{"access_token": "oauth-token"},
-	})
-	handler := NewHandler(manager, nil)
-	handler.sessions.put("call-123", liveSession{
-		authID:         "codex-oauth",
-		model:          defaultLiveModel,
-		ownerPrincipal: ownerKey,
-		ownerProvider:  "static",
-	})
+	for _, tc := range []struct {
+		name    string
+		pinned  *auth.Auth
+		forward bool
+	}{
+		{"open codex oauth call", &auth.Auth{ID: "pinned-auth", Provider: "codex", Status: auth.StatusActive, Metadata: map[string]any{"access_token": "oauth-token"}}, true},
+		{"id now names a claude credential", &auth.Auth{ID: "pinned-auth", Provider: "claude", Status: auth.StatusActive, Metadata: map[string]any{"access_token": "claude-token"}}, false},
+		{"id now names a codex api key", &auth.Auth{ID: "pinned-auth", Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "sk-codex"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := auth.NewManager(nil, nil, nil)
+			cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{ownerKey}}}
+			cfg.Routing.KeyProfiles = map[string]*config.RoutingProfile{
+				ownerKey: {Providers: config.ProvidersRoutingConfig{Codex: config.ProviderRoutingConfig{Disabled: true}}},
+			}
+			manager.SetConfig(cfg)
+			executor := &captureExecutor{
+				statusCode:   http.StatusOK,
+				responseBody: io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
+			}
+			manager.RegisterExecutor(executor)
+			claudeExecutor := &claudeCaptureExecutor{captureExecutor: &captureExecutor{
+				statusCode:   http.StatusOK,
+				responseBody: io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
+			}}
+			manager.RegisterExecutor(claudeExecutor)
+			registerCredential(t, manager, tc.pinned)
+			handler := NewHandler(manager, nil)
+			handler.sessions.put("call-123", liveSession{
+				authID:         tc.pinned.ID,
+				model:          defaultLiveModel,
+				ownerPrincipal: ownerKey,
+				ownerProvider:  "static",
+			})
+			logger := log.StandardLogger()
+			savedHooks := make(log.LevelHooks)
+			for level, hooks := range logger.Hooks {
+				savedHooks[level] = append([]log.Hook(nil), hooks...)
+			}
+			hook := logtest.NewLocal(logger)
+			t.Cleanup(func() { logger.ReplaceHooks(savedHooks) })
 
-	router := gin.New()
-	router.POST("/v1/realtime/calls/:call_id/hangup", func(c *gin.Context) {
-		c.Set("userApiKey", ownerKey)
-		c.Set("accessProvider", "static")
-		c.Next()
-	}, handler.HandleHangup)
-	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls/call-123/hangup", nil)
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-	}
-	if executor.request == nil || executor.request.URL.String() != "https://api.openai.com/v1/realtime/calls/call-123/hangup" {
-		t.Fatalf("upstream request = %#v", executor.request)
-	}
-	if _, ok := handler.sessions.peek("call-123"); ok {
-		t.Fatal("successful hangup retained session")
+			router := gin.New()
+			router.POST("/v1/realtime/calls/:call_id/hangup", func(c *gin.Context) {
+				c.Set("userApiKey", ownerKey)
+				c.Set("accessProvider", "static")
+				c.Next()
+			}, handler.HandleHangup)
+			request := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls/call-123/hangup", nil)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			for _, entry := range hook.AllEntries() {
+				if strings.Contains(entry.Message, "provider disabled") {
+					t.Fatalf("hangup logged a refusal: %q", entry.Message)
+				}
+			}
+			_, retained := handler.sessions.peek("call-123")
+			if !tc.forward {
+				if recorder.Code == http.StatusOK || executor.request != nil || claudeExecutor.request != nil || !retained {
+					t.Fatalf("status = %d, codex request = %v, claude request = %v, session retained = %t; want no upstream hangup", recorder.Code, executor.request, claudeExecutor.request, retained)
+				}
+				return
+			}
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+			}
+			if executor.request == nil || executor.request.URL.String() != "https://api.openai.com/v1/realtime/calls/call-123/hangup" {
+				t.Fatalf("upstream request = %#v", executor.request)
+			}
+			if retained {
+				t.Fatal("successful hangup retained session")
+			}
+		})
 	}
 }
+
+// claudeCaptureExecutor records requests sent with a Claude credential.
+type claudeCaptureExecutor struct{ *captureExecutor }
+
+func (*claudeCaptureExecutor) Identifier() string { return "claude" }
 
 func TestHandleHangupForwardsUnauthorizedHomeResponseWithoutRefresh(t *testing.T) {
 	const upstreamError = `{"error":{"message":"access token expired"}}`

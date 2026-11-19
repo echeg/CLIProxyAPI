@@ -192,6 +192,10 @@ type ModelRegistry struct {
 	models map[string]*ModelRegistration
 	// clientModels maps client ID to the models it provides
 	clientModels map[string][]string
+	// clientModelCounts maps client ID to model ID -> the number of times the
+	// client lists that model (above one for an alias pool), mirroring
+	// clientModels so an availability count reads it in O(1).
+	clientModelCounts map[string]map[string]int
 	// clientModelInfos maps client ID to a map of model ID -> ModelInfo
 	// This preserves the original model info provided by each client
 	clientModelInfos map[string]map[string]*ModelInfo
@@ -233,6 +237,7 @@ func GetGlobalRegistry() *ModelRegistry {
 		globalRegistry = &ModelRegistry{
 			models:                make(map[string]*ModelRegistration),
 			clientModels:          make(map[string][]string),
+			clientModelCounts:     make(map[string]map[string]int),
 			clientModelInfos:      make(map[string]map[string]*ModelInfo),
 			clientProviders:       make(map[string]string),
 			clientEpochs:          make(map[string]uint64),
@@ -1859,36 +1864,81 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 // Returns:
 //   - int: Number of available clients for the model
 func (r *ModelRegistry) GetModelCount(modelID string) int {
+	return r.GetModelCountMatching(modelID, nil)
+}
+
+// GetModelCountMatching is GetModelCount restricted to the clients whose provider
+// acceptProvider allows. A nil acceptProvider counts every client, including
+// clients registered without a provider. A client that lists the model several
+// times (an alias pool) counts once per entry, and an unavailable client removes
+// all of its entries, so the result is zero exactly when no accepted client is
+// available.
+func (r *ModelRegistry) GetModelCountMatching(modelID string, acceptProvider func(provider string) bool) int {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if registration, exists := r.models[modelID]; exists {
-		now := r.now()
-
-		// Count clients that have exceeded quota but haven't recovered yet
-		expiredClients := 0
-		for clientID, quotaTime := range registration.QuotaExceededClients {
-			if recoveryAt, ok := clientQuotaRecoveryAt(registration, clientID, quotaTime); ok && now.Before(recoveryAt) {
-				expiredClients++
-			}
-		}
-		suspendedClients := 0
-		for clientID := range registration.SuspendedClients {
-			if _, _, active := clientSuspensionActive(registration, clientID, now); !active {
-				continue
-			}
-			if recoveryAt, ok := clientQuotaRecoveryAt(registration, clientID, registration.QuotaExceededClients[clientID]); ok && now.Before(recoveryAt) {
-				continue
-			}
-			suspendedClients++
-		}
-		result := registration.Count - expiredClients - suspendedClients
-		if result < 0 {
-			return 0
-		}
-		return result
+	registration, exists := r.models[modelID]
+	if !exists {
+		return 0
 	}
-	return 0
+	now := r.now()
+	total := registration.Count
+	counted := func(string) bool { return true }
+	if acceptProvider != nil {
+		total = 0
+		for provider, count := range registration.Providers {
+			if count > 0 && acceptProvider(provider) {
+				total += count
+			}
+		}
+		counted = func(clientID string) bool {
+			provider, ok := r.clientProviders[clientID]
+			return ok && acceptProvider(provider)
+		}
+	}
+
+	// Count clients that have exceeded quota but haven't recovered yet
+	expiredClients := 0
+	for clientID, quotaTime := range registration.QuotaExceededClients {
+		if !counted(clientID) {
+			continue
+		}
+		if recoveryAt, ok := clientQuotaRecoveryAt(registration, clientID, quotaTime); ok && now.Before(recoveryAt) {
+			expiredClients += r.clientModelRegistrationsLocked(clientID, modelID)
+		}
+	}
+	suspendedClients := 0
+	for clientID := range registration.SuspendedClients {
+		if !counted(clientID) {
+			continue
+		}
+		if _, _, active := clientSuspensionActive(registration, clientID, now); !active {
+			continue
+		}
+		if recoveryAt, ok := clientQuotaRecoveryAt(registration, clientID, registration.QuotaExceededClients[clientID]); ok && now.Before(recoveryAt) {
+			continue
+		}
+		suspendedClients += r.clientModelRegistrationsLocked(clientID, modelID)
+	}
+	result := total - expiredClients - suspendedClients
+	if result < 0 {
+		return 0
+	}
+	return result
+}
+
+// clientModelRegistrationsLocked returns how many entries clientID adds to the
+// Count of modelID: one per time the client lists the model, as an alias pool
+// lists its alias once per upstream model. A client without a recorded entry
+// counts once. The caller holds the registry mutex.
+func (r *ModelRegistry) clientModelRegistrationsLocked(clientID, modelID string) int {
+	entries := 0
+	for _, id := range r.clientModels[clientID] {
+		if id == modelID {
+			entries++
+		}
+	}
+	return max(entries, 1)
 }
 
 // GetModelProviders returns provider identifiers that currently supply the given model
@@ -2145,7 +2195,56 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 //   - string: The model ID of the first available model, or empty string if none available
 //   - error: An error if no models are available
 func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
+	return r.GetFirstAvailableModelMatching(handlerType, nil)
+}
 
+// GetFirstAvailableModelMatching is GetFirstAvailableModel counting only the
+// available clients whose provider acceptProvider allows, so a model whose
+// available clients all belong to rejected providers is skipped. A nil
+// acceptProvider counts every client.
+func (r *ModelRegistry) GetFirstAvailableModelMatching(handlerType string, acceptProvider func(provider string) bool) (string, error) {
+	modelID, err := r.firstListedModel(handlerType, func(modelID string) bool {
+		return r.GetModelCountMatching(modelID, acceptProvider) > 0
+	})
+	if err != nil {
+		return "", err
+	}
+	if modelID == "" {
+		return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+	}
+	return modelID, nil
+}
+
+// GetFirstRegisteredModelMatching returns the newest model listed for
+// handlerType that a client of a provider acceptProvider allows registers,
+// whether or not that client is available (for example while it cools down).
+func (r *ModelRegistry) GetFirstRegisteredModelMatching(handlerType string, acceptProvider func(provider string) bool) (string, error) {
+	modelID, err := r.firstListedModel(handlerType, func(modelID string) bool {
+		r.mutex.RLock()
+		defer r.mutex.RUnlock()
+		registration, exists := r.models[modelID]
+		if !exists {
+			return false
+		}
+		for provider, count := range registration.Providers {
+			if count > 0 && acceptProvider(provider) {
+				return true
+			}
+		}
+		return false
+	})
+	if err != nil {
+		return "", err
+	}
+	if modelID == "" {
+		return "", fmt.Errorf("no registered clients of an accepted provider for any model in handler type: %s", handlerType)
+	}
+	return modelID, nil
+}
+
+// firstListedModel returns the newest model listed for handlerType that pick
+// accepts, or "" when pick accepts none. It fails only when nothing is listed.
+func (r *ModelRegistry) firstListedModel(handlerType string, pick func(modelID string) bool) (string, error) {
 	// Get all available models for this handler type
 	models := r.GetAvailableModels(handlerType)
 	if len(models) == 0 {
@@ -2163,16 +2262,12 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 		return createdI > createdJ
 	})
 
-	// Find the first model with available clients
 	for _, model := range models {
-		if modelID, ok := model["id"].(string); ok {
-			if count := r.GetModelCount(modelID); count > 0 {
-				return modelID, nil
-			}
+		if modelID, ok := model["id"].(string); ok && pick(modelID) {
+			return modelID, nil
 		}
 	}
-
-	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+	return "", nil
 }
 
 // GetModelsAndEpochForClient atomically returns the models registered for clientID along with the client's current registration epoch.

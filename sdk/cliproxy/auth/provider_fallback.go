@@ -147,11 +147,14 @@ func (p *routingProfile) apiFallbackProfile(provider string) *routingProfile {
 
 // filterDisabledProviders drops the providers the request's routing profile
 // disables and keeps the others in place. It refuses the request when every
-// listed provider is disabled (naming the first disabled one) or when the request
+// listed provider is disabled (naming the first disabled one), when the request
 // is pinned to an auth of a disabled provider, since pinned requests skip the
-// selection filter. Without a profile or a provider policy (Home, a scheduler
-// plugin) nothing is dropped.
-func (m *Manager) filterDisabledProviders(ctx context.Context, providers []string, opts cliproxyexecutor.Options) ([]string, error) {
+// selection filter, or when a disabled Claude owns the Claude Thread the request
+// continues and Claude was dropped from the list or "auto" was resolved away
+// from it, since another provider would run it without the conversation
+// history. Without a profile or a provider policy (Home, a scheduler plugin)
+// nothing is dropped.
+func (m *Manager) filterDisabledProviders(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]string, error) {
 	profile := routingProfileFromContext(ctx)
 	if profile == nil || !profile.providerPolicy {
 		return providers, nil
@@ -160,11 +163,29 @@ func (m *Manager) filterDisabledProviders(ctx context.Context, providers []strin
 		policy, ok := profile.providerMode(provider)
 		return ok && policy.Disabled
 	}
+	checkClaudeThread := false
 	if i := slices.IndexFunc(providers, disabled); i >= 0 {
 		firstDisabled := providers[i]
+		checkClaudeThread = slices.ContainsFunc(providers, func(provider string) bool {
+			return strings.EqualFold(strings.TrimSpace(provider), "claude") && disabled(provider)
+		})
 		providers = slices.DeleteFunc(slices.Clone(providers), disabled)
 		if len(providers) == 0 {
 			return nil, refuseDisabledProvider(ctx, profile, firstDisabled)
+		}
+	}
+	// The handler resolves "auto" to a model of an enabled provider, so a
+	// continuation of a Thread on the disabled Claude never lists claude here.
+	checkClaudeThread = checkClaudeThread || (disabled("claude") && requestedAutoModel(opts))
+	if checkClaudeThread {
+		// execute resolves the Thread owner only while claude is listed, so look
+		// it up here before the remaining providers run the request.
+		_, ownedThread, errThread := withClaudeThreadAuth(ctx, []string{"claude"}, req, opts)
+		if errThread != nil {
+			return nil, errThread
+		}
+		if ownedThread {
+			return nil, refuseDisabledProvider(ctx, profile, "claude")
 		}
 	}
 	if pinnedID := pinnedAuthIDFromMetadata(opts.Metadata); pinnedID != "" {
@@ -182,13 +203,20 @@ func (m *Manager) filterDisabledProviders(ctx context.Context, providers []strin
 	return providers, nil
 }
 
+// requestedAutoModel reports whether the client asked for the model "auto" (with
+// or without a thinking suffix), which the handler resolves before execution.
+func requestedAutoModel(opts cliproxyexecutor.Options) bool {
+	requested := stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestedModelMetadataKey)
+	return requested != "" && thinking.ParseSuffix(requested).ModelName == "auto"
+}
+
 func executeWithProviderFallback[T any](m *Manager, ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, execute func(context.Context, []string, cliproxyexecutor.Request, cliproxyexecutor.Options) (T, error)) (T, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	// The disabled-provider gate runs before the fallback decision: its 403 would
 	// otherwise count as a fallback trigger.
-	providers, errDisabled := m.filterDisabledProviders(ctx, providers, opts)
+	providers, errDisabled := m.filterDisabledProviders(ctx, providers, req, opts)
 	if errDisabled != nil {
 		var zero T
 		return zero, errDisabled

@@ -54,18 +54,59 @@ func refuseDisabledProvider(ctx context.Context, profile *routingProfile, provid
 	return &providerDisabledError{message: message}
 }
 
+type openSessionPinContextKey struct{}
+
+// WithOpenSessionPin marks a direct auth selection that ends a session opened
+// before its provider was disabled, such as the hangup of an open realtime call.
+// When the selection options pin an auth, the routing profile's
+// providers.<p>.disabled switch is skipped; every other selection check (the
+// pinned auth's provider, the required kind, its disabled state and
+// availability) still applies.
+func WithOpenSessionPin(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, openSessionPinContextKey{}, true)
+}
+
+func openSessionPinFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	pinned, _ := ctx.Value(openSessionPinContextKey{}).(bool)
+	return pinned
+}
+
 // refuseDisabledSelection resolves the routing profile of a direct auth selection
 // (Codex search, live and realtime pick an auth without executeWithProviderFallback)
-// and refuses it when that profile disables provider. The returned context carries
-// the resolved profile. Home and plugin schedulers never refuse because
-// providerMode reports no policy there.
-func (m *Manager) refuseDisabledSelection(ctx context.Context, provider string) (context.Context, error) {
+// and refuses it when that profile disables provider, unless the selection is an
+// open-session pin (WithOpenSessionPin plus a pinned auth in opts). The returned
+// context carries the resolved profile. Home and plugin schedulers never refuse
+// because providerMode reports no policy there.
+func (m *Manager) refuseDisabledSelection(ctx context.Context, provider string, opts cliproxyexecutor.Options) (context.Context, error) {
 	ctx = m.ensureRoutingProfile(ctx)
 	profile := routingProfileFromContext(ctx)
 	if policy, ok := profile.providerMode(provider); ok && policy.Disabled {
+		if openSessionPinFromContext(ctx) && pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+			return ctx, nil
+		}
 		return ctx, refuseDisabledProvider(ctx, profile, provider)
 	}
 	return ctx, nil
+}
+
+// ProviderEnabledForRequest returns a predicate that reports whether the routing
+// profile of the request in ctx leaves a provider enabled (providers.<p>.disabled
+// is not set). The profile is resolved once and nothing is logged, so a caller can
+// steer a choice made before execution, such as resolving the model "auto", while
+// the execute gate still enforces the switch. Under Home and a plugin scheduler
+// every provider is enabled, as at the gate.
+func (m *Manager) ProviderEnabledForRequest(ctx context.Context) func(provider string) bool {
+	profile := routingProfileFromContext(m.ensureRoutingProfile(ctx))
+	return func(provider string) bool {
+		policy, ok := profile.providerMode(provider)
+		return !ok || !policy.Disabled
+	}
 }
 
 // providerPolicyAllows applies the per-provider policy of the routing profile:

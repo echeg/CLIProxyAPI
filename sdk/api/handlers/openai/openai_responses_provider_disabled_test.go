@@ -88,13 +88,18 @@ func TestResponsesCodexServedWhenProfileDisablesClaude(t *testing.T) {
 	router := gin.New()
 	router.Use(func(c *gin.Context) { c.Set("userApiKey", clientKey) })
 	router.POST("/v1/responses", h.Responses)
-	post := func(model string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"`+model+`","input":"hi","stream":false}`))
+	postStream := func(model string, stream bool) *httptest.ResponseRecorder {
+		body := `{"model":"` + model + `","input":"hi","stream":false}`
+		if stream {
+			body = `{"model":"` + model + `","input":"hi","stream":true}`
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		return rec
 	}
+	post := func(model string) *httptest.ResponseRecorder { return postStream(model, false) }
 
 	if rec := post(codexModel); rec.Code != http.StatusOK {
 		t.Fatalf("codex status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -109,6 +114,14 @@ func TestResponsesCodexServedWhenProfileDisablesClaude(t *testing.T) {
 	}
 	if got := ojson.GetBytesNoCopy(rec.Body.Bytes(), "error.message").String(); got != "claude is disabled by the routing profile of this API key" {
 		t.Fatalf("claude error.message = %q; body=%s", got, rec.Body.String())
+	}
+	// A routing-profile refusal must not read as a billing problem.
+	if code, errType := ojson.GetBytesNoCopy(rec.Body.Bytes(), "error.code").String(), ojson.GetBytesNoCopy(rec.Body.Bytes(), "error.type").String(); code != "provider_disabled" || errType != "permission_error" {
+		t.Fatalf("claude error.code = %q, error.type = %q; want provider_disabled, permission_error; body=%s", code, errType, rec.Body.String())
+	}
+	// The streaming bootstrap refusal carries the same code.
+	if streamRec := postStream(claudeModel, true); streamRec.Code != http.StatusForbidden || ojson.GetBytesNoCopy(streamRec.Body.Bytes(), "error.code").String() != "provider_disabled" {
+		t.Fatalf("claude stream status = %d, want 403 with error.code provider_disabled; body=%s", streamRec.Code, streamRec.Body.String())
 	}
 	if claude.calls != 0 {
 		t.Fatalf("claude calls = %d, want 0", claude.calls)

@@ -1545,6 +1545,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		if origSeq := ojson.Get(errText, "sequence_number"); origSeq.Exists() {
 			seq = int(origSeq.Int())
 		}
+		errText = handlers.ResponsesStreamErrorTextWithError(errText, errMsg.Error)
 		if isCodexResponsesClientRequest(c) {
 			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
 			_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))

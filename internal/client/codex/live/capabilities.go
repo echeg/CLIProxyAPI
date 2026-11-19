@@ -84,14 +84,10 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 				coreexecutor.ExecutionSessionMetadataKey: callID,
 			},
 		}
-		selection, selectedAuth, errSelect := h.selectOAuth(ctx, session.model, selectionOpts)
-		if auth.IsProviderDisabledError(errSelect) {
-			// A disable applies to new calls only: the hangup of an open call still
-			// reaches its own credential, so the upstream call ends.
-			if pinned, ok := h.authManager.GetByID(session.authID); ok && !pinned.Disabled {
-				selectedAuth, errSelect = pinned, nil
-			}
-		}
+		// A disable applies to new calls only: the hangup of an open call still
+		// selects its pinned credential, so the upstream call ends. The pin keeps
+		// every other selection check (Codex provider, OAuth kind, credential state).
+		selection, selectedAuth, errSelect := h.selectOAuth(auth.WithOpenSessionPin(ctx), session.model, selectionOpts)
 		if errSelect != nil {
 			writeSelectionError(c, errSelect)
 			return

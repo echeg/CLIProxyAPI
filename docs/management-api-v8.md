@@ -258,7 +258,7 @@ routing:
         codex: {api-credential: "<auth_index>", fallback: {target: api}, speed: ultrafast, ignore-client-tier: true}
     "client-key-b":
       providers:
-        claude: {disabled: true}       # a Codex-only key
+        claude: {disabled: true}       # Claude refused; Codex and other providers stay available
 ```
 
 `api-credential` is the `auth_index` of an `api-keys.claude` or `api-keys.codex`
@@ -313,13 +313,22 @@ profile paths use the 12-hex key hash, for example
   `claude is disabled by the routing profile of this API key` when the key's own
   profile disables the provider, and
   `claude is disabled by the routing profile` when the shared profile does (the
-  same with `codex`). The message never contains the key or its hash. Streaming
-  (the error arrives before the stream starts), non-streaming, and count-tokens
-  requests, and every other endpoint that executes through the proxy (images,
-  compact, speech, videos), are refused the same way.
+  same with `codex`). The message never contains the key or its hash. OpenAI-format
+  error bodies, including the realtime routes (`/v1/realtime/...`), carry
+  `type: permission_error` and `code: provider_disabled`. Streaming (the error
+  arrives before the stream starts), non-streaming, and count-tokens requests,
+  and every other endpoint that executes through the proxy (images, compact,
+  speech, videos), are refused the same way. When a pre-first-token keep-alive
+  (`streaming.send-keepalive-before-ft`) has already started the stream, the
+  refusal arrives as the stream's error event with the same type and code.
 - A model served by both providers drops the disabled one and runs on the other
   without an error. When every provider of the request is disabled, the 403
-  names the first disabled provider of the request.
+  names the first disabled provider of the request. A Claude Thread continuation
+  (`thread.previous_message_id`) bound to a Claude credential is refused with the
+  Claude 403 instead, because another provider would run it without the
+  conversation history; a new Thread runs on the enabled provider. The same holds
+  for a continuation with `model: auto` that resolved to a model of another
+  provider while Claude is disabled.
 - A disabled Codex turns off the Claude -> Codex fallback in both `auto` and
   `always` modes: a Claude request runs on Claude only and a failed primary
   returns its own error. A disabled Claude refuses Claude requests even when a
@@ -336,10 +345,18 @@ profile paths use the 12-hex key hash, for example
 - A disable applies to new requests and connections after a hot reload. An open
   Codex duplex websocket forwards follow-up creates and steering frames inside
   its existing upstream stream, so it keeps running until it closes. The hangup
-  of an open realtime call (`/v1/realtime/calls/{id}/hangup`) still reaches its
-  credential, so the call can be ended.
+  of an open realtime call (`/v1/realtime/calls/{id}/hangup`) still selects its
+  pinned Codex OAuth credential, so the call can be ended; it is not logged as a
+  refusal.
 - `/v1/models` is global and still lists every model, including models of a
-  disabled provider.
+  disabled provider. `model: auto` resolves, with the request's profile, to the
+  newest model that has an available credential of an enabled provider, so it
+  skips a model whose only available credentials belong to disabled providers;
+  when there is none, it resolves as before and the request gets the 403, also
+  when every credential is cooling down and `auto` falls back to the newest
+  model of a disabled provider. A Responses websocket resolves `auto` the same
+  way when it matches its pinned credential to a turn, and ignores credentials of
+  disabled providers when it decides how to replay a turn.
 - **Primary leg.** Each candidate credential is filtered by the mode of its own
   provider, so a request that selects from a mixed Claude and Codex pool applies
   both modes. `subscription` excludes API-key credentials; `api` allows only the
