@@ -511,4 +511,146 @@ func TestConfigV8LegacyClaudeFallbackNextToZeroNode(t *testing.T) {
 		assertConverted(t, h, path, nil)
 		assertLegacyKept(t, path, keyParts)
 	})
+
+	// A PATCH that names the node is judged by the merged node: clearing the
+	// target of a stored non-zero node next to an empty legacy patch keeps the
+	// mappings and turns the fallback off instead of restoring target codex
+	// from the stored legacy view.
+	t.Run("PATCH clearing the target of a stored node", func(t *testing.T) {
+		h, path := newRoutingProfilesTestHandler(t, profileRaw("{target: codex, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}"))
+		body := `{"routing":{"providers":{"claude":{"fallback":{"target":null}}},"claude-fallback":{}}}`
+		if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", body); rec.Code != http.StatusOK {
+			t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+		}
+		if savedRoutingNode(t, path, "claude-fallback") != nil {
+			t.Fatal("shared legacy node kept")
+		}
+		if node := savedRoutingNode(t, path, "providers", "claude", "fallback", "target"); node != nil && node.Value == config.ProviderFallbackCodex {
+			t.Fatal("stored target codex restored from the legacy view")
+		}
+		loaded, errLoad := config.LoadConfig(path)
+		if errLoad != nil {
+			t.Fatal(errLoad)
+		}
+		got := loaded.Routing.SharedProfile().EffectiveProviders().Claude.Fallback
+		if got.Target != config.ProviderFallbackOff || !reflect.DeepEqual(got.Mappings, wantMappings) {
+			t.Fatalf("fallback = %+v, want target off with the stored mappings", got)
+		}
+	})
+
+	// Clearing the target of a stored node that has no other field leaves the
+	// merged node empty, so load would read the stored enabled legacy block,
+	// which the empty legacy patch keeps: it is converted to target codex with
+	// the legacy mappings.
+	t.Run("PATCH clearing the target of a stored target-only node", func(t *testing.T) {
+		h, path := newRoutingProfilesTestHandler(t, profileRaw("{target: \"off\"}"))
+		body := `{"routing":{"providers":{"claude":{"fallback":{"target":null}}},"claude-fallback":{}}}`
+		if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", body); rec.Code != http.StatusOK {
+			t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+		}
+		assertConverted(t, h, path, nil)
+		// The key profile is not named by the write and keeps its shape.
+		if savedRoutingNode(t, path, append(append([]string{}, keyParts...), "claude-fallback")...) == nil {
+			t.Fatal("key profile legacy node dropped")
+		}
+		if got := h.cfg.Routing.KeyProfiles[providersWriteKey].EffectiveProviders().Claude.Fallback.Target; got != config.ProviderFallbackOff {
+			t.Fatalf("key profile target = %q, want off", got)
+		}
+	})
+
+	// A PATCH that clears the stored node and sends the legacy block converts
+	// the merged legacy block, which load would read, rather than a legacy view
+	// of the node it just cleared: an empty legacy block turns the fallback
+	// off, and a stored api target is not kept.
+	for _, stored := range []string{config.ProviderFallbackCodex, config.ProviderFallbackAPI} {
+		for _, clear := range []struct{ name, node string }{
+			{"null node", `null`},
+			{"null fields", `{"target":null,"mode":null,"mappings":null}`},
+		} {
+			t.Run("PATCH clearing a stored "+stored+" node with "+clear.name+" next to an empty legacy block", func(t *testing.T) {
+				h, path := newRoutingProfilesTestHandler(t, "config-version: 8\nrouting:\n  providers: {claude: "+storedClaudeBlock(stored)+"}\n")
+				body := `{"routing":{"providers":{"claude":{"fallback":` + clear.node + `}},"claude-fallback":{}}}`
+				if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", body); rec.Code != http.StatusOK {
+					t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+				}
+				if savedRoutingNode(t, path, "claude-fallback") != nil {
+					t.Fatal("shared legacy node kept")
+				}
+				loaded, errLoad := config.LoadConfig(path)
+				if errLoad != nil {
+					t.Fatal(errLoad)
+				}
+				if got := loaded.Routing.SharedProfile().EffectiveProviders().Claude.Fallback; got.Target != config.ProviderFallbackOff || len(got.Mappings) != 0 {
+					t.Fatalf("fallback = %+v, want target off without mappings", got)
+				}
+			})
+		}
+	}
+
+	// A PATCH of an empty legacy block keeps a stored enabled legacy block, so
+	// clearing the node converts that block, which load would read, and the
+	// fallback goes to Codex with the legacy mappings rather than off.
+	for _, stored := range []string{config.ProviderFallbackCodex, config.ProviderFallbackAPI} {
+		t.Run("PATCH clearing a stored "+stored+" node next to a stored enabled legacy block", func(t *testing.T) {
+			storedLegacy := `claude-fallback: {enabled: true, mode: auto, mappings: [{from: "claude-opus-*", to: "gpt-6-astra"}]}`
+			h, path := newRoutingProfilesTestHandler(t, "config-version: 8\nrouting:\n  providers: {claude: "+storedClaudeBlock(stored)+"}\n  "+storedLegacy+"\n")
+			body := `{"routing":{"providers":{"claude":{"fallback":null}},"claude-fallback":{}}}`
+			if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", body); rec.Code != http.StatusOK {
+				t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+			}
+			if savedRoutingNode(t, path, "claude-fallback") != nil {
+				t.Fatal("shared legacy node kept")
+			}
+			loaded, errLoad := config.LoadConfig(path)
+			if errLoad != nil {
+				t.Fatal(errLoad)
+			}
+			got := loaded.Routing.SharedProfile().EffectiveProviders().Claude.Fallback
+			if got.Target != config.ProviderFallbackCodex || got.Mode != "auto" || len(got.Mappings) != 1 || got.Mappings[0].To != "gpt-6-astra" {
+				t.Fatalf("fallback = %+v, want target codex with the legacy mode and mapping", got)
+			}
+		})
+	}
+
+	// A misspelled field leaves the node non-zero for strict validation, so the
+	// write is rejected rather than the node being replaced by the legacy block.
+	// A misspelled legacy field is rejected too rather than being ignored by
+	// the conversion, or dropped with the legacy block when a stored non-zero
+	// node wins over it.
+	keyPrefix := `{"routing":{"key-profiles":{"` + providersWriteKey + `":`
+	for _, tc := range []struct{ name, method, target, body, field string }{
+		{"PATCH", http.MethodPatch, "/v8/management/config", `{"routing":{"providers":{"claude":{"fallback":{"targte":"off"}}},"claude-fallback":{"enabled":true}}}`, "targte"},
+		{"PUT", http.MethodPut, "/v8/management/config/routing", `{"providers":{"claude":{"fallback":{"targte":"off"}}},"claude-fallback":{"enabled":true}}`, "targte"},
+		{"PATCH of both blocks", http.MethodPatch, "/v8/management/config", `{"routing":{"providers":{"claude":{"fallback":{}}},"claude-fallback":{"enabeld":false}}}`, "enabeld"},
+		{"legacy-only PATCH", http.MethodPatch, "/v8/management/config", `{"routing":{"claude-fallback":{"enabeld":false}}}`, "enabeld"},
+		{"legacy-only key PATCH", http.MethodPatch, "/v8/management/config", keyPrefix + `{"claude-fallback":{"enabeld":false}}}}}`, "enabeld"},
+		{"legacy mapping PATCH", http.MethodPatch, "/v8/management/config", `{"routing":{"claude-fallback":{"enabled":false,"mappings":[{"from":"claude-*","to":"gpt-6-sol","tto":"gpt-6-astra"}]}}}`, "tto"},
+		{"legacy block PUT", http.MethodPut, "/v8/management/config/routing/claude-fallback", `{"enabeld":false}`, "enabeld"},
+		{"legacy field PUT", http.MethodPut, "/v8/management/config/routing/claude-fallback/enabeld", `false`, "enabeld"},
+		{"PUT of a set node and a legacy block", http.MethodPut, "/v8/management/config/routing", `{"providers":{"claude":{"fallback":{"target":"codex","mappings":[{"from":"claude-*","to":"gpt-6-sol"}]}}},"claude-fallback":{"enabeld":false}}`, "enabeld"},
+	} {
+		for _, stored := range []struct{ name, node string }{
+			{"zero", `{}`},
+			{"non-zero", `{target: codex, mappings: [{from: "claude-*", to: "gpt-6-sol"}]}`},
+		} {
+			t.Run(tc.name+" with a misspelled "+tc.field+" field over a "+stored.name+" node", func(t *testing.T) {
+				h, path := newRoutingProfilesTestHandler(t, profileRaw(stored.node))
+				before, errBefore := os.ReadFile(path)
+				if errBefore != nil {
+					t.Fatal(errBefore)
+				}
+				rec := serveConfigV8(t, h, tc.method, tc.target, tc.body)
+				if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), tc.field) {
+					t.Fatalf("status %d: %s, want 400 naming the misspelled field", rec.Code, rec.Body.String())
+				}
+				after, errAfter := os.ReadFile(path)
+				if errAfter != nil {
+					t.Fatal(errAfter)
+				}
+				if string(after) != string(before) {
+					t.Fatal("rejected write changed the file")
+				}
+			})
+		}
+	}
 }

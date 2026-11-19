@@ -202,8 +202,11 @@ func TestConfigV8ETagIfMatch(t *testing.T) {
 	chained := do(http.MethodPut, "/v8/management/config/server/port", `8325`, nextETag)
 	wantStatus(chained, http.StatusOK)
 	loaded, err = config.LoadConfig(path)
-	if err != nil || loaded.Port != 8325 || len(loaded.APIKeys) != 0 {
-		t.Fatalf("chained writes not applied: port=%d keys=%v err=%v", loaded.Port, loaded.APIKeys, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Port != 8325 || len(loaded.APIKeys) != 0 {
+		t.Fatalf("chained writes not applied: port=%d keys=%v", loaded.Port, loaded.APIKeys)
 	}
 
 	// Without If-Match the behaviour is unchanged.

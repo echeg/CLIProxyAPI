@@ -816,10 +816,21 @@ To return to the derived legacy selection, patch `routing.selection` to `null`.
 
 Writes that still use the legacy `claude-fallback` block (older panels send it
 with each profile and no `providers`) are merged into the stored `providers`
-instead of replacing it, so an older client cannot wipe API settings. For the
-shared profile and each key profile in the write that carries `claude-fallback`
-and no `providers.claude.fallback`, or an empty one (`{}`, `null`, or all fields
-empty, which load reads as unset, as in a profile read back and written whole):
+instead of replacing it, so an older client cannot wipe API settings. A legacy
+block in the write with a field that is not `enabled`, `mode` or `mappings` (or
+a mapping field that is not `from` or `to`), such as `{"enabeld": false}`, is
+rejected as `invalid_config` and the file is left unchanged, also when a
+non-zero `providers.claude.fallback` wins over the block. So is a
+`providers.claude.fallback` with a field that is not `target`, `mode` or
+`mappings`; such a node is never empty. The rules below apply to the shared
+profile and each key profile in the write that carries `claude-fallback` and no
+`providers.claude.fallback`, or one that leaves the merged node empty (`{}`,
+`null`, or all fields empty, which load reads as unset, as in a profile read
+back and written whole). A `PATCH` is judged by the merged node, so
+`{"target": null}` over a stored node that keeps a non-empty `mode` or
+`mappings` keeps those fields and is not replaced from the legacy block; over a
+stored node with only a `target`, such as `{"target": "off"}`, it leaves the
+merged node empty, and the merged legacy block is converted as described below:
 
 - The stored `providers` of that profile is kept; only
   `providers.claude.fallback` is updated from the legacy block.
@@ -833,6 +844,14 @@ empty, which load reads as unset, as in a profile read back and written whole):
   keeps the stored `mode` and `mappings`, and a `null` field resets only that
   field. A `PUT` of the block replaces them; a `PUT` of one field (for example
   `/v8/management/config/routing/claude-fallback/mode`) replaces only that field.
+- A write that names `providers.claude.fallback` and leaves the merged node
+  empty converts the merged legacy block, which load would read, instead of the
+  stored fallback the write cleared. A `PATCH` that sends
+  `providers.claude.fallback: null` and `claude-fallback: {}` over a stored
+  `target: codex` (or `api`) node therefore turns the fallback `off` when the
+  merged legacy block is empty or disabled, as it is when the file holds no
+  legacy block. A `PATCH` of `{}` keeps a stored legacy block, so an enabled one
+  with mappings converts to `target: codex` with its `mode` and `mappings`.
 - `DELETE` of a profile's `claude-fallback` path also deletes its
   `providers.claude.fallback` (the fallback is then `off`), unless the target is
   `api`, which is kept.
