@@ -98,32 +98,45 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"latest-version": version})
 }
 
+// WriteConfig normalizes data and writes it to path in place, keeping the
+// inode of a mounted configuration file.
 func WriteConfig(path string, data []byte) error {
+	_, err := writeConfigBytes(path, data)
+	return err
+}
+
+// writeConfigBytes is WriteConfig that also returns the normalized bytes it
+// wrote, so a caller can describe the saved version without reading the file
+// back. It returns nil bytes on any error.
+func writeConfigBytes(path string, data []byte) ([]byte, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return err
+		return nil, err
 	}
 	if len(doc.Content) > 0 && config.IsV8ConfigLayout(doc.Content[0]) {
 		var err error
 		data, _, err = config.NormalizeConfigLayout(data, true)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	data = config.NormalizeCommentIndentation(data)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, errWrite := f.Write(data); errWrite != nil {
 		_ = f.Close()
-		return errWrite
+		return nil, errWrite
 	}
 	if errSync := f.Sync(); errSync != nil {
 		_ = f.Close()
-		return errSync
+		return nil, errSync
 	}
-	return f.Close()
+	if errClose := f.Close(); errClose != nil {
+		return nil, errClose
+	}
+	return data, nil
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {

@@ -208,20 +208,20 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	// Save the validated canonical tree directly: projecting runtime defaults
 	// back onto it loses explicit nulls, empty maps, and opaque plugin settings.
-	// WriteConfig retains the inode of a mounted configuration file.
-	if err = WriteConfig(h.configFilePath, data); err != nil {
+	// writeConfigBytes retains the inode of a mounted configuration file.
+	saved, err := writeConfigBytes(h.configFilePath, data)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return
 	}
 	// Runtime-only ownership state is never sourced from an uploaded YAML document.
 	next.Home = h.cfg.Home
-	// WriteConfig may normalize the bytes, so report the version actually on
-	// disk. If it cannot be read back, omit the ETag instead of guessing one.
-	// Like Home, SourceHash keeps its runtime owner and is published by the
-	// reload, so it is not overwritten on next here.
-	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
-		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
-	}
+	// The write may normalize the bytes, so the ETag names the bytes it wrote,
+	// the version this handler loads. Reading the file back instead could name
+	// another writer's edit made right after the write. Like Home, SourceHash
+	// keeps its runtime owner and is published by the reload, so it is not
+	// overwritten on next here.
+	c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
 	prevSecretHash := ""
 	if h.cfg != nil {
 		prevSecretHash = h.cfg.RemoteManagement.SecretKey

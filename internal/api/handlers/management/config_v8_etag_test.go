@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -182,6 +183,28 @@ func TestConfigV8ETagIfMatch(t *testing.T) {
 	}
 	second := do(http.MethodPut, "/v8/management/config/server/port", `8322`, nextETag)
 	wantStatus(second, http.StatusOK)
+	nextETag = second.Header().Get("ETag")
+
+	// Every write kind answers with the tag of the bytes it wrote, and that
+	// tag is accepted by the next write without a read in between.
+	for _, step := range []struct{ method, url, body string }{
+		{http.MethodPut, "/v8/management/config/access/api-keys", `["k1","k2"]`},
+		{http.MethodPatch, "/v8/management/config", `{"server":{"port":8324}}`},
+		{http.MethodDelete, "/v8/management/config/access/api-keys", ""},
+	} {
+		recorder = do(step.method, step.url, step.body, nextETag)
+		wantStatus(recorder, http.StatusOK)
+		nextETag = recorder.Header().Get("ETag")
+		if nextETag == "" || nextETag != fileETag() {
+			t.Fatalf("%s %s response ETag=%q want file tag %q", step.method, step.url, nextETag, fileETag())
+		}
+	}
+	chained := do(http.MethodPut, "/v8/management/config/server/port", `8325`, nextETag)
+	wantStatus(chained, http.StatusOK)
+	loaded, err = config.LoadConfig(path)
+	if err != nil || loaded.Port != 8325 || len(loaded.APIKeys) != 0 {
+		t.Fatalf("chained writes not applied: port=%d keys=%v err=%v", loaded.Port, loaded.APIKeys, err)
+	}
 
 	// Without If-Match the behaviour is unchanged.
 	unconditional := do(http.MethodPut, "/v8/management/config/server/port", `8323`, "")
@@ -192,5 +215,45 @@ func TestConfigV8ETagIfMatch(t *testing.T) {
 	wantStatus(missing, http.StatusNotFound)
 	if got := missing.Header().Get("ETag"); got != "" {
 		t.Fatalf("404 ETag=%q want empty", got)
+	}
+}
+
+// TestConfigV8WriteFailureOmitsETag checks that a failed save answers
+// write_failed and names no version, since nothing was written.
+func TestConfigV8WriteFailureOmitsETag(t *testing.T) {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	gin.SetMode(gin.TestMode)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "config-version: 8\nserver: {port: 8317}\n"
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The handler reads the file before the write, so the path must stay
+	// readable: a read-only file fails only the write.
+	if err = os.Chmod(path, 0400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0600) })
+	h := &Handler{cfg: cfg, configFilePath: path}
+	router := gin.New()
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v8/management/config/server/port", strings.NewReader(`8318`))
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), `"write_failed"`) {
+		t.Fatalf("status=%d body=%s want 500 write_failed", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("ETag"); got != "" {
+		t.Fatalf("failed write ETag=%q want none", got)
+	}
+	if h.cfg != cfg {
+		t.Fatal("failed write replaced the handler config")
 	}
 }

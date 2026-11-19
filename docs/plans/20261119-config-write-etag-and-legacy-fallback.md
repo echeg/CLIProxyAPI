@@ -64,12 +64,13 @@
 ## Implementation Steps
 
 ### Task 1: Answer a config write with the ETag of the written bytes
-- [ ] in `internal/api/handlers/management/config_basic.go`, move the body of `WriteConfig` into `writeConfigBytes(path string, data []byte) ([]byte, error)` that returns the normalized bytes it wrote; `WriteConfig` calls it and returns only the error
-- [ ] in `ConfigV8` (`config_v8.go:212-224`), call `writeConfigBytes`, set `ETag` from `config.ComputeSourceHash` of the returned bytes, and remove the `os.ReadFile` after the write; update the comment above it
-- [ ] write a test for `writeConfigBytes`: the returned bytes equal the file content for a v8 config whose layout and comment indentation get normalized, and an invalid YAML input returns an error and no bytes
-- [ ] extend `TestConfigV8ETagIfMatch`: after a `PUT`, a `PATCH` and a `DELETE` the response `ETag` equals the tag of the file, and a following write with that tag in `If-Match` succeeds
-- [ ] write a test that a write failure (config path is a directory) answers `500 write_failed` without an `ETag` header
-- [ ] run `go test ./internal/api/handlers/management/ ./sdk/api/...` - must pass before task 2
+- [x] in `internal/api/handlers/management/config_basic.go`, move the body of `WriteConfig` into `writeConfigBytes(path string, data []byte) ([]byte, error)` that returns the normalized bytes it wrote; `WriteConfig` calls it and returns only the error
+- [x] in `ConfigV8` (`config_v8.go:212-224`), call `writeConfigBytes`, set `ETag` from `config.ComputeSourceHash` of the returned bytes, and remove the `os.ReadFile` after the write; update the comment above it
+- [x] write a test for `writeConfigBytes`: the returned bytes equal the file content for a v8 config whose layout and comment indentation get normalized, and an invalid YAML input returns an error and no bytes
+- [x] extend `TestConfigV8ETagIfMatch`: after a `PUT`, a `PATCH` and a `DELETE` the response `ETag` equals the tag of the file, and a following write with that tag in `If-Match` succeeds
+- [x] write a test that a write failure (config path is a directory) answers `500 write_failed` without an `ETag` header
+  - ⚠️ `ConfigV8` reads the file before writing, so a directory path fails with `read_failed`; the handler test uses a read-only file instead (`TestConfigV8WriteFailureOmitsETag`), and the directory case is covered by `TestWriteConfigBytesWriteFailure`
+- [x] run `go test ./internal/api/handlers/management/ ./sdk/api/...` - must pass before task 2
 
 ### Task 2: Keep the legacy claude-fallback next to a zero fallback node the write does not name
 - [ ] in `mergeLegacyClaudeFallbackProfile` (`routing_providers_write.go:91-93`), delete `claude-fallback` only when the merged `providers.claude.fallback` node decodes to a non-zero `config.ProviderFallbackConfig`, or when `written` carries a `providers.claude.fallback` node; a node that fails to decode still deletes, as today
