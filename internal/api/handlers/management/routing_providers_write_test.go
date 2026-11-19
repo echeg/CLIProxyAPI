@@ -1,7 +1,6 @@
 package management
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"gopkg.in/yaml.v3"
@@ -409,15 +409,16 @@ func TestConfigV8LegacyClaudeFallbackNextToZeroNode(t *testing.T) {
 		{"null", "null"},
 		{"empty-fields", "{target: \"\", mode: \"\", mappings: []}"},
 	} {
-		for _, write := range []struct{ name, body string }{
-			{"shared-speed", `{"routing":{"providers":{"codex":{"speed":"fast"}}}}`},
-			{"shared-disabled", `{"routing":{"providers":{"codex":{"disabled":true}}}}`},
-			{"key-speed", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"codex":{"speed":"fast"}}}}}}`},
+		for _, write := range []struct{ name, method, target, body string }{
+			{"shared-speed", http.MethodPatch, "/v8/management/config", `{"routing":{"providers":{"codex":{"speed":"fast"}}}}`},
+			{"shared-disabled", http.MethodPatch, "/v8/management/config", `{"routing":{"providers":{"codex":{"disabled":true}}}}`},
+			{"key-speed", http.MethodPatch, "/v8/management/config", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"codex":{"speed":"fast"}}}}}}`},
+			{"shared-speed-path", http.MethodPut, "/v8/management/config/routing/providers/codex/speed", `"fast"`},
 		} {
 			t.Run(zero.name+"/"+write.name, func(t *testing.T) {
 				h, path := newRoutingProfilesTestHandler(t, profileRaw(zero.node))
-				if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", write.body); rec.Code != http.StatusOK {
-					t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+				if rec := serveConfigV8(t, h, write.method, write.target, write.body); rec.Code != http.StatusOK {
+					t.Fatalf("%s %s status %d: %s", write.method, write.target, rec.Code, rec.Body.String())
 				}
 				assertLegacyKept(t, path, nil)
 				assertLegacyKept(t, path, keyParts)
@@ -432,6 +433,7 @@ func TestConfigV8LegacyClaudeFallbackNextToZeroNode(t *testing.T) {
 	// legacy-only write still drop the legacy block, as before.
 	for _, tc := range []struct{ name, stored, body, wantTarget string }{
 		{"write names an empty node", "{}", `{"routing":{"providers":{"claude":{"fallback":{}}}}}`, config.ProviderFallbackOff},
+		{"write names a null node", "{}", `{"routing":{"providers":{"claude":{"fallback":null}}}}`, config.ProviderFallbackOff},
 		{"write names target off", "{}", `{"routing":{"providers":{"claude":{"fallback":{"target":"off"}}}}}`, config.ProviderFallbackOff},
 		{"stored non-zero node", "{target: codex, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}", `{"routing":{"providers":{"codex":{"speed":"fast"}}}}`, config.ProviderFallbackCodex},
 		{"legacy-only write", "{}", `{"routing":{"claude-fallback":{"enabled":true,"mappings":[{"from":"claude-*","to":"gpt-6-sol"}]}}}`, config.ProviderFallbackCodex},
@@ -451,4 +453,62 @@ func TestConfigV8LegacyClaudeFallbackNextToZeroNode(t *testing.T) {
 			assertLegacyKept(t, path, keyParts)
 		})
 	}
+
+	// A write that sends the legacy block next to a zero node it names, such as
+	// a routing node read back whole with only the Codex speed changed, means
+	// target codex on load, so the legacy block it sends is converted rather
+	// than dropped with the fallback turned off.
+	assertConverted := func(t *testing.T, h *Handler, path string, parts []string) {
+		t.Helper()
+		if savedRoutingNode(t, path, append(append([]string{}, parts...), "claude-fallback")...) != nil {
+			t.Fatalf("%v: legacy node kept", parts)
+		}
+		if node := savedRoutingNode(t, path, append(append([]string{}, parts...), "providers", "claude", "fallback", "target")...); node == nil || node.Value != config.ProviderFallbackCodex {
+			t.Fatalf("%v: stored fallback target = %v, want codex", parts, node)
+		}
+		profile := h.cfg.Routing.SharedProfile()
+		if len(parts) > 0 {
+			profile = *h.cfg.Routing.KeyProfiles[providersWriteKey]
+		}
+		if got := profile.EffectiveProviders().Claude.Fallback; got.Target != config.ProviderFallbackCodex || !reflect.DeepEqual(got.Mappings, wantMappings) {
+			t.Fatalf("%v: fallback = %+v, want target codex with the legacy mappings", parts, got)
+		}
+	}
+	t.Run("read-modify-write of both blocks", func(t *testing.T) {
+		h, path := newRoutingProfilesTestHandler(t, profileRaw("{}"))
+		rec := serveConfigV8(t, h, http.MethodGet, "/v8/management/config/routing", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get status %d: %s", rec.Code, rec.Body.String())
+		}
+		var routing map[string]any
+		if errDecode := json.Unmarshal(rec.Body.Bytes(), &routing); errDecode != nil {
+			t.Fatal(errDecode)
+		}
+		providers, ok := routing["providers"].(map[string]any)
+		if !ok || routing["claude-fallback"] == nil {
+			t.Fatalf("GET did not return both blocks: %s", rec.Body.String())
+		}
+		providers["codex"] = map[string]any{"speed": "fast"}
+		body, errEncode := json.Marshal(routing)
+		if errEncode != nil {
+			t.Fatal(errEncode)
+		}
+		if rec = serveConfigV8(t, h, http.MethodPut, "/v8/management/config/routing", string(body)); rec.Code != http.StatusOK {
+			t.Fatalf("put status %d: %s", rec.Code, rec.Body.String())
+		}
+		assertConverted(t, h, path, nil)
+		assertConverted(t, h, path, keyParts)
+		if got := h.cfg.Routing.SharedProfile().EffectiveProviders().Codex.Speed; got != config.CodexSpeedFast {
+			t.Fatalf("codex speed = %q, want fast", got)
+		}
+	})
+	t.Run("PATCH of both blocks", func(t *testing.T) {
+		h, path := newRoutingProfilesTestHandler(t, profileRaw("{}"))
+		body := `{"routing":{"providers":{"claude":{"fallback":{}}},"claude-fallback":{"enabled":true,"mappings":[{"from":"claude-*","to":"gpt-6-sol"}]}}}`
+		if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", body); rec.Code != http.StatusOK {
+			t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+		}
+		assertConverted(t, h, path, nil)
+		assertLegacyKept(t, path, keyParts)
+	})
 }

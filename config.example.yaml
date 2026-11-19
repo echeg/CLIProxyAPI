@@ -280,7 +280,8 @@ routing:
   #     ignore-client-tier: false
   # Legacy spelling of providers.claude.fallback, still accepted:
   # enabled: true = target: codex, enabled: false = target: off. When a profile has
-  # both, providers.claude.fallback wins and each load warns; a management write
+  # both and providers.claude.fallback is not empty, it wins and each load warns; an
+  # empty one ({}, null) counts as unset and this block applies. A management write
   # that sends this block converts it into providers.claude.fallback.
   # claude-fallback:
   #   enabled: false

@@ -13,7 +13,9 @@ import (
 // providers.claude.fallback wins over the legacy block. For each touched profile
 // (the shared routing node and every key profile present in the write):
 //   - a providers node the write omits is restored from the stored profile;
-//   - a claude-fallback node without providers.claude.fallback in the write is
+//   - a claude-fallback node the write sends next to no or a zero
+//     providers.claude.fallback ({}, null, empty fields), which the load path
+//     reads as unset, such as a profile read back and written whole, is
 //     converted into providers.claude.fallback: enabled -> target codex, disabled
 //     -> target off unless the stored target is api, which is kept; mode and
 //     mappings are copied. Only the fields the write carries are read, never a
@@ -57,7 +59,7 @@ func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node, merge 
 			setConfigV8Child(merged, "providers", cloneConfigV8Node(previous))
 		}
 	}
-	if writtenLegacy := configV8Node(written, []string{"claude-fallback"}); writtenLegacy != nil && configV8Node(written, []string{"providers", "claude", "fallback"}) == nil {
+	if writtenLegacy := configV8Node(written, []string{"claude-fallback"}); writtenLegacy != nil && unsetClaudeFallback(configV8Node(written, []string{"providers", "claude", "fallback"})) {
 		var previous config.RoutingProfile
 		if stored != nil && stored.Kind == yaml.MappingNode && stored.Decode(&previous) != nil {
 			return
@@ -98,24 +100,29 @@ func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node, merge 
 
 // dropsLegacyClaudeFallback reports whether a touched profile's legacy
 // claude-fallback node must be deleted. The load path reads a zero
-// providers.claude.fallback ({}, null, all fields empty) as unset and uses the
-// legacy block, so a stored zero node the write does not name keeps it. A
-// non-zero node, a node that fails to decode, or a node the write itself names
-// (even an empty one, which turns the fallback off) drops it.
+// providers.claude.fallback as unset and uses the legacy block, so a stored
+// zero node the write does not name keeps it. A non-zero node, a node that
+// fails to decode, or a node the write itself names drops it: an empty one
+// named without the legacy block turns the fallback off, and one named next to
+// the legacy block was replaced by its conversion above.
 func dropsLegacyClaudeFallback(merged, written *yaml.Node) bool {
 	path := []string{"providers", "claude", "fallback"}
 	node := configV8Node(merged, path)
 	if node == nil {
 		return false
 	}
-	if configV8Node(written, path) != nil {
+	return configV8Node(written, path) != nil || !unsetClaudeFallback(node)
+}
+
+// unsetClaudeFallback reports whether a providers.claude.fallback node is
+// absent or decodes to a zero fallback ({}, null, all fields empty), which the
+// load path reads as unset. A node that fails to decode counts as set.
+func unsetClaudeFallback(node *yaml.Node) bool {
+	if node == nil {
 		return true
 	}
 	var fallback config.ProviderFallbackConfig
-	if node.Decode(&fallback) != nil {
-		return true
-	}
-	return !fallback.IsZero()
+	return node.Decode(&fallback) == nil && fallback.IsZero()
 }
 
 // writesInsideClaudeFallback reports whether a write path points below a

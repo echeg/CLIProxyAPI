@@ -72,7 +72,10 @@ the whole configuration file, so it is the same for every path. A write
 (`PUT`, `PATCH`, `DELETE`) may send that tag in `If-Match`; when the file has
 changed since, the write returns `412` `{"error": "precondition_failed"}` with
 the `ETag` of the current file and leaves the file unchanged. `If-Match: *`
-matches any version, and a write without `If-Match` is unconditional.
+matches any version, and a write without `If-Match` is unconditional. The
+comparison is strong: a list of tags matches when one of them does, while a
+weak tag (`W/"..."`, as a compressing proxy may send) or a malformed tag never
+matches, and an `If-Match` header that is present but blank returns `412`.
 
 A successful write answers with the tag of the bytes it wrote (after layout
 and comment normalization), not of a second read of the file. Chain that tag
@@ -815,7 +818,8 @@ Writes that still use the legacy `claude-fallback` block (older panels send it
 with each profile and no `providers`) are merged into the stored `providers`
 instead of replacing it, so an older client cannot wipe API settings. For the
 shared profile and each key profile in the write that carries `claude-fallback`
-and no `providers.claude.fallback`:
+and no `providers.claude.fallback`, or an empty one (`{}`, `null`, or all fields
+empty, which load reads as unset, as in a profile read back and written whole):
 
 - The stored `providers` of that profile is kept; only
   `providers.claude.fallback` is updated from the legacy block.
@@ -834,13 +838,16 @@ and no `providers.claude.fallback`:
   `api`, which is kept.
 - The legacy node is removed from the file once `providers.claude.fallback` is
   set, so the file carries one spelling per profile. This applies to the shared
-  profile on every write that carries `routing` and to each key profile the
-  write names. An empty `providers.claude.fallback` (`{}`, `null`, or all fields
-  empty) that the write does not name leaves the legacy block in place: load
-  reads such a node as unset and uses the legacy block, so a write that only
-  changes another field, such as `providers.codex.speed`, keeps the Claude ->
-  Codex fallback. A write that names an empty `providers.claude.fallback`
-  removes the legacy block, which turns the fallback off.
+  profile on every `PUT` or `PATCH` that carries `routing` and to each key
+  profile the write names; a `DELETE` of another path leaves the legacy node as
+  it is. An empty
+  `providers.claude.fallback` (`{}`, `null`, or all fields empty) that the write
+  does not name leaves the legacy block in place: load reads such a node as
+  unset and uses the legacy block, so a write that only changes another field,
+  such as `providers.codex.speed`, keeps the Claude -> Codex fallback. A write
+  that names an empty `providers.claude.fallback` without sending the legacy
+  block removes the stored legacy block, which turns the fallback off; this
+  includes a `PUT` of `routing/providers` read back with its empty Claude node.
 - A `PUT` of a whole profile that omits `providers` keeps the stored `providers`
   of that profile as well. YAML document writes (`/config.yaml`) are stored as
   sent.
