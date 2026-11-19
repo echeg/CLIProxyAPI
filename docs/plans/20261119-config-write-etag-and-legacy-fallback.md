@@ -82,11 +82,11 @@
 - [x] run `go test ./internal/api/handlers/management/ ./internal/config/` - must pass before task 3
 
 ### Task 3: Verify acceptance criteria
-- [ ] verify both items of the Overview against the code and the new tests
-- [ ] run `gofmt -l .` (no output) and `go vet ./...`
-- [ ] run `go build -o test-output ./cmd/server && rm test-output`
-- [ ] run `go test ./...`
-- [ ] run `go test -race ./internal/api/handlers/management/`
+- [x] verify both items of the Overview against the code and the new tests
+- [x] run `gofmt -l .` (no output) and `go vet ./...`
+- [x] run `go build -o test-output ./cmd/server && rm test-output`
+- [x] run `go test ./...`
+- [x] run `go test -race ./internal/api/handlers/management/`
 
 ### Task 4: [Final] Update documentation
 - [ ] in `docs/management-api-v8.md`, add a short section on `ETag` and `If-Match` for `/v8/management/config`: the tag is a hash of the config file, a write with a stale `If-Match` returns `412`, and a write answers with the tag of the bytes it wrote
