@@ -73,13 +73,13 @@
 - [x] run `go test ./internal/api/handlers/management/ ./sdk/api/...` - must pass before task 2
 
 ### Task 2: Keep the legacy claude-fallback next to a zero fallback node the write does not name
-- [ ] in `mergeLegacyClaudeFallbackProfile` (`routing_providers_write.go:91-93`), delete `claude-fallback` only when the merged `providers.claude.fallback` node decodes to a non-zero `config.ProviderFallbackConfig`, or when `written` carries a `providers.claude.fallback` node; a node that fails to decode still deletes, as today
-- [ ] update the function comment ("the legacy node is dropped once providers.claude.fallback is set") to state the rule
-- [ ] write tests in `routing_providers_write_test.go` for the shared profile holding `providers.claude.fallback: {}` next to an enabled legacy block: a `PATCH` of `routing.providers.codex.speed` and a `PATCH` of `routing.providers.codex.disabled` keep the legacy block, and `config.LoadConfig` of the file still reports the Claude fallback target `codex` with its mappings
-- [ ] write the same test for a key profile with that shape, written through `routing.key-profiles.<key>.providers.codex.speed`, and check that a write naming only that key profile also keeps the shared profile's legacy block
-- [ ] write tests for `providers.claude.fallback: null` and for a node with all fields empty, stored next to the legacy block
-- [ ] write tests that today's behaviour stays: a write that names `providers.claude.fallback` (empty, and with `target: off`) drops the legacy block; a stored non-zero node drops it on any routing write; a legacy-only write is still converted and dropped
-- [ ] run `go test ./internal/api/handlers/management/ ./internal/config/` - must pass before task 3
+- [x] in `mergeLegacyClaudeFallbackProfile` (`routing_providers_write.go:91-93`), delete `claude-fallback` only when the merged `providers.claude.fallback` node decodes to a non-zero `config.ProviderFallbackConfig`, or when `written` carries a `providers.claude.fallback` node; a node that fails to decode still deletes, as today
+- [x] update the function comment ("the legacy node is dropped once providers.claude.fallback is set") to state the rule
+- [x] write tests in `routing_providers_write_test.go` for the shared profile holding `providers.claude.fallback: {}` next to an enabled legacy block: a `PATCH` of `routing.providers.codex.speed` and a `PATCH` of `routing.providers.codex.disabled` keep the legacy block, and `config.LoadConfig` of the file still reports the Claude fallback target `codex` with its mappings
+- [x] write the same test for a key profile with that shape, written through `routing.key-profiles.<key>.providers.codex.speed`, and check that a write naming only that key profile also keeps the shared profile's legacy block
+- [x] write tests for `providers.claude.fallback: null` and for a node with all fields empty, stored next to the legacy block
+- [x] write tests that today's behaviour stays: a write that names `providers.claude.fallback` (empty, and with `target: off`) drops the legacy block; a stored non-zero node drops it on any routing write; a legacy-only write is still converted and dropped
+- [x] run `go test ./internal/api/handlers/management/ ./internal/config/` - must pass before task 3
 
 ### Task 3: Verify acceptance criteria
 - [ ] verify both items of the Overview against the code and the new tests

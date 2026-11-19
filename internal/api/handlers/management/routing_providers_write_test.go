@@ -369,3 +369,86 @@ func TestConfigV8InvalidProvidersWriteRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigV8LegacyClaudeFallbackNextToZeroNode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	legacy := "claude-fallback: {enabled: true, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}"
+	wantMappings := []config.ClaudeFallbackMapping{{From: "claude-*", To: "gpt-6-sol"}}
+	keyParts := []string{"key-profiles", providersWriteKey}
+	// profileRaw renders a file whose shared profile and key profile both hold
+	// the given claude.fallback node next to an enabled legacy block.
+	profileRaw := func(fallback string) string {
+		providers := "providers: {claude: {fallback: " + fallback + "}}"
+		return "config-version: 8\naccess:\n  api-keys: [\"" + providersWriteKey + "\"]\nrouting:\n" +
+			"  " + providers + "\n  " + legacy + "\n" +
+			"  key-profiles:\n    \"" + providersWriteKey + "\":\n      " + providers + "\n      " + legacy + "\n"
+	}
+	// assertLegacyKept checks that the legacy node is still on disk for a
+	// profile and that the loaded config still routes Claude to Codex.
+	assertLegacyKept := func(t *testing.T, path string, parts []string) {
+		t.Helper()
+		if savedRoutingNode(t, path, append(append([]string{}, parts...), "claude-fallback")...) == nil {
+			t.Fatalf("%v: legacy claude-fallback node dropped", parts)
+		}
+		loaded, errLoad := config.LoadConfig(path)
+		if errLoad != nil {
+			t.Fatal(errLoad)
+		}
+		profile := loaded.Routing.SharedProfile()
+		if len(parts) > 0 {
+			profile = *loaded.Routing.KeyProfiles[providersWriteKey]
+		}
+		got := profile.EffectiveProviders().Claude.Fallback
+		if got.Target != config.ProviderFallbackCodex || !reflect.DeepEqual(got.Mappings, wantMappings) {
+			t.Fatalf("%v: fallback = %+v, want target codex with the legacy mappings", parts, got)
+		}
+	}
+
+	for _, zero := range []struct{ name, node string }{
+		{"empty", "{}"},
+		{"null", "null"},
+		{"empty-fields", "{target: \"\", mode: \"\", mappings: []}"},
+	} {
+		for _, write := range []struct{ name, body string }{
+			{"shared-speed", `{"routing":{"providers":{"codex":{"speed":"fast"}}}}`},
+			{"shared-disabled", `{"routing":{"providers":{"codex":{"disabled":true}}}}`},
+			{"key-speed", `{"routing":{"key-profiles":{"` + providersWriteKey + `":{"providers":{"codex":{"speed":"fast"}}}}}}`},
+		} {
+			t.Run(zero.name+"/"+write.name, func(t *testing.T) {
+				h, path := newRoutingProfilesTestHandler(t, profileRaw(zero.node))
+				if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", write.body); rec.Code != http.StatusOK {
+					t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+				}
+				assertLegacyKept(t, path, nil)
+				assertLegacyKept(t, path, keyParts)
+				if savedRoutingNode(t, path, "providers", "claude", "fallback") == nil {
+					t.Fatal("stored zero fallback node dropped")
+				}
+			})
+		}
+	}
+
+	// A write naming providers.claude.fallback, a stored non-zero node and a
+	// legacy-only write still drop the legacy block, as before.
+	for _, tc := range []struct{ name, stored, body, wantTarget string }{
+		{"write names an empty node", "{}", `{"routing":{"providers":{"claude":{"fallback":{}}}}}`, config.ProviderFallbackOff},
+		{"write names target off", "{}", `{"routing":{"providers":{"claude":{"fallback":{"target":"off"}}}}}`, config.ProviderFallbackOff},
+		{"stored non-zero node", "{target: codex, mappings: [{from: \"claude-*\", to: \"gpt-6-sol\"}]}", `{"routing":{"providers":{"codex":{"speed":"fast"}}}}`, config.ProviderFallbackCodex},
+		{"legacy-only write", "{}", `{"routing":{"claude-fallback":{"enabled":true,"mappings":[{"from":"claude-*","to":"gpt-6-sol"}]}}}`, config.ProviderFallbackCodex},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, path := newRoutingProfilesTestHandler(t, profileRaw(tc.stored))
+			if rec := serveConfigV8(t, h, http.MethodPatch, "/v8/management/config", tc.body); rec.Code != http.StatusOK {
+				t.Fatalf("patch status %d: %s", rec.Code, rec.Body.String())
+			}
+			if savedRoutingNode(t, path, "claude-fallback") != nil {
+				t.Fatal("shared legacy node kept")
+			}
+			if got := h.cfg.Routing.SharedProfile().EffectiveProviders().Claude.Fallback.Target; got != tc.wantTarget {
+				t.Fatalf("target = %q, want %q", got, tc.wantTarget)
+			}
+			// The key profile is not named by the write and keeps its shape.
+			assertLegacyKept(t, path, keyParts)
+		})
+	}
+}

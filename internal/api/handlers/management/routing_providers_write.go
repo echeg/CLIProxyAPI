@@ -21,7 +21,10 @@ import (
 //     applies them over the stored effective fallback, so a partial patch such
 //     as {"enabled": false} keeps the stored mode and mappings even after the
 //     legacy node was converted, and a null field or block resets that field;
-//   - the legacy node is dropped once providers.claude.fallback is set.
+//   - the legacy node is dropped once providers.claude.fallback is non-zero or
+//     the write names it; a stored zero node ({}, null, empty fields) the write
+//     does not name leaves the legacy block in place, since the load path reads
+//     such a node as unset (see dropsLegacyClaudeFallback).
 //
 // root is the merged document, before the stored one, and patch the written
 // value placed at its config path; patch must not share nodes with root. merge
@@ -88,9 +91,31 @@ func mergeLegacyClaudeFallbackProfile(merged, stored, written *yaml.Node, merge 
 		providers := ensureConfigV8Mapping(merged, "providers")
 		setConfigV8Child(ensureConfigV8Mapping(providers, "claude"), "fallback", &node)
 	}
-	if configV8Node(merged, []string{"providers", "claude", "fallback"}) != nil {
+	if dropsLegacyClaudeFallback(merged, written) {
 		deleteConfigV8Path(merged, []string{"claude-fallback"})
 	}
+}
+
+// dropsLegacyClaudeFallback reports whether a touched profile's legacy
+// claude-fallback node must be deleted. The load path reads a zero
+// providers.claude.fallback ({}, null, all fields empty) as unset and uses the
+// legacy block, so a stored zero node the write does not name keeps it. A
+// non-zero node, a node that fails to decode, or a node the write itself names
+// (even an empty one, which turns the fallback off) drops it.
+func dropsLegacyClaudeFallback(merged, written *yaml.Node) bool {
+	path := []string{"providers", "claude", "fallback"}
+	node := configV8Node(merged, path)
+	if node == nil {
+		return false
+	}
+	if configV8Node(written, path) != nil {
+		return true
+	}
+	var fallback config.ProviderFallbackConfig
+	if node.Decode(&fallback) != nil {
+		return true
+	}
+	return !fallback.IsZero()
 }
 
 // writesInsideClaudeFallback reports whether a write path points below a
