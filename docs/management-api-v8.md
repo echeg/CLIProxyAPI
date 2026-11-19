@@ -64,6 +64,22 @@ The Home-owned revision fields
 `credentials.concurrency.observation-barrier-revision`, and `plugins.auth-revision`
 cannot be changed through these endpoints.
 
+### ETag and If-Match
+
+Successful reads and writes of `/config`, `/config.yaml`, and
+`/config/<section>/<field>` carry an `ETag`: a strong tag holding the SHA-256 of
+the whole configuration file, so it is the same for every path. A write
+(`PUT`, `PATCH`, `DELETE`) may send that tag in `If-Match`; when the file has
+changed since, the write returns `412` `{"error": "precondition_failed"}` with
+the `ETag` of the current file and leaves the file unchanged. `If-Match: *`
+matches any version, and a write without `If-Match` is unconditional.
+
+A successful write answers with the tag of the bytes it wrote (after layout
+and comment normalization), not of a second read of the file. Chain that tag
+into the next `If-Match`: if another writer replaced the file in between, the
+next write returns `412` instead of overwriting a file the client never saw. A
+failed write (`500` `write_failed`) carries no `ETag`.
+
 ### Subscription priority and session affinity
 
 To prefer Codex and Claude accounts whose subscription quotas reset soonest,
@@ -171,9 +187,10 @@ routing:
 The legacy spelling `routing.claude-fallback: {enabled, mode, mappings}` is
 still accepted in the shared profile and in key profiles. `enabled: true`
 means `target: codex` and `enabled: false` means `target: off`; `mode` and
-`mappings` are kept. When a profile carries both blocks,
-`providers.claude.fallback` wins and the legacy block is ignored with a
-warning on every load. A file that is only loaded keeps its legacy block. A
+`mappings` are kept. When a profile carries both blocks and
+`providers.claude.fallback` is not empty, it wins and the legacy block is
+ignored with a warning on every load; an empty node (`{}`, `null`, or all
+fields empty) counts as unset, so the legacy block applies. A file that is only loaded keeps its legacy block. A
 configuration write that sends the legacy block converts it into
 `providers.claude.fallback` and removes the legacy node (see
 [Writing profiles](#writing-profiles)); delete an ignored legacy block by hand
@@ -816,7 +833,14 @@ and no `providers.claude.fallback`:
   `providers.claude.fallback` (the fallback is then `off`), unless the target is
   `api`, which is kept.
 - The legacy node is removed from the file once `providers.claude.fallback` is
-  set, so the file carries one spelling per profile.
+  set, so the file carries one spelling per profile. This applies to the shared
+  profile on every write that carries `routing` and to each key profile the
+  write names. An empty `providers.claude.fallback` (`{}`, `null`, or all fields
+  empty) that the write does not name leaves the legacy block in place: load
+  reads such a node as unset and uses the legacy block, so a write that only
+  changes another field, such as `providers.codex.speed`, keeps the Claude ->
+  Codex fallback. A write that names an empty `providers.claude.fallback`
+  removes the legacy block, which turns the fallback off.
 - A `PUT` of a whole profile that omits `providers` keeps the stored `providers`
   of that profile as well. YAML document writes (`/config.yaml`) are stored as
   sent.

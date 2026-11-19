@@ -89,9 +89,9 @@
 - [x] run `go test -race ./internal/api/handlers/management/`
 
 ### Task 4: [Final] Update documentation
-- [ ] in `docs/management-api-v8.md`, add a short section on `ETag` and `If-Match` for `/v8/management/config`: the tag is a hash of the config file, a write with a stale `If-Match` returns `412`, and a write answers with the tag of the bytes it wrote
-- [ ] in the legacy write rules of `docs/management-api-v8.md` (near "Writes that still use the legacy `claude-fallback` block"), state that an empty `providers.claude.fallback` the write does not name leaves the legacy block in place
-- [ ] update `AGENTS.md` only if it describes either behaviour
+- [x] in `docs/management-api-v8.md`, add a short section on `ETag` and `If-Match` for `/v8/management/config`: the tag is a hash of the config file, a write with a stale `If-Match` returns `412`, and a write answers with the tag of the bytes it wrote
+- [x] in the legacy write rules of `docs/management-api-v8.md` (near "Writes that still use the legacy `claude-fallback` block"), state that an empty `providers.claude.fallback` the write does not name leaves the legacy block in place
+- [x] update `AGENTS.md` only if it describes either behaviour (no change: it describes neither the write ETag nor the write-side legacy rule)
 
 ## Technical Details
 - `writeConfigBytes` returns the bytes after `NormalizeConfigLayout` and `NormalizeCommentIndentation`, the same slice it passes to `f.Write`.
